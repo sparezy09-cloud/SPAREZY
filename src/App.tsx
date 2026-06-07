@@ -84,25 +84,6 @@ export default function App() {
 
   useEffect(() => {
     const checkSessionAndInitialize = async () => {
-      // Check if this was a refresh/reload
-      const isRefresh = 
-        (window.performance && window.performance.navigation && window.performance.navigation.type === 1) ||
-        (performance.getEntriesByType && performance.getEntriesByType('navigation')[0] && (performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming).type === 'reload');
-
-      if (isRefresh) {
-        console.log("⚡ [Session Manager] Tab refreshed detected. Forcing logout.");
-        db.setActiveBrand(null);
-        db.setActiveUser(null);
-        sessionStorage.removeItem('sparezy_session_active');
-        if (supabase) {
-          try {
-            await supabase.auth.signOut();
-          } catch (e) {
-            console.warn("Failed to sign out from Supabase on reload check:", e);
-          }
-        }
-      }
-
       // If there is no active tab-bound session, clear the previous login to enforce logout-on-close
       const isNewSession = !sessionStorage.getItem('sparezy_session_active');
       let otherTabExists = false;
