@@ -41,9 +41,9 @@ app.get("/api/health", (req, res) => {
 // AI Scanning endpoint using Gemini with Fallback
 app.post("/api/gemini/scan-invoice", async (req, res) => {
   try {
-    const { fileBase64, mimeType } = req.body;
-    if (!fileBase64 || !mimeType) {
-       res.status(400).json({ error: "Missing fileBase64 or mimeType payload." });
+    const { fileBase64, mimeType, files } = req.body;
+    if ((!fileBase64 || !mimeType) && (!files || !Array.isArray(files) || files.length === 0)) {
+       res.status(400).json({ error: "Missing fileBase64, mimeType, or multiple files array payload." });
        return;
     }
 
@@ -77,14 +77,26 @@ DATA TO EXTRACT:
 Ensure numerical values are clean numbers. 
 Return the data strictly as a JSON object matching the requested schema.`;
 
-    const filePart = {
-      inlineData: {
-        mimeType: mimeType,
-        data: fileBase64
+    const parts: any[] = [];
+    if (files && Array.isArray(files)) {
+      for (const f of files) {
+        parts.push({
+          inlineData: {
+            mimeType: f.mimeType,
+            data: f.fileBase64
+          }
+        });
       }
-    };
+    } else if (fileBase64 && mimeType) {
+      parts.push({
+        inlineData: {
+          mimeType: mimeType,
+          data: fileBase64
+        }
+      });
+    }
 
-    const textPart = { text: prompt };
+    parts.push({ text: prompt });
 
     const schemaConfig = {
       responseMimeType: "application/json",
@@ -137,7 +149,7 @@ Return the data strictly as a JSON object matching the requested schema.`;
       console.log(`[AI SCAN] Initiating main call: gemini-3.5-flash`);
       const response = await ai.models.generateContent({
         model: "gemini-3.5-flash",
-        contents: { parts: [filePart, textPart] },
+        contents: { parts },
         config: schemaConfig
       });
 
@@ -163,7 +175,7 @@ Return the data strictly as a JSON object matching the requested schema.`;
       console.log(`[AI SCAN] Falling back gracefully to gemini-3.1-flash-lite`);
       const responseFallback = await ai.models.generateContent({
         model: "gemini-3.1-flash-lite",
-        contents: { parts: [filePart, textPart] },
+        contents: { parts },
         config: schemaConfig
       });
 

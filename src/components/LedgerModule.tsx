@@ -1,6 +1,7 @@
 import { useState, useMemo, useEffect } from 'react';
 import { Brand, User, Customer, Sale, ReturnRecord, Purchase, PurchaseItem } from '../types';
 import { db } from '../dbStore';
+import * as XLSX from 'xlsx';
 import { 
   Users, Calendar, Download, Printer, ArrowRight, 
   HelpCircle, CheckCircle, FileSpreadsheet, Building2, Eye, X 
@@ -127,21 +128,53 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
 
   // --- EXPORTERS & PRINTERS SIMULATION ---
 
-  // EXPORT CUSTOMER LEDGER TO EXCEL (CSV)
-  const handleExportCustomerCSV = () => {
-    let rowContent = "Customer Name,Category,Sales Count,Total Sales (INR),Total Paid (INR),Returns Refund (INR),Pending Balance (INR)\n";
-    customerLedgers.forEach(row => {
-      rowContent += `"${row.name}","${row.category}",${row.salesCount},${row.totalSalesBilled.toFixed(2)},${row.totalPaid.toFixed(2)},${row.totalReturnedAmount.toFixed(2)},${row.finalBalance.toFixed(2)}\n`;
-    });
+  // EXPORT CUSTOMER LEDGER TO EXCEL or CSV (using SheetJS)
+  const handleExportCustomer = (format: 'xlsx' | 'csv') => {
+    const formattedData = customerLedgers.map(row => ({
+      "Customer Name": row.name,
+      "Category": row.category,
+      "Invoices Billed": row.salesCount,
+      "Aggregate Sales (INR)": row.totalSalesBilled,
+      "Cleared Payments (INR)": row.totalPaid,
+      "Returns Refund (INR)": row.totalReturnedAmount,
+      "Outstanding Balance (INR)": row.finalBalance
+    }));
 
-    const blob = new Blob([rowContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", `Sparezy_${brand}_Customer_Ledger_Export.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    const worksheet = XLSX.utils.json_to_sheet(formattedData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Customer Ledger");
+
+    const stamp = new Date().toISOString().split('T')[0];
+    const fileName = `Sparezy_${brand}_Customer_Ledger_${stamp}`;
+
+    if (format === 'xlsx') {
+      XLSX.writeFile(workbook, `${fileName}.xlsx`);
+    } else {
+      XLSX.writeFile(workbook, `${fileName}.csv`, { bookType: 'csv' });
+    }
+  };
+
+  // EXPORT ALL DEALERS TO EXCEL or CSV (using SheetJS)
+  const handleExportAllDealers = (format: 'xlsx' | 'csv') => {
+    const formattedData = dealerLedgers.map(row => ({
+      "Dealer Supplier": row.dealer_name,
+      "Invoices Count": row.invoiceCount,
+      "Total Purchased Valuation (INR)": row.totalPurchasedValuation,
+      "Total Discounts Saved (INR)": row.totalDiscountAmount
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(formattedData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Dealers Aggregate");
+
+    const stamp = new Date().toISOString().split('T')[0];
+    const fileName = `Sparezy_${brand}_Dealers_Ledger_${stamp}`;
+
+    if (format === 'xlsx') {
+      XLSX.writeFile(workbook, `${fileName}.xlsx`);
+    } else {
+      XLSX.writeFile(workbook, `${fileName}.csv`, { bookType: 'csv' });
+    }
   };
 
   // EXPORT CUSTOMER LEDGER TO PDF (Trigger Print Layout)
@@ -175,26 +208,29 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
     }
   };
 
-  // EXPORT DEALER RECORD TO EXCEL (CSV)
-  const handleExportDealerCSV = (record: typeof dealerLedgers[0]) => {
-    let rowContent = `Dealer Ledger for: ${record.dealer_name}\n`;
-    rowContent += "Invoice No,Invoice Date,Pre-Discount Amount (INR),Discount (INR),Total Paid Amount (INR)\n";
-    
-    record.invoicesList.forEach(inv => {
-      rowContent += `"${inv.invoice_no}","${new Date(inv.invoice_date).toLocaleDateString()}",${inv.subtotal.toFixed(2)},${inv.discount_amount.toFixed(2)},${inv.total_after_discount.toFixed(2)}\n`;
-    });
+  // EXPORT DEALER RECORD TO EXCEL or CSV (using SheetJS)
+  const handleExportDealer = (record: typeof dealerLedgers[0], format: 'xlsx' | 'csv') => {
+    const formattedData = record.invoicesList.map(inv => ({
+      "Invoice No": inv.invoice_no,
+      "Invoice Date": new Date(inv.invoice_date).toLocaleDateString(),
+      "Pre-Discount Amount (INR)": inv.subtotal,
+      "Discount (INR)": inv.discount_amount,
+      "Total Paid Amount (INR)": inv.total_after_discount
+    }));
 
-    rowContent += `\nSUMMARY,Total Purchases,Total Saved Discount\n`;
-    rowContent += `,₹${record.totalPurchasedValuation.toFixed(2)},₹${record.totalDiscountAmount.toFixed(2)}\n`;
+    const worksheet = XLSX.utils.json_to_sheet(formattedData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Dealer Ledger");
 
-    const blob = new Blob([rowContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", `Ledger_${record.dealer_name.replace(/\s+/g, '_')}_Record.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    const safeDealerName = record.dealer_name.replace(/\s+/g, '_');
+    const stamp = new Date().toISOString().split('T')[0];
+    const fileName = `Ledger_${safeDealerName}_Invoices_${stamp}`;
+
+    if (format === 'xlsx') {
+      XLSX.writeFile(workbook, `${fileName}.xlsx`);
+    } else {
+      XLSX.writeFile(workbook, `${fileName}.csv`, { bookType: 'csv' });
+    }
   };
 
   return (
@@ -283,17 +319,24 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
         <div className="space-y-4">
           
           {/* Action utility bar for exports */}
-          <div className="flex gap-2 justify-end text-xs font-bold">
+          <div className="flex gap-2 justify-end text-xs font-bold flex-wrap">
             <button
-              onClick={handleExportCustomerCSV}
-              className="bg-white border border-slate-200 hover:border-indigo-400 text-slate-700 px-3.5 py-2 rounded-xl inline-flex items-center gap-1.5 cursor-pointer shadow-sm"
+              onClick={() => handleExportCustomer('xlsx')}
+              className="bg-white border border-slate-200 hover:border-indigo-400 text-slate-700 px-3.5 py-2 rounded-xl inline-flex items-center gap-1.5 cursor-pointer shadow-sm transition"
             >
               <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-              Download Excel (CSV)
+              Export Excel (.xlsx)
+            </button>
+            <button
+              onClick={() => handleExportCustomer('csv')}
+              className="bg-white border border-slate-200 hover:border-indigo-400 text-slate-700 px-3.5 py-2 rounded-xl inline-flex items-center gap-1.5 cursor-pointer shadow-sm transition"
+            >
+              <FileSpreadsheet className="w-4 h-4 text-teal-650" />
+              Export CSV (.csv)
             </button>
             <button
               onClick={handlePrintLedgerPdf}
-              className="bg-white border border-slate-200 hover:border-indigo-400 text-indigo-700 px-3.5 py-2 rounded-xl inline-flex items-center gap-1.5 cursor-pointer shadow-sm"
+              className="bg-white border border-slate-200 hover:border-indigo-400 text-indigo-700 px-3.5 py-2 rounded-xl inline-flex items-center gap-1.5 cursor-pointer shadow-sm transition"
             >
               <Printer className="w-4 h-4" />
               Print Balances Sheet PDF
@@ -361,8 +404,22 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden lg:col-span-2">
-            <div className="p-4 bg-slate-50 border-b border-slate-200 font-extrabold text-xs uppercase tracking-wide">
-              Dealer purchasing metrics Aggregation
+            <div className="p-4 bg-slate-50 border-b border-slate-200 font-extrabold text-xs uppercase tracking-wide flex justify-between items-center flex-wrap gap-2">
+              <span>Dealer purchasing metrics Aggregation</span>
+              <div className="flex gap-2 text-[10px] font-bold">
+                <button
+                  onClick={() => handleExportAllDealers('xlsx')}
+                  className="bg-white border border-slate-200 text-slate-700 px-2.5 py-1 rounded-lg hover:border-emerald-400 hover:text-emerald-700 cursor-pointer shadow-xs transition"
+                >
+                  Export All (XLSX)
+                </button>
+                <button
+                  onClick={() => handleExportAllDealers('csv')}
+                  className="bg-white border border-slate-200 text-slate-700 px-2.5 py-1 rounded-lg hover:border-teal-400 hover:text-teal-700 cursor-pointer shadow-xs transition"
+                >
+                  Export All (CSV)
+                </button>
+              </div>
             </div>
 
             <div className="overflow-x-auto text-xs font-semibold text-slate-650">
@@ -394,11 +451,20 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
                           <Eye className="w-3.5 h-3.5" />
                           View Invoices
                         </button>
+                        <span className="text-slate-300">|</span>
                         <button
-                          onClick={() => handleExportDealerCSV(row)}
-                          className="p-1 px-1.5 hover:bg-emerald-50 text-emerald-700 rounded-lg text-[10px] border border-transparent"
+                          onClick={() => handleExportDealer(row, 'xlsx')}
+                          className="px-1.5 py-0.5 mt-0.5 text-[10px] bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-md font-bold cursor-pointer"
+                          title="Export Dealer Invoices to XLSX"
                         >
-                          Export
+                          XLSX
+                        </button>
+                        <button
+                          onClick={() => handleExportDealer(row, 'csv')}
+                          className="px-1.5 py-0.5 mt-0.5 text-[10px] bg-teal-50 hover:bg-teal-100 text-teal-700 rounded-md font-bold cursor-pointer"
+                          title="Export Dealer Invoices to CSV"
+                        >
+                          CSV
                         </button>
                       </td>
                     </tr>
@@ -450,17 +516,28 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
                   ))}
                 </div>
 
-                <button
-                  onClick={() => {
-                    // Export this group specifically
-                    const rec = dealerLedgers.find(dl => dl.dealer_name === activeDealerName);
-                    if (rec) handleExportDealerCSV(rec);
-                  }}
-                  className="w-full bg-slate-950 hover:bg-black text-white py-2.5 rounded-xl font-bold text-center mt-2 cursor-pointer flex items-center justify-center gap-1"
-                >
-                  <Download className="w-4 h-4" />
-                  Export All Invoices list
-                </button>
+                <div className="flex gap-2 mt-2">
+                  <button
+                    onClick={() => {
+                      const rec = dealerLedgers.find(dl => dl.dealer_name === activeDealerName);
+                      if (rec) handleExportDealer(rec, 'xlsx');
+                    }}
+                    className="flex-1 bg-slate-900 hover:bg-black text-white py-2.5 rounded-xl text-xs font-bold text-center cursor-pointer flex items-center justify-center gap-1"
+                  >
+                    <Download className="w-3.5 h-3.5 text-emerald-450" />
+                    XLSX
+                  </button>
+                  <button
+                    onClick={() => {
+                      const rec = dealerLedgers.find(dl => dl.dealer_name === activeDealerName);
+                      if (rec) handleExportDealer(rec, 'csv');
+                    }}
+                    className="flex-1 bg-slate-800 hover:bg-slate-750 text-slate-250 py-2.5 rounded-xl text-xs font-bold text-center cursor-pointer flex items-center justify-center gap-1"
+                  >
+                    <Download className="w-3.5 h-3.5 text-teal-450" />
+                    CSV
+                  </button>
+                </div>
 
               </div>
             ) : (

@@ -1,9 +1,10 @@
 import React, { useState, useMemo } from 'react';
 import { Brand, User, InventoryItem } from '../types';
 import { db } from '../dbStore';
+import * as XLSX from 'xlsx';
 import { 
   Search, EyeOff, Archive, CheckCircle2, Pencil, 
-  Trash2, Plus, ArrowLeft, ArrowRight, X, Layers
+  Trash2, Plus, ArrowLeft, ArrowRight, X, Layers, Download, FileSpreadsheet
 } from 'lucide-react';
 
 interface InventoryModuleProps {
@@ -26,7 +27,13 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   // Modals
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
   const [isNewModalOpen, setIsNewModalOpen] = useState(false);
+  const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [exportSource, setExportSource] = useState<'filtered' | 'selected' | 'page' | 'full' | 'full_archived'>('filtered');
+  const [exportFormat, setExportFormat] = useState<'xlsx' | 'csv'>('xlsx');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [isInlineEditMode, setIsInlineEditMode] = useState(false);
+  const [inlineEdits, setInlineEdits] = useState<Record<string, { part_name: string; quantity: number }>>({});
+  const [deletingItemConfirm, setDeletingItemConfirm] = useState<InventoryItem | null>(null);
 
   // Form Fields for Manual Create/Edit
   const [formPartNo, setFormPartNo] = useState('');
@@ -216,6 +223,129 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
     triggerToast(`Created part ${formPartNo.toUpperCase()} successfully.`);
   };
 
+  const handleInlineChangeName = (id: string, name: string, currentItem: InventoryItem) => {
+    setInlineEdits(prev => {
+      const existing = prev[id] || { part_name: currentItem.part_name, quantity: currentItem.quantity };
+      return {
+        ...prev,
+        [id]: { ...existing, part_name: name }
+      };
+    });
+  };
+
+  const handleInlineChangeQuantity = (id: string, qty: number, currentItem: InventoryItem) => {
+    setInlineEdits(prev => {
+      const existing = prev[id] || { part_name: currentItem.part_name, quantity: currentItem.quantity };
+      return {
+        ...prev,
+        [id]: { ...existing, quantity: qty }
+      };
+    });
+  };
+
+  const handleInlineSave = (item: InventoryItem) => {
+    const edit = inlineEdits[item.id];
+    if (!edit) return;
+
+    if (!edit.part_name.trim()) {
+      alert("Part name cannot be empty.");
+      return;
+    }
+
+    db.addOrUpdateInventoryPart(brand, {
+      part_no: item.part_no,
+      part_name: edit.part_name.trim(),
+      hsn: item.hsn,
+      mrp: item.mrp,
+      quantity: Number(edit.quantity),
+      is_active: item.is_active
+    }, user);
+
+    setInlineEdits(prev => {
+      const next = { ...prev };
+      delete next[item.id];
+      return next;
+    });
+
+    refreshList();
+    triggerToast(`Successfully saved ${item.part_no} details.`);
+  };
+
+  const handleInlineDeleteConfirmed = (item: InventoryItem) => {
+    db.deleteInventoryPart(brand, item.id, user);
+    
+    setInlineEdits(prev => {
+      const next = { ...prev };
+      delete next[item.id];
+      return next;
+    });
+
+    setDeletingItemConfirm(null);
+    refreshList();
+    triggerToast(`Deleted part ${item.part_no} successfully.`);
+  };
+
+  const handleOpenExportModal = () => {
+    if (selectedIds.length > 0 || selectionMode === 'all_filtered') {
+      setExportSource('selected');
+    } else if (search.trim().length > 0) {
+      setExportSource('filtered');
+    } else {
+      setExportSource('full');
+    }
+    setIsExportModalOpen(true);
+  };
+
+  const handleExportInventory = () => {
+    let sourceData: InventoryItem[] = [];
+
+    if (exportSource === 'selected') {
+      if (selectionMode === 'all_filtered') {
+        sourceData = filteredList;
+      } else {
+        sourceData = inventoryList.filter(item => selectedIds.includes(item.id));
+      }
+    } else if (exportSource === 'filtered') {
+      sourceData = filteredList;
+    } else if (exportSource === 'page') {
+      sourceData = paginatedList;
+    } else if (exportSource === 'full') {
+      sourceData = db.getInventory(brand, false); // Active only
+    } else if (exportSource === 'full_archived') {
+      sourceData = db.getInventory(brand, true); // Active + Archived
+    }
+
+    if (sourceData.length === 0) {
+      alert("No inventory data found to export matching your selection.");
+      return;
+    }
+
+    const formatted = sourceData.map(item => ({
+      "Part Number": item.part_no,
+      "Part Name": item.part_name,
+      "Quantity in Stock": item.quantity,
+      "HSN Code": item.hsn || '',
+      "MRP (INR)": item.mrp,
+      "Status": item.is_active ? "Active" : "Archived"
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(formatted);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Inventory List");
+
+    const stamp = new Date().toISOString().split('T')[0];
+    const fileName = `Sparezy_${brand}_Inventory_${stamp}`;
+
+    if (exportFormat === 'xlsx') {
+      XLSX.writeFile(workbook, `${fileName}.xlsx`);
+    } else {
+      XLSX.writeFile(workbook, `${fileName}.csv`, { bookType: 'csv' });
+    }
+
+    setIsExportModalOpen(false);
+    triggerToast(`Successfully exported ${sourceData.length.toLocaleString()} parts to ${exportFormat.toUpperCase()}.`);
+  };
+
   const pageChecked = selectionMode === 'all_filtered' || (currentIdsOnPage.length > 0 && currentIdsOnPage.every(id => selectedIds.includes(id)));
 
   return (
@@ -241,13 +371,41 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
           </p>
         </div>
 
-        <button
-          onClick={handleOpenCreate}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 self-start shadow-md hover:shadow-lg transition"
-        >
-          <Plus className="w-4 h-4" />
-          Create New Part
-        </button>
+        <div className="flex gap-2 self-start flex-wrap">
+          <button
+            onClick={() => {
+              setIsInlineEditMode(prev => !prev);
+              if (isInlineEditMode) {
+                // Clear any unsaved changes when toggling off
+                setInlineEdits({});
+              }
+            }}
+            className={`px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-sm transition cursor-pointer border ${
+              isInlineEditMode
+                ? 'bg-amber-550 hover:bg-amber-600 text-white border-amber-500 shadow-md'
+                : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200 hover:border-amber-300'
+            }`}
+          >
+            <Pencil className="w-4 h-4" />
+            {isInlineEditMode ? 'Exit Quick Edit' : 'Quick Edit Mode'}
+          </button>
+
+          <button
+            onClick={handleOpenExportModal}
+            className="bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-sm transition hover:border-emerald-300 cursor-pointer"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+            Export to Excel/CSV
+          </button>
+
+          <button
+            onClick={handleOpenCreate}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-md hover:shadow-lg transition cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            Create New Part
+          </button>
+        </div>
       </div>
 
       {/* Filter and Search Bar Card */}
@@ -385,6 +543,20 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
         )}
       </div>
 
+      {isInlineEditMode && (
+        <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 text-xs font-semibold text-amber-900 flex items-start gap-2.5 shadow-xs animate-fade-in">
+          <Pencil className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <span className="font-extrabold text-[#b45309]">Interactive Quick Edit Mode Active</span>
+            <p className="text-amber-805 font-medium leading-relaxed text-[11px]">
+              You can change part names and stock quantities directly inside the inventory table cells. 
+              Click the green <strong className="font-extrabold text-emerald-700">"Save"</strong> button on edited parts to commit changes, or click <strong className="font-extrabold text-rose-700">"Delete"</strong> to permanently delete a part. 
+              Toggle the "Quick Edit Mode" button again to exit. Unsaved edits will be discarded when exiting.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Main Parts Table */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="overflow-x-auto">
@@ -431,22 +603,82 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
                       )}
                     </div>
                   </td>
-                  <td className="p-4 font-medium">{item.part_name}</td>
+                  <td className="p-4 font-medium">
+                    {isInlineEditMode ? (
+                      <input
+                        type="text"
+                        value={inlineEdits[item.id]?.part_name ?? item.part_name}
+                        onChange={(e) => handleInlineChangeName(item.id, e.target.value, item)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            handleInlineSave(item);
+                          }
+                        }}
+                        className="w-full text-xs font-semibold p-1.5 border border-amber-200 focus:border-indigo-500 rounded-xl bg-amber-50/20 focus:bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-500 transition-all font-sans"
+                        placeholder="Part Name"
+                      />
+                    ) : (
+                      item.part_name
+                    )}
+                  </td>
                   <td className="p-4 font-semibold">
-                    <span className={item.quantity <= 3 ? 'text-red-600 font-bold' : ''}>
-                      {item.quantity.toLocaleString()} units
-                    </span>
+                    {isInlineEditMode ? (
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          min="0"
+                          value={inlineEdits[item.id]?.quantity ?? item.quantity}
+                          onChange={(e) => handleInlineChangeQuantity(item.id, Math.max(0, parseInt(e.target.value) || 0), item)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              handleInlineSave(item);
+                            }
+                          }}
+                          className="w-20 text-xs font-bold p-1.5 border border-amber-200 focus:border-indigo-500 rounded-xl bg-amber-50/20 focus:bg-white text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono"
+                        />
+                        <span className="text-[10px] text-slate-400 font-sans">units</span>
+                      </div>
+                    ) : (
+                      <span className={item.quantity <= 3 ? 'text-red-600 font-bold' : ''}>
+                        {item.quantity.toLocaleString()} units
+                      </span>
+                    )}
                   </td>
                   <td className="p-4 text-slate-400 font-mono">{item.hsn || '-'}</td>
                   <td className="p-4 font-bold text-slate-800">₹{item.mrp.toLocaleString('en-IN')}</td>
                   <td className="p-4 text-right">
-                    <button
-                      onClick={() => handleOpenEdit(item)}
-                      className="p-1 px-2 hover:bg-indigo-50 rounded text-indigo-600 font-bold hover:underline inline-flex items-center gap-1"
-                    >
-                      <Pencil className="w-3.5 h-3.5" />
-                      Edit
-                    </button>
+                    {isInlineEditMode ? (
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={() => handleInlineSave(item)}
+                          disabled={inlineEdits[item.id]?.part_name === undefined && inlineEdits[item.id]?.quantity === undefined}
+                          className={`p-1.5 px-3 rounded-lg border text-[10px] font-bold uppercase transition shadow-xs flex items-center justify-center select-none ${
+                            (inlineEdits[item.id]?.part_name !== undefined || inlineEdits[item.id]?.quantity !== undefined)
+                              ? 'bg-emerald-600 text-white border-emerald-500 hover:bg-emerald-700 cursor-pointer'
+                              : 'bg-slate-50 text-slate-400 border-slate-200 cursor-not-allowed'
+                          }`}
+                          title="Save inline changes"
+                        >
+                          Save
+                        </button>
+                        <button
+                          onClick={() => setDeletingItemConfirm(item)}
+                          className="p-1.5 px-2 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-lg inline-flex items-center gap-1 text-[10px] uppercase font-bold border border-rose-200 cursor-pointer"
+                          title="Delete part permanently"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          Delete
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => handleOpenEdit(item)}
+                        className="p-1 px-2 hover:bg-indigo-50 rounded text-indigo-600 font-bold hover:underline inline-flex items-center gap-1"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                        Edit
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -623,6 +855,240 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
               </div>
 
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Export Modal Popup */}
+      {isExportModalOpen && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md border border-slate-200 overflow-hidden transform transition duration-200 animate-in fade-in zoom-in-95 duration-150">
+            
+            {/* Modal Title */}
+            <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
+                <FileSpreadsheet className="w-4.5 h-4.5 text-emerald-600" />
+                Export Inventory Sheets
+              </h3>
+              <button 
+                onClick={() => setIsExportModalOpen(false)}
+                className="p-1 hover:bg-slate-200 rounded text-slate-500 cursor-pointer"
+              >
+                <X className="w-4.5 h-4.5" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-6 space-y-5 text-xs font-semibold text-slate-705 font-sans">
+              
+              {/* Dataset Selection */}
+              <div className="space-y-2">
+                <label className="block text-slate-500 uppercase text-[10px] tracking-wider font-extrabold">
+                  1. Select Dataset / Scope
+                </label>
+                <div className="space-y-2.5">
+                  
+                  {/* Option: Current Page */}
+                  <label className="flex items-start p-3 border border-slate-100 hover:border-slate-300 rounded-xl cursor-pointer transition bg-slate-50/55 hover:bg-slate-50">
+                    <input
+                      type="radio"
+                      name="exportSource"
+                      value="page"
+                      checked={exportSource === 'page'}
+                      onChange={() => setExportSource('page')}
+                      className="mt-0.5 text-indigo-600 focus:ring-0 mr-3 h-4 w-4 cursor-pointer"
+                    />
+                    <div>
+                      <div className="font-bold text-slate-900">Current Paginated Page</div>
+                      <div className="text-[11px] text-slate-400 font-normal">Downloads the 50 items displayed on this active page.</div>
+                    </div>
+                  </label>
+
+                  {/* Option: Filtered View */}
+                  <label className="flex items-start p-3 border border-slate-100 hover:border-slate-300 rounded-xl cursor-pointer transition bg-slate-50/55 hover:bg-slate-50">
+                    <input
+                      type="radio"
+                      name="exportSource"
+                      value="filtered"
+                      checked={exportSource === 'filtered'}
+                      onChange={() => setExportSource('filtered')}
+                      className="mt-0.5 text-indigo-600 focus:ring-0 mr-3 h-4 w-4 cursor-pointer"
+                    />
+                    <div>
+                      <div className="font-bold text-slate-900">Current Search/Filtered Scope</div>
+                      <div className="text-[11px] text-slate-400 font-normal">Downloads all {filteredList.length.toLocaleString()} matching parts.</div>
+                    </div>
+                  </label>
+
+                  {/* Option: Selected Parts */}
+                  <label className={`flex items-start p-3 border rounded-xl transition ${
+                    (selectedIds.length > 0 || selectionMode === 'all_filtered')
+                      ? 'border-slate-100 hover:border-slate-300 bg-slate-50/55 hover:bg-slate-50 cursor-pointer' 
+                      : 'border-slate-100 opacity-40 cursor-not-allowed bg-slate-100'
+                  }`}>
+                    <input
+                      type="radio"
+                      name="exportSource"
+                      value="selected"
+                      disabled={!(selectedIds.length > 0 || selectionMode === 'all_filtered')}
+                      checked={exportSource === 'selected'}
+                      onChange={() => setExportSource('selected')}
+                      className="mt-0.5 text-indigo-600 focus:ring-0 mr-3 h-4 w-4 disabled:opacity-30 cursor-pointer disabled:cursor-not-allowed"
+                    />
+                    <div>
+                      <div className="font-bold text-slate-900">Selected Spare Parts</div>
+                      <div className="text-[11px] text-slate-400 font-normal">
+                        {(selectedIds.length === 0 && selectionMode !== 'all_filtered')
+                          ? "Select parts via checkboxes to enable this option." 
+                          : `Downloads the ${selectionMode === 'all_filtered' ? filteredList.length.toLocaleString() : selectedIds.length.toLocaleString()} parts currently selected.`}
+                      </div>
+                    </div>
+                  </label>
+
+                  {/* Option: Full active inventory */}
+                  <label className="flex items-start p-3 border border-slate-100 hover:border-slate-300 rounded-xl cursor-pointer transition bg-slate-50/55 hover:bg-slate-50">
+                    <input
+                      type="radio"
+                      name="exportSource"
+                      value="full"
+                      checked={exportSource === 'full'}
+                      onChange={() => setExportSource('full')}
+                      className="mt-0.5 text-indigo-600 focus:ring-0 mr-3 h-4 w-4 cursor-pointer"
+                    />
+                    <div>
+                      <div className="font-bold text-slate-900">Full Active Inventory</div>
+                      <div className="text-[11px] text-slate-400 font-normal">Downloads all active parts under the {brand} schema.</div>
+                    </div>
+                  </label>
+
+                  {/* Option: Full plus archived inventory */}
+                  <label className="flex items-start p-3 border border-slate-100 hover:border-slate-300 rounded-xl cursor-pointer transition bg-slate-50/55 hover:bg-slate-50">
+                    <input
+                      type="radio"
+                      name="exportSource"
+                      value="full_archived"
+                      checked={exportSource === 'full_archived'}
+                      onChange={() => setExportSource('full_archived')}
+                      className="mt-0.5 text-indigo-600 focus:ring-0 mr-3 h-4 w-4 cursor-pointer"
+                    />
+                    <div>
+                      <div className="font-bold text-slate-900">Full Inventory (Active + Archived)</div>
+                      <div className="text-[11px] text-slate-400 font-normal">Downloads complete brand record entries including hidden/archived parts.</div>
+                    </div>
+                  </label>
+
+                </div>
+              </div>
+
+              {/* Format Selection Choice */}
+              <div className="space-y-2">
+                <label className="block text-slate-500 uppercase text-[10px] tracking-wider font-extrabold">
+                  2. File Export Format
+                </label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setExportFormat('xlsx')}
+                    className={`py-3 rounded-xl border font-bold text-center transition cursor-pointer select-none text-xs ${
+                      exportFormat === 'xlsx'
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-400 shadow-sm'
+                        : 'bg-white border-slate-200 text-slate-650 hover:border-slate-350'
+                    }`}
+                  >
+                    Microsoft Excel (.xlsx)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setExportFormat('csv')}
+                    className={`py-3 rounded-xl border font-bold text-center transition cursor-pointer select-none text-xs ${
+                      exportFormat === 'csv'
+                        ? 'bg-teal-50 text-teal-800 border-teal-400 shadow-sm'
+                        : 'bg-white border-slate-200 text-slate-650 hover:border-slate-350'
+                    }`}
+                  >
+                    CSV Text Sheet (.csv)
+                  </button>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex gap-3 justify-end pt-5 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setIsExportModalOpen(false)}
+                  className="bg-slate-100 hover:bg-slate-205 text-slate-600 px-4 py-2.5 rounded-xl cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportInventory}
+                  className="bg-slate-950 hover:bg-black text-white px-5 py-2.5 rounded-xl shadow-md cursor-pointer flex items-center gap-1.5 font-bold"
+                >
+                  <Download className="w-4 h-4 text-emerald-300" />
+                  Generate &amp; Download
+                </button>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Deletion Confirmation Modal Dialog */}
+      {deletingItemConfirm && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm border border-slate-200 overflow-hidden transform transition duration-205 animate-in fade-in zoom-in-95 duration-150">
+            
+            {/* Modal Title */}
+            <div className="bg-slate-50 px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="font-bold text-rose-700 text-sm flex items-center gap-2">
+                <Trash2 className="w-4.5 h-4.5 text-rose-600" />
+                Confirm Part Deletion
+              </h3>
+              <button 
+                onClick={() => setDeletingItemConfirm(null)}
+                className="p-1 hover:bg-slate-200 rounded text-slate-500 cursor-pointer"
+              >
+                <X className="w-4.5 h-4.5" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-5 space-y-4 text-xs font-semibold text-slate-700 font-sans">
+              <p className="text-slate-600 font-normal leading-relaxed">
+                Are you absolutely sure you want to permanently delete part <strong className="font-bold text-slate-900 font-mono text-[11px] bg-slate-100 p-1 rounded border border-slate-200">{deletingItemConfirm.part_no}</strong>?
+              </p>
+              
+              <div className="bg-rose-50 border border-rose-100 p-3 rounded-xl text-rose-955 font-medium space-y-1">
+                <div className="font-bold text-rose-800">Part Details:</div>
+                <div className="text-[11px] truncate"><span className="text-slate-500">Name:</span> {deletingItemConfirm.part_name}</div>
+                <div className="text-[11px]"><span className="text-slate-500">Current Stock:</span> {deletingItemConfirm.quantity.toLocaleString()} units</div>
+              </div>
+
+              <p className="text-rose-600 text-[10px] uppercase tracking-wider font-extrabold font-sans">
+                ⚠️ Danger: This operation is irreversible and will remove this part from all active schemas.
+              </p>
+
+              {/* Action Buttons */}
+              <div className="flex gap-3 justify-end pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setDeletingItemConfirm(null)}
+                  className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-xl text-xs font-bold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleInlineDeleteConfirmed(deletingItemConfirm)}
+                  className="bg-rose-600 hover:bg-rose-705 text-white px-4 py-2 rounded-xl text-xs font-bold cursor-pointer transition shadow-md"
+                >
+                  Confirm Delete
+                </button>
+              </div>
+
+            </div>
           </div>
         </div>
       )}

@@ -125,6 +125,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   const [scanInvoiceDate, setScanInvoiceDate] = useState('2026-06-05');
   const [scanDiscount, setScanDiscount] = useState<number>(12); // Detected discount percentage from invoice
   const [scannedFilesLoaded, setScannedFilesLoaded] = useState(false);
+  const [uploadedFiles, setUploadedFiles] = useState<{ id: string; file: File; previewUrl: string }[]>([]);
   
   // Parsed Items lists
   const [scanRows, setScanRows] = useState<ParsedAIScanRow[]>([]);
@@ -147,6 +148,47 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
       }
     } catch (e) {}
     return new Date().toISOString().split('T')[0];
+  };
+
+  const handleSelectFiles = (filesList: File[] | FileList) => {
+    const list = Array.from(filesList);
+    setUploadedFiles(prev => {
+      const updated = [...prev];
+      list.forEach(file => {
+        const id = Math.random().toString(36).substring(2, 9);
+        let previewUrl = '';
+        if (file.type.startsWith('image/')) {
+          previewUrl = URL.createObjectURL(file);
+        }
+        updated.push({ id, file, previewUrl });
+      });
+      return updated;
+    });
+  };
+
+  const handleRemoveFile = (id: string) => {
+    setUploadedFiles(prev => {
+      const found = prev.find(item => item.id === id);
+      if (found && found.previewUrl) {
+        URL.revokeObjectURL(found.previewUrl);
+      }
+      return prev.filter(item => item.id !== id);
+    });
+  };
+
+  const handleClearAllFiles = () => {
+    uploadedFiles.forEach(item => {
+      if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
+    });
+    setUploadedFiles([]);
+  };
+
+  const handleAddTemplateFile = (fileName: string) => {
+    const suffix = fileName.split('.').pop() || 'pdf';
+    const mimeType = suffix === 'xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' : 'application/pdf';
+    const f = new File(["mock-content"], fileName, { type: mimeType });
+    handleSelectFiles([f]);
+    triggerToast(`Added ${fileName} to the scan staging list.`);
   };
 
   // Simulation templates as secondary / fallback mechanism
@@ -199,86 +241,101 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   };
 
   // Real scan processor with integrated fallback
-  const handleFileUpload = (file: File) => {
+  const handleStartMultiAIScan = async () => {
+    if (uploadedFiles.length === 0) {
+      alert("No bills or pages selected for scanning. Please upload some files first.");
+      return;
+    }
     setIsScanning(true);
     setScannedFilesLoaded(false);
 
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const resultSrc = e.target?.result as string;
-        if (!resultSrc) throw new Error("Could not load file context.");
-
-        const commaIdx = resultSrc.indexOf(',');
-        const fileBase64 = commaIdx > -1 ? resultSrc.substring(commaIdx + 1) : resultSrc;
-        const mimeType = file.type || "image/jpeg";
-
-        console.log("Posting base64 file to server-side scan proxy...", mimeType);
-        const res = await fetch("/api/gemini/scan-invoice", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({ fileBase64, mimeType })
-        });
-
-        if (!res.ok) {
-          const errPayload = await res.json().catch(() => ({}));
-          throw new Error(errPayload.error || `Server HTTP Error ${res.status}`);
-        }
-
-        const payload = await res.json();
-        if (!payload.success || !payload.data) {
-          throw new Error(payload.error || "Structured data extraction parsed empty target.");
-        }
-
-        const scanData = payload.data;
-        setScanDealer(scanData.dealerName || "Extracted Dealer Name");
-        setScanInvoiceNo(scanData.invoiceNumber || `AI-${Math.floor(1000 + Math.random() * 9000)}`);
-        setScanInvoiceDate(parseSafeDate(scanData.invoiceDate));
-
-        const rawItems = scanData.items || [];
-        const avgDiscount = rawItems.length > 0 
-          ? Math.round(rawItems.reduce((acc: number, item: any) => acc + (item.discountPercent || 0), 0) / rawItems.length) 
-          : 12;
-        setScanDiscount(avgDiscount);
-
-        const parsedRows: ParsedAIScanRow[] = rawItems.map((item: any) => {
-          const pNo = String(item.partNumber || "").trim().toUpperCase();
-          const pName = String(item.name || "").trim();
-          const qty = Number(item.quantity) || 1;
-          const priceMrp = Number(item.mrp) || 0;
-          const isMatched = inventoryList.some(inv => inv.part_no.toLowerCase() === pNo.toLowerCase());
-          
-          return {
-            part_no: pNo,
-            part_name: pName,
-            hsn: "87089900", // Automobile parts standard code fallback
-            quantity: qty,
-            mrp: priceMrp,
-            isNewPart: !isMatched
+    try {
+      const filesEncryptedPromises = uploadedFiles.map(item => {
+        return new Promise<{ fileBase64: string; mimeType: string; name: string }>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            const resultSrc = e.target?.result as string;
+            if (!resultSrc) {
+              reject(new Error(`Could not load context of file: ${item.file.name}`));
+              return;
+            }
+            const commaIdx = resultSrc.indexOf(',');
+            const fileBase64 = commaIdx > -1 ? resultSrc.substring(commaIdx + 1) : resultSrc;
+            const mimeType = item.file.type || "image/jpeg";
+            resolve({ fileBase64, mimeType, name: item.file.name });
           };
+          reader.onerror = () => reject(new Error(`Error reading file: ${item.file.name}`));
+          reader.readAsDataURL(item.file);
         });
+      });
 
-        setScanRows(parsedRows);
-        setScannedFilesLoaded(true);
-        triggerToast(`Live AI invoice processed! Powered by ${payload.modelUsed}`);
+      const processedFilesList = await Promise.all(filesEncryptedPromises);
 
-      } catch (err: any) {
-        console.warn("AI Scanning Engine fallback triggered:", err.message);
-        alert(`Notice: Live AI process was unresolved because of key structure or endpoint limit. Falling back to simulated scan data matching file.`);
-        triggerSimulationOfScan(file.name);
-      } finally {
-        setIsScanning(false);
+      console.log(`Posting ${processedFilesList.length} files to server-side scan proxy...`);
+      const res = await fetch("/api/gemini/scan-invoice", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ files: processedFilesList })
+      });
+
+      if (!res.ok) {
+        const errPayload = await res.json().catch(() => ({}));
+        throw new Error(errPayload.error || `Server HTTP Error ${res.status}`);
       }
-    };
 
-    reader.onerror = () => {
-      alert("Error reading upload file.");
+      const payload = await res.json();
+      if (!payload.success || !payload.data) {
+        throw new Error(payload.error || "Structured data extraction parsed empty target.");
+      }
+
+      const scanData = payload.data;
+      setScanDealer(scanData.dealerName || "Extracted Dealer Name");
+      setScanInvoiceNo(scanData.invoiceNumber || `AI-${Math.floor(1000 + Math.random() * 9000)}`);
+      setScanInvoiceDate(parseSafeDate(scanData.invoiceDate));
+
+      const rawItems = scanData.items || [];
+      const avgDiscount = rawItems.length > 0 
+        ? Math.round(rawItems.reduce((acc: number, item: any) => acc + (item.discountPercent || 0), 0) / rawItems.length) 
+        : 12;
+      setScanDiscount(avgDiscount);
+
+      const parsedRows: ParsedAIScanRow[] = rawItems.map((item: any) => {
+        const pNo = String(item.partNumber || "").trim().toUpperCase();
+        const pName = String(item.name || "").trim();
+        const qty = Number(item.quantity) || 1;
+        const priceMrp = Number(item.mrp) || 0;
+        const isMatched = inventoryList.some(inv => inv.part_no.toLowerCase() === pNo.toLowerCase());
+        
+        return {
+          part_no: pNo,
+          part_name: pName,
+          hsn: "87089900", // Automobile parts standard code fallback
+          quantity: qty,
+          mrp: priceMrp,
+          isNewPart: !isMatched
+        };
+      });
+
+      setScanRows(parsedRows);
+      setScannedFilesLoaded(true);
+      triggerToast(`Live AI multi-page invoice processed! Scanned ${processedFilesList.length} pages. Powered by ${payload.modelUsed}`);
+
+    } catch (err: any) {
+      console.warn("AI Scanning Engine fallback triggered:", err.message);
+      alert(`Notice: Live AI process was unresolved because of key structure or endpoint limit. Falling back to simulated scan data.`);
+      
+      const primaryFileName = uploadedFiles[0]?.file.name || 'procurement_bill.pdf';
+      triggerSimulationOfScan(primaryFileName);
+    } finally {
       setIsScanning(false);
-    };
+    }
+  };
 
-    reader.readAsDataURL(file);
+  const handleFileUpload = (file: File) => {
+    // Legacy support fallback
+    handleSelectFiles([file]);
   };
 
   const handleAIScanRowChange = (index: number, field: keyof ParsedAIScanRow, val: any) => {
@@ -424,61 +481,165 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
           
           {/* File scan uploader board */}
           <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-            <h3 className="text-sm font-bold text-slate-900 mb-2">Automated AI Invoice processing</h3>
+            <h3 className="text-sm font-bold text-slate-900 mb-2">Automated AI Multi-Page Invoice processing</h3>
             <p className="text-xs text-slate-500 mb-4">
-              Drop dealer invoice copies (images / PDF documents) or procurement Excel sheets here. Sparezy AI instantly categorizes part numbers, quantities, prices, discounts and runs live stock validations.
+              Upload multiple invoice images/pages or bills for consolidated AI multi-page extraction. Sparezy AI instantly merges the pages, categorizes parts, quantities, discounts, and runs live stock validations.
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               
               {/* Drop area */}
-              <div className="border-2 border-dashed border-slate-200 hover:border-indigo-500 rounded-2xl p-6 text-center bg-slate-50 cursor-pointer flex flex-col justify-center items-center transition relative">
+              <div className="border-2 border-dashed border-slate-200 hover:border-indigo-500 rounded-2xl p-6 text-center bg-slate-50 hover:bg-slate-100/55 cursor-pointer flex flex-col justify-center items-center transition relative min-h-[140px]">
                 <input 
                   type="file" 
+                  multiple
+                  accept="image/*,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
                   className="absolute inset-0 opacity-0 cursor-pointer" 
                   onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) handleFileUpload(file);
+                    const files = e.target.files;
+                    if (files && files.length > 0) handleSelectFiles(files);
                   }}
                 />
                 
-                <UploadCloud className="w-9 h-9 text-slate-400 mb-2" />
-                <p className="font-bold text-slate-800 text-xs">Drag and drop file here, or click to browse</p>
-                <p className="text-[10px] text-slate-400 mt-1">Image, PDF, or Excel sheets supported</p>
+                <UploadCloud className="w-9 h-9 text-indigo-500 mb-2" />
+                <p className="font-bold text-slate-800 text-xs">Drag &amp; drop invoice pages/images here</p>
+                <p className="text-[10px] text-slate-400 mt-1">or click to browse from device (Multiple selection allowed)</p>
               </div>
 
-              {/* Sample Quick Demo Files */}
-              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
-                <h4 className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider flex items-center gap-1">
-                  <Sparkles className="w-3.5 h-3.5" />
-                  Or Try Simulation Quick-Load Templates
-                </h4>
+              {/* Sample Quick Demo Files / Simulation Templates */}
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3 flex flex-col justify-between">
+                <div className="space-y-1">
+                  <h4 className="text-[10px] font-bold text-indigo-600 uppercase tracking-wider flex items-center gap-1">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Stage Simulated Multi-Page Parts Bills
+                  </h4>
+                  <p className="text-[10px] text-slate-450 leading-relaxed font-semibold">
+                    Click to load mock parts lists into the queue, demonstrating how the system organizes multi-page uploads.
+                  </p>
+                </div>
                 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] font-semibold">
                   <button
-                    onClick={() => triggerSimulationOfScan('Hyundai_Main_Parts_Air_Spark.xlsx')}
-                    className="p-2 border border-slate-200 hover:border-indigo-400 bg-white rounded-xl text-left font-semibold flex items-center gap-2"
+                    type="button"
+                    onClick={() => handleAddTemplateFile('Hyundai_Main_Parts_Air_Spark.xlsx')}
+                    className="p-2 border border-slate-200 hover:border-indigo-400 bg-white rounded-xl text-left font-semibold flex items-center gap-2 cursor-pointer shadow-xs transition"
                   >
-                    <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-                    <span>Purchase_Spares.xlsx (12% Disc)</span>
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>Page 1: parts_table_A.xlsx</span>
                   </button>
 
                   <button
-                    onClick={() => triggerSimulationOfScan('Mahindra_Dealer_Invoices_99.pdf')}
-                    className="p-2 border border-slate-200 hover:border-indigo-400 bg-white rounded-xl text-left font-semibold flex items-center gap-2"
+                    type="button"
+                    onClick={() => handleAddTemplateFile('Mahindra_Dealer_Invoices_99.pdf')}
+                    className="p-2 border border-slate-200 hover:border-indigo-400 bg-white rounded-xl text-left font-semibold flex items-center gap-2 cursor-pointer shadow-xs transition"
                   >
-                    <FileText className="w-4 h-4 text-red-500" />
-                    <span>Procurement_Bill.pdf</span>
+                    <FileText className="w-4 h-4 text-red-500 shrink-0" />
+                    <span>Page 2: invoice_B.pdf</span>
                   </button>
                 </div>
               </div>
 
             </div>
 
+            {/* Display list of added/staged pages */}
+            {uploadedFiles.length > 0 && (
+              <div className="mt-6 border-t border-slate-100 pt-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="bg-indigo-100 text-indigo-800 text-[10px] font-extrabold px-2 py-0.5 rounded-full">
+                      {uploadedFiles.length}
+                    </span>
+                    <h4 className="text-xs font-bold text-slate-705">Staged Bill Pages / Uploaded Images</h4>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleClearAllFiles}
+                    className="text-[10px] text-rose-600 hover:text-rose-800 font-extrabold flex items-center gap-1 hover:underline cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Clear Stage Queue
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3 pt-1">
+                  {uploadedFiles.map((item, idx) => {
+                    const isImg = item.file.type.startsWith('image/');
+                    return (
+                      <div key={item.id} className="relative group rounded-xl border border-slate-200 bg-white overflow-hidden shadow-xs hover:border-indigo-300 transition-all flex flex-col justify-between">
+                        {/* Remove Hover Layer */}
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveFile(item.id)}
+                          className="absolute top-1 right-1 z-10 bg-rose-500 hover:bg-rose-600 text-white p-1 rounded-full opacity-90 hover:opacity-100 shadow-sm transition cursor-pointer"
+                          title="Remove page"
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+
+                        {/* File Preview */}
+                        <div className="bg-slate-50 h-24 flex items-center justify-center border-b border-slate-100 overflow-hidden relative">
+                          {isImg ? (
+                            <img
+                              src={item.previewUrl}
+                              alt={item.file.name}
+                              referrerPolicy="no-referrer"
+                              className="w-full h-full object-cover transition-transform duration-200 group-hover:scale-110"
+                            />
+                          ) : (
+                            <div className="flex flex-col items-center gap-1 text-slate-400">
+                              {item.file.name.endsWith('.xlsx') ? (
+                                <FileSpreadsheet className="w-8 h-8 text-emerald-505" />
+                              ) : (
+                                <FileText className="w-8 h-8 text-indigo-405" />
+                              )}
+                              <span className="text-[9px] uppercase font-bold text-slate-500">
+                                {item.file.name.split('.').pop()}
+                              </span>
+                            </div>
+                          )}
+
+                          {/* Page index indicator badge */}
+                          <div className="absolute bottom-1 left-1 bg-slate-900/80 text-white text-[9px] font-extrabold px-1.5 py-0.5 rounded">
+                            P. {idx + 1}
+                          </div>
+                        </div>
+
+                        {/* File details footer */}
+                        <div className="p-2 bg-white text-center">
+                          <p className="text-[10px] font-bold text-slate-700 truncate" title={item.file.name}>
+                            {item.file.name}
+                          </p>
+                          <p className="text-[8px] text-slate-400 font-mono font-bold">
+                            {(item.file.size / 1024).toFixed(1)} KB
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Scan Action Controls */}
+                <div className="pt-4 flex items-center justify-end">
+                  <button
+                    type="button"
+                    onClick={handleStartMultiAIScan}
+                    disabled={isScanning || uploadedFiles.length === 0}
+                    className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold px-6 py-3 rounded-xl text-xs flex items-center gap-2 shadow-md transition cursor-pointer hover:scale-[1.02] active:scale-[0.98]"
+                  >
+                    <Sparkles className="w-4 h-4 text-amber-305 animate-pulse" />
+                    <span>Start AI Scanning of {uploadedFiles.length} {uploadedFiles.length === 1 ? 'Page' : 'Pages'}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {isScanning && (
-              <div className="mt-6 p-6 border border-indigo-100 bg-indigo-50/50 rounded-2xl text-center flex flex-col items-center justify-center space-y-2">
+              <div className="mt-6 p-6 border border-indigo-100 bg-indigo-50/50 rounded-2xl text-center flex flex-col items-center justify-center space-y-2 animate-fade-in">
                 <div className="w-8 h-8 rounded-full border-2 border-indigo-600 border-t-transparent animate-spin"></div>
-                <p className="font-bold text-indigo-900 text-xs animate-pulse">Sparezy AI is compiling document headers and scanning part tables...</p>
+                <p className="font-bold text-indigo-900 text-xs animate-pulse">
+                  Sparezy AI is compiling multiple document headers, running text segmentation, and scanning cross-page part tables...
+                </p>
+                <p className="text-[10px] text-indigo-650 font-semibold">This takes a few seconds to parse all requested pages together using Gemini.</p>
               </div>
             )}
           </div>

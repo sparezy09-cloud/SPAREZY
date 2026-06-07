@@ -1,45 +1,65 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <defs>
-    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#0f172a" />
-      <stop offset="100%" stop-color="#1e1b4b" />
+    <!-- Deep space background gradient -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#070c18" />
+      <stop offset="100%" stop-color="#0a1122" />
     </linearGradient>
-    <linearGradient id="glow" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#818cf8" />
-      <stop offset="100%" stop-color="#4f46e5" />
+
+    <!-- Glowing cyan gradient for the main hexagon strokes -->
+    <linearGradient id="cyan-glow" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f3ff" />
+      <stop offset="100%" stop-color="#0088ff" />
     </linearGradient>
-    <linearGradient id="silver" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#f8fafc" />
-      <stop offset="100%" stop-color="#cbd5e1" />
-    </linearGradient>
+
+    <!-- Soft glow filter for elements -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+    
+    <filter id="subtle-glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="4" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
   </defs>
 
-  <!-- Solid rounded background for Android/iOS square launchers -->
-  <rect width="512" height="512" rx="112" fill="url(#bg)" />
+  <!-- Dark launcher background with high rounded corners -->
+  <rect width="512" height="512" rx="140" fill="url(#bg)" />
 
-  <!-- Outer ambient ring -->
-  <circle cx="256" cy="256" r="210" fill="none" stroke="#334155" stroke-width="4" stroke-dasharray="16 16" opacity="0.6" />
+  <!-- Outer concentric dotted circle -->
+  <circle cx="256" cy="256" r="200" fill="none" stroke="#22365c" stroke-width="2" stroke-dasharray="2 10" opacity="0.8" />
 
-  <!-- The Interlocking Spare Wheel Gear -->
-  <g transform="translate(0, 0)">
-    <!-- Gear teeth elements -->
-    <path d="M 256,90 L 256,120 M 256,392 L 256,422 M 90,256 L 120,256 M 392,256 L 422,256 M 138,138 L 160,160 M 352,352 L 374,374 M 138,352 L 160,330 M 352,138 L 374,160" 
-          stroke="url(#glow)" stroke-width="32" stroke-linecap="round" />
-    
-    <!-- Outer solid gear rim -->
-    <circle cx="256" cy="256" r="148" fill="none" stroke="url(#glow)" stroke-width="24" />
-    <circle cx="256" cy="256" r="148" fill="none" stroke="url(#silver)" stroke-width="6" opacity="0.8" />
+  <!-- Inner concentric dotted circle -->
+  <circle cx="256" cy="256" r="165" fill="none" stroke="#22365c" stroke-width="2" stroke-dasharray="2 10" opacity="0.8" />
 
-    <!-- Innermost track & lightning bolt sprocket core -->
-    <circle cx="256" cy="256" r="88" fill="#1e293b" stroke="#334155" stroke-width="2" />
-    
-    <!-- Sleek mechanical 'S' shape overlapping gears -->
-    <path d="M 200,190 Q 256,150 292,200 T 220,312 Q 256,362 312,322" 
-          fill="none" stroke="url(#silver)" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" />
-    
-    <!-- Floating particle nodes -->
-    <circle cx="256" cy="256" r="14" fill="#ffffff" />
-    <circle cx="256" cy="180" r="6" fill="#818cf8" />
-    <circle cx="256" cy="332" r="6" fill="#818cf8" />
-  </g>
+  <!-- Top floating cyan dot -->
+  <circle cx="256" cy="128" r="7.5" fill="#00f3ff" filter="url(#subtle-glow)" />
+
+  <!-- Bottom floating cyan dot -->
+  <circle cx="256" cy="384" r="7.5" fill="#00f3ff" filter="url(#subtle-glow)" />
+
+  <!-- Overlapping Hexagon 1 (Top) -->
+  <polygon points="186,165 326,165 370,220 326,275 186,275 142,220" 
+           fill="rgba(0, 243, 255, 0.04)" 
+           stroke="url(#cyan-glow)" 
+           stroke-width="12" 
+           stroke-linecap="round" 
+           stroke-linejoin="round"
+           filter="url(#glow)" />
+
+  <!-- Overlapping Hexagon 2 (Bottom) -->
+  <polygon points="186,237 326,237 370,292 326,347 186,347 142,292" 
+           fill="rgba(0, 243, 255, 0.04)" 
+           stroke="url(#cyan-glow)" 
+           stroke-width="12" 
+           stroke-linecap="round" 
+           stroke-linejoin="round"
+           filter="url(#glow)" />
 </svg>

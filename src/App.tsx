@@ -84,6 +84,25 @@ export default function App() {
 
   useEffect(() => {
     const checkSessionAndInitialize = async () => {
+      // Check if this was a refresh/reload
+      const isRefresh = 
+        (window.performance && window.performance.navigation && window.performance.navigation.type === 1) ||
+        (performance.getEntriesByType && performance.getEntriesByType('navigation')[0] && (performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming).type === 'reload');
+
+      if (isRefresh) {
+        console.log("⚡ [Session Manager] Tab refreshed detected. Forcing logout.");
+        db.setActiveBrand(null);
+        db.setActiveUser(null);
+        sessionStorage.removeItem('sparezy_session_active');
+        if (supabase) {
+          try {
+            await supabase.auth.signOut();
+          } catch (e) {
+            console.warn("Failed to sign out from Supabase on reload check:", e);
+          }
+        }
+      }
+
       // If there is no active tab-bound session, clear the previous login to enforce logout-on-close
       const isNewSession = !sessionStorage.getItem('sparezy_session_active');
       let otherTabExists = false;
@@ -179,7 +198,7 @@ export default function App() {
     };
   }, []);
 
-  // 30 minutes inactivity timeout logic (synchronized across tabs/sessions via localStorage)
+  // 20 minutes inactivity timeout logic (synchronized across tabs/sessions via localStorage)
   useEffect(() => {
     if (!activeUser) return;
 
@@ -203,12 +222,12 @@ export default function App() {
       window.addEventListener(event, eventHandler, { passive: true });
     });
 
-    // Check every 5 seconds if the last logged activity across ALL system tabs is > 30 minutes
+    // Check every 5 seconds if the last logged activity across ALL system tabs is > 20 minutes
     const checkInterval = setInterval(() => {
       const lastActivity = Number(localStorage.getItem(KEY_LAST_ACTIVITY) || Date.now());
       const idleTime = Date.now() - lastActivity;
-      if (idleTime > 30 * 60 * 1000) {
-        console.log("Inactivity logout triggered after 30 minutes of idle time.");
+      if (idleTime > 20 * 60 * 1000) {
+        console.log("Inactivity logout triggered after 20 minutes of idle time.");
         handleLogout();
       }
     }, 5000);
@@ -218,7 +237,7 @@ export default function App() {
       if (document.visibilityState === 'visible') {
         const lastActivity = Number(localStorage.getItem(KEY_LAST_ACTIVITY) || Date.now());
         const idleTime = Date.now() - lastActivity;
-        if (idleTime > 30 * 60 * 1000) {
+        if (idleTime > 20 * 60 * 1000) {
           console.log("Inactivity logout triggered on tab focus.");
           handleLogout();
         }
@@ -359,17 +378,7 @@ export default function App() {
     );
   }
 
-  if (connectionStatus === 'checking') {
-    return (
-      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center space-y-4">
-        <div className="w-10 h-10 rounded-full border-4 border-indigo-600 border-t-transparent animate-spin"></div>
-        <div className="text-center">
-          <p className="font-bold text-slate-800 text-sm">Testing Supabase Live Connection...</p>
-          <p className="text-xs text-slate-400 mt-1">Validating credentials and active network interfaces.</p>
-        </div>
-      </div>
-    );
-  }
+
 
   // Loading schema feedback
   if (loadingSchema) {

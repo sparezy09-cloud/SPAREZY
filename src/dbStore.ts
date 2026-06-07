@@ -1151,6 +1151,40 @@ export const db = {
     db.notify();
   },
 
+  deleteInventoryPart: (brand: Brand, partId: string, user: User) => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    const list = cache[b].inventory;
+    const existingIdx = list.findIndex(item => item.id === partId);
+    
+    if (existingIdx > -1) {
+      const deletedItem = { ...list[existingIdx] };
+      list.splice(existingIdx, 1);
+      
+      if (isSupabaseConfigured && supabase) {
+        supabase.schema(b).from('inventory').delete().eq('id', partId).then(({ error }) => {
+          if (error) {
+            console.error(`Database deletion notice of part ID ${partId}:`, error.message);
+            reportSupabaseError(b, "inventory", "delete", error.message);
+          }
+        });
+      } else {
+        localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(list));
+      }
+      
+      db.logTransaction(
+        user.id, user.name, 
+        'Delete Part', 
+        'Inventory', 
+        `Deleted part ${deletedItem.part_no} ("${deletedItem.part_name}") from ${brand} inventory`, 
+        deletedItem, 
+        null
+      );
+      db.notify();
+      return deletedItem;
+    }
+    return null;
+  },
+
   archivePartsFiltered: async (brand: Brand, searchText: string, user: User, onProgress?: (count: number) => void): Promise<number> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const archivedStr = new Date().toISOString();
