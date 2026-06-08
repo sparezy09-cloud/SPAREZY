@@ -21,6 +21,7 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
   const [loading, setLoading] = useState(false);
   const [errorLocal, setErrorLocal] = useState<string | null>(null);
   const [successLocal, setSuccessLocal] = useState<string | null>(null);
+  const [isConnectingTransition, setIsConnectingTransition] = useState(false);
 
   const [dbError, setDbError] = useState(db.getLastError());
 
@@ -92,18 +93,17 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
           throw new Error("This Sparezy operator identity has been disabled.");
         }
 
-        // Save session locally and reload catalog
-        db.setActiveUser(sessionUser);
+        // Clear active brand so they must choose the brand to establish link with data
+        db.setActiveBrand(null);
         setSuccessLocal("Authenticated successfully!");
         
-        // Fast redirect by mimicking select event with saved brand if any
-        const savedBrand = db.getActiveBrand();
-        if (savedBrand) {
-          onSelect(savedBrand, sessionUser);
-        } else {
-          // Refresh parent user state
-          window.location.reload();
-        }
+        // Trigger welcome loading page first
+        setIsConnectingTransition(true);
+
+        setTimeout(() => {
+          db.setActiveUser(sessionUser);
+          setIsConnectingTransition(false);
+        }, 1200);
       }
     } catch (err: any) {
       setErrorLocal(err.message || "Failed to verify Supabase login credentials.");
@@ -170,12 +170,18 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
           created_at: new Date().toISOString()
         };
 
-        db.setActiveUser(sessionUser);
+        // Clear active brand so they must choose the brand to establish link with data
+        db.setActiveBrand(null);
         await db.initialize();
         setSuccessLocal("Operator registration completed successfully!");
 
-        // Soft reload to mount dashboard user context
-        onLogout();
+        // Trigger welcome loading page first
+        setIsConnectingTransition(true);
+
+        setTimeout(() => {
+          db.setActiveUser(sessionUser);
+          setIsConnectingTransition(false);
+        }, 1200);
       }
     } catch (err: any) {
       setErrorLocal(err.message || "Signup failed.");
@@ -194,6 +200,59 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
     setErrorLocal(null);
     onSelect(brand, activeUser);
   };
+
+  if (isConnectingTransition) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-white font-sans flex flex-col items-center justify-center p-6 select-none animate-fade-in">
+        <div className="max-w-md w-full text-center space-y-8 p-10 bg-slate-900/40 border border-slate-800/80 rounded-3xl backdrop-blur-xl shadow-2xl relative overflow-hidden">
+          
+          {/* Accent light glow rings */}
+          <div className="absolute -top-12 -left-12 w-40 h-40 bg-indigo-500/10 rounded-full blur-3xl" />
+          <div className="absolute -bottom-12 -right-12 w-40 h-40 bg-purple-500/10 rounded-full blur-3xl" />
+
+          {/* Logo illustration */}
+          <div className="relative mx-auto h-16 w-16 bg-gradient-to-tr from-indigo-600 to-indigo-500 rounded-2xl flex items-center justify-center text-white font-black text-3xl shadow-xl shadow-indigo-500/20 border border-indigo-400/30 animate-bounce">
+            S
+          </div>
+
+          <div className="space-y-3 relative">
+            <h2 className="text-3xl font-black text-white tracking-tight animate-pulse">
+              Welcome to Sparezy
+            </h2>
+            <p className="text-sm text-slate-400 font-medium max-w-xs mx-auto">
+              Please wait while we are connecting with your data.
+            </p>
+          </div>
+
+          {/* Elegant active progress bar */}
+          <div className="space-y-4 pt-4">
+            <div className="w-full bg-slate-950 h-2 rounded-full overflow-hidden border border-slate-800 p-[1px]">
+              <div 
+                className="bg-indigo-550 bg-indigo-600 h-full rounded-full transition-all duration-1000 ease-out"
+                style={{ width: '100%', animation: 'fillProgress 1.1s ease-out' }}
+              />
+            </div>
+
+            {/* Micro details indicator */}
+            <div className="flex items-center justify-between text-[11px] font-mono text-slate-500 px-1 pt-1">
+              <span className="flex items-center gap-1.5 font-bold">
+                <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-ping" />
+                Synchronizing schemas...
+              </span>
+              <span className="font-bold text-indigo-400 animate-pulse">Direct-Link Active</span>
+            </div>
+          </div>
+
+          <style dangerouslySetInnerHTML={{ __html: `
+            @keyframes fillProgress {
+              0% { width: 0%; }
+              100% { width: 100%; }
+            }
+          `}} />
+        </div>
+      </div>
+    );
+  }
 
   // Pane Render A: Real Authentication & Access Sign in
   if (!activeUser) {
