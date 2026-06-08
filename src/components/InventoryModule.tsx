@@ -4,7 +4,8 @@ import { db } from '../dbStore';
 import * as XLSX from 'xlsx';
 import { 
   Search, EyeOff, Archive, CheckCircle2, Pencil, 
-  Trash2, Plus, ArrowLeft, ArrowRight, X, Layers, Download, FileSpreadsheet
+  Trash2, Plus, ArrowLeft, ArrowRight, X, Layers, Download, FileSpreadsheet,
+  AlertTriangle, History, Calendar
 } from 'lucide-react';
 
 interface InventoryModuleProps {
@@ -34,6 +35,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   const [isInlineEditMode, setIsInlineEditMode] = useState(false);
   const [inlineEdits, setInlineEdits] = useState<Record<string, { part_name: string; quantity: number }>>({});
   const [deletingItemConfirm, setDeletingItemConfirm] = useState<InventoryItem | null>(null);
+  const [viewingPartDetails, setViewingPartDetails] = useState<InventoryItem | null>(null);
+  const [movementTab, setMovementTab] = useState<'all' | 'sales' | 'purchases' | 'returns'>('all');
 
   // Form Fields for Manual Create/Edit
   const [formPartNo, setFormPartNo] = useState('');
@@ -44,6 +47,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
 
   // Fetch Inventory (reactive to changes)
   const [showArchived, setShowArchived] = useState(false);
+  const [showLowStockOnly, setShowLowStockOnly] = useState(false);
+  const [lowStockThreshold, setLowStockThreshold] = useState(5);
   const [inventoryList, setInventoryList] = useState<InventoryItem[]>(() => db.getInventory(brand, false));
 
   const refreshList = () => {
@@ -60,7 +65,7 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
     setSelectedIds([]);
     setSelectionMode('current_page');
     setBulkError(null);
-  }, [search, brand]);
+  }, [search, brand, showLowStockOnly]);
 
   const triggerToast = (msg: string) => {
     setToastMessage(msg);
@@ -72,9 +77,101 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
     return inventoryList.filter(item => {
       const matchesSearch = item.part_no.toLowerCase().includes(search.toLowerCase()) || 
                             item.part_name.toLowerCase().includes(search.toLowerCase());
-      return matchesSearch;
+      if (!matchesSearch) return false;
+
+      if (showLowStockOnly) {
+        return item.quantity <= lowStockThreshold;
+      }
+      return true;
     });
-  }, [inventoryList, search]);
+  }, [inventoryList, search, showLowStockOnly, lowStockThreshold]);
+
+  // Part Movement calculator for the details popup
+  const partMovements = useMemo(() => {
+    if (!viewingPartDetails) {
+      return { sales: [], purchases: [], returns: [], unified: [] };
+    }
+    const targetNo = viewingPartDetails.part_no.trim().toLowerCase();
+
+    // 1. Match sales
+    const allSales = db.getSales(brand) || [];
+    const allSaleItems = db.getSaleItems(brand) || [];
+    const salesMovements = allSaleItems
+      .filter(item => item.part_no.trim().toLowerCase() === targetNo)
+      .map(item => {
+        const parentSale = allSales.find(s => s.id === item.sale_id);
+        const saleDate = parentSale?.sale_date || parentSale?.created_at || item.created_at || new Date().toISOString();
+        return {
+          id: item.id,
+          type: 'sale' as const,
+          date: saleDate,
+          quantity: item.quantity,
+          mrp: item.mrp || viewingPartDetails.mrp,
+          total: item.final_amount,
+          info: parentSale 
+            ? `Sold to ${parentSale.customer_name} (Invoice: ${parentSale.id.substring(0, 8).toUpperCase()})` 
+            : `Sale Record`,
+          referenceId: item.sale_id,
+          operator: parentSale?.created_by || 'Staff'
+        };
+      });
+
+    // 2. Match purchases
+    const allPurchases = db.getPurchases(brand) || [];
+    const allPurchaseItems = db.getPurchaseItems(brand) || [];
+    const purchasesMovements = allPurchaseItems
+      .filter(item => item.part_no.trim().toLowerCase() === targetNo)
+      .map(item => {
+        const parentPurchase = allPurchases.find(p => p.id === item.purchase_id);
+        const purchaseDate = parentPurchase?.invoice_date || parentPurchase?.created_at || item.created_at || new Date().toISOString();
+        return {
+          id: item.id,
+          type: 'purchase' as const,
+          date: purchaseDate,
+          quantity: item.quantity,
+          mrp: item.mrp || viewingPartDetails.mrp,
+          total: item.quantity * (item.mrp || viewingPartDetails.mrp),
+          info: parentPurchase 
+            ? `Inward Stock: ${parentPurchase.dealer_name} (Inv: ${parentPurchase.invoice_no || parentPurchase.id.substring(0, 8).toUpperCase()})` 
+            : `Purchase Stock Inward`,
+          referenceId: item.purchase_id,
+          operator: parentPurchase?.created_by || 'Staff'
+        };
+      });
+
+    // 3. Match returns
+    const allReturns = db.getReturns(brand) || [];
+    const returnsMovements = allReturns
+      .filter(item => item.part_no.trim().toLowerCase() === targetNo)
+      .map(item => {
+        const returnDate = item.return_date || new Date().toISOString();
+        return {
+          id: item.id,
+          type: 'return' as const,
+          date: returnDate,
+          quantity: item.returned_quantity,
+          mrp: item.refund_amount / (item.returned_quantity || 1) || viewingPartDetails.mrp,
+          total: item.refund_amount,
+          info: `Returned by Customer (Ref Sale: ${item.sale_id.substring(0, 8).toUpperCase()})`,
+          referenceId: item.sale_id,
+          operator: item.created_by || 'Staff'
+        };
+      });
+
+    // Combine all and sort by date descending
+    const unifiedMovements = [
+      ...salesMovements,
+      ...purchasesMovements,
+      ...returnsMovements
+    ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+    return {
+      sales: salesMovements,
+      purchases: purchasesMovements,
+      returns: returnsMovements,
+      unified: unifiedMovements
+    };
+  }, [viewingPartDetails, brand]);
 
   // 2. Pagination Math
   const totalPages = Math.ceil(filteredList.length / itemsPerPage) || 1;
@@ -118,6 +215,10 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   };
 
   const handleBulkArchive = async (archive: boolean) => {
+    if (user.role !== 'Owner') {
+      alert("Permission denied. Only Owner can modify parts.");
+      return;
+    }
     setBulkError(null);
     setBulkProgress(0);
     if (selectionMode === 'all_filtered') {
@@ -159,6 +260,10 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
 
   // Edit / Add Actions
   const handleOpenEdit = (item: InventoryItem) => {
+    if (user.role !== 'Owner') {
+      alert("Permission denied. Only Owner can edit parts.");
+      return;
+    }
     setEditingItem(item);
     setFormPartNo(item.part_no);
     setFormPartName(item.part_name);
@@ -178,6 +283,10 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
 
   const handleSaveEdit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (user.role !== 'Owner') {
+      alert("Permission denied. Only Owner can edit parts.");
+      return;
+    }
     if (!formPartNo || !formPartName) {
       alert("Part Number and Name are required.");
       return;
@@ -244,6 +353,10 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   };
 
   const handleInlineSave = (item: InventoryItem) => {
+    if (user.role !== 'Owner') {
+      alert("Permission denied. Only Owner can edit parts.");
+      return;
+    }
     const edit = inlineEdits[item.id];
     if (!edit) return;
 
@@ -272,6 +385,10 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   };
 
   const handleInlineDeleteConfirmed = (item: InventoryItem) => {
+    if (user.role !== 'Owner') {
+      alert("Permission denied. Only Owner can delete parts.");
+      return;
+    }
     db.deleteInventoryPart(brand, item.id, user);
     
     setInlineEdits(prev => {
@@ -372,23 +489,25 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
         </div>
 
         <div className="flex gap-2 self-start flex-wrap">
-          <button
-            onClick={() => {
-              setIsInlineEditMode(prev => !prev);
-              if (isInlineEditMode) {
-                // Clear any unsaved changes when toggling off
-                setInlineEdits({});
-              }
-            }}
-            className={`px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-sm transition cursor-pointer border ${
-              isInlineEditMode
-                ? 'bg-amber-550 hover:bg-amber-600 text-white border-amber-500 shadow-md'
-                : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200 hover:border-amber-300'
-            }`}
-          >
-            <Pencil className="w-4 h-4" />
-            {isInlineEditMode ? 'Exit Quick Edit' : 'Quick Edit Mode'}
-          </button>
+          {user.role === 'Owner' && (
+            <button
+              onClick={() => {
+                setIsInlineEditMode(prev => !prev);
+                if (isInlineEditMode) {
+                  // Clear any unsaved changes when toggling off
+                  setInlineEdits({});
+                }
+              }}
+              className={`px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-sm transition cursor-pointer border ${
+                isInlineEditMode
+                  ? 'bg-amber-550 hover:bg-amber-600 text-white border-amber-500 shadow-md'
+                  : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-200 hover:border-amber-300'
+              }`}
+            >
+              <Pencil className="w-4 h-4" />
+              {isInlineEditMode ? 'Exit Quick Edit' : 'Quick Edit Mode'}
+            </button>
+          )}
 
           <button
             onClick={handleOpenExportModal}
@@ -427,8 +546,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
             />
           </div>
 
-          {/* Active / Archived Toggle */}
-          <div className="flex items-center gap-2">
+          {/* Active / Archived & Low Stock Toggles */}
+          <div className="flex flex-wrap items-center gap-2">
             <button
               id="toggle-archive-button"
               onClick={() => {
@@ -444,6 +563,40 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
               <Archive className="w-3.5 h-3.5" />
               {showArchived ? "Showing: All Parts" : "Showing: Active Only"}
             </button>
+
+            <button
+              id="toggle-low-stock-button"
+              onClick={() => {
+                setShowLowStockOnly(prev => !prev);
+                setCurrentPage(1);
+              }}
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold border transition flex items-center gap-1.5 shadow-sm min-w-[150px] justify-center cursor-pointer ${
+                showLowStockOnly 
+                  ? 'bg-rose-50 text-rose-800 border-rose-300 hover:bg-rose-100' 
+                  : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+              }`}
+            >
+              <AlertTriangle className="w-3.5 h-3.5 text-rose-500" />
+              {showLowStockOnly ? `Low Stock (≤ ${lowStockThreshold} units)` : "Filter Low Stock"}
+            </button>
+
+            {showLowStockOnly && (
+              <div className="flex items-center gap-1.5 bg-rose-50 border border-rose-200 rounded-xl px-2.5 py-1.5 font-sans">
+                <span className="text-[10px] text-rose-700 font-extrabold uppercase tracking-wider">Limit:</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="1000"
+                  value={lowStockThreshold}
+                  onChange={(e) => {
+                    const val = Math.max(0, parseInt(e.target.value) || 0);
+                    setLowStockThreshold(val);
+                    setCurrentPage(1);
+                  }}
+                  className="w-12 text-center font-mono font-bold text-xs bg-white border border-rose-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-rose-500 p-0.5"
+                />
+              </div>
+            )}
           </div>
         </div>
 
@@ -483,36 +636,40 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
                   </>
                 )}
                 
-                {selectionMode === 'all_filtered' ? (
-                  <button
-                    onClick={() => handleBulkArchive(true)}
-                    disabled={isBulkProcessing}
-                    className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-xl flex items-center gap-1.5 transition text-xs font-bold cursor-pointer shadow-sm hover:shadow active:scale-95 disabled:opacity-50"
-                  >
-                    <Archive className="w-3.5 h-3.5" />
-                    Archive All {filteredList.length.toLocaleString()} Filtered Parts
-                  </button>
-                ) : (
+                {user.role === 'Owner' && (
                   <>
-                    <button
-                      onClick={() => handleBulkArchive(true)}
-                      disabled={isBulkProcessing}
-                      className="bg-amber-100 text-amber-700 hover:bg-amber-200 px-3 py-1.5 rounded-lg flex items-center gap-1 transition text-xs font-bold cursor-pointer disabled:opacity-50"
-                    >
-                      <Archive className="w-3.5 h-3.5" />
-                      Archive Selected
-                    </button>
-                    <button
-                      onClick={() => handleBulkArchive(false)}
-                      disabled={isBulkProcessing}
-                      className="bg-emerald-100 text-emerald-800 hover:bg-emerald-200 px-3 py-1.5 rounded-lg flex items-center gap-1 transition text-xs font-bold cursor-pointer disabled:opacity-50"
-                    >
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      Unarchive Selected
-                    </button>
+                    {selectionMode === 'all_filtered' ? (
+                      <button
+                        onClick={() => handleBulkArchive(true)}
+                        disabled={isBulkProcessing}
+                        className="bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-xl flex items-center gap-1.5 transition text-xs font-bold cursor-pointer shadow-sm hover:shadow active:scale-95 disabled:opacity-50"
+                      >
+                        <Archive className="w-3.5 h-3.5" />
+                        Archive All {filteredList.length.toLocaleString()} Filtered Parts
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          onClick={() => handleBulkArchive(true)}
+                          disabled={isBulkProcessing}
+                          className="bg-amber-100 text-amber-700 hover:bg-amber-200 px-3 py-1.5 rounded-lg flex items-center gap-1 transition text-xs font-bold cursor-pointer disabled:opacity-50"
+                        >
+                          <Archive className="w-3.5 h-3.5" />
+                          Archive Selected
+                        </button>
+                        <button
+                          onClick={() => handleBulkArchive(false)}
+                          disabled={isBulkProcessing}
+                          className="bg-emerald-100 text-emerald-800 hover:bg-emerald-200 px-3 py-1.5 rounded-lg flex items-center gap-1 transition text-xs font-bold cursor-pointer disabled:opacity-50"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          Unarchive Selected
+                        </button>
+                      </>
+                    )}
+                    <span className="text-slate-300">|</span>
                   </>
                 )}
-                <span className="text-slate-300">|</span>
                 <button
                   onClick={() => {
                     setSelectedIds([]);
@@ -593,9 +750,13 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
                       onChange={(e) => handleSelectItem(item.id, e.target.checked)}
                     />
                   </td>
-                  <td className="p-4 font-mono font-bold text-slate-900">
+                  <td 
+                    onClick={() => setViewingPartDetails(item)}
+                    className="p-4 font-mono font-bold text-slate-900 hover:text-indigo-600 hover:underline cursor-pointer group"
+                    title="Click to view full movement details"
+                  >
                     <div className="flex items-center gap-1.5 flex-wrap">
-                      <span>{item.part_no}</span>
+                      <span className="text-indigo-600 group-hover:text-indigo-800 transition duration-150">{item.part_no}</span>
                       {item.is_active === false && (
                         <span className="px-1.5 py-0.5 text-[8px] bg-amber-50 text-amber-700 rounded border border-amber-200/60 font-sans tracking-wide uppercase font-black">
                           Archived
@@ -603,7 +764,15 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
                       )}
                     </div>
                   </td>
-                  <td className="p-4 font-medium">
+                  <td 
+                    onClick={() => {
+                      if (!isInlineEditMode) {
+                        setViewingPartDetails(item);
+                      }
+                    }}
+                    className={`p-4 font-medium transition duration-150 ${!isInlineEditMode ? 'hover:text-indigo-600 hover:underline cursor-pointer' : ''}`}
+                    title={!isInlineEditMode ? "Click to view full movement details" : undefined}
+                  >
                     {isInlineEditMode ? (
                       <input
                         type="text"
@@ -671,13 +840,19 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
                         </button>
                       </div>
                     ) : (
-                      <button
-                        onClick={() => handleOpenEdit(item)}
-                        className="p-1 px-2 hover:bg-indigo-50 rounded text-indigo-600 font-bold hover:underline inline-flex items-center gap-1"
-                      >
-                        <Pencil className="w-3.5 h-3.5" />
-                        Edit
-                      </button>
+                      user.role === 'Owner' ? (
+                        <button
+                          onClick={() => handleOpenEdit(item)}
+                          className="p-1 px-2 hover:bg-indigo-50 rounded text-indigo-600 font-bold hover:underline inline-flex items-center gap-1"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                          Edit
+                        </button>
+                      ) : (
+                        <span className="text-slate-400 text-[10px] italic pr-2 px-2 py-1 bg-slate-50 rounded-lg border border-slate-200 select-none">
+                          🔑 View Only
+                        </span>
+                      )
                     )}
                   </td>
                 </tr>
@@ -1089,6 +1264,236 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
               </div>
 
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Part Movement and History Details Modal */}
+      {viewingPartDetails && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl border border-slate-200 overflow-hidden transform transition duration-300 animate-in fade-in zoom-in-95 duration-150 flex flex-col max-h-[85vh]">
+            
+            {/* Modal Header */}
+            <div className="bg-slate-50 px-6 py-5 border-b border-slate-200 shrink-0 flex items-center justify-between">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <History className="w-5 h-5 text-indigo-600" />
+                  <span className="font-sans text-[10px] uppercase font-extrabold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full tracking-wider">
+                    Movement Ledger
+                  </span>
+                </div>
+                <h3 className="font-bold text-slate-900 text-lg font-sans flex items-baseline gap-2">
+                  <span className="font-mono text-indigo-600 font-extrabold tracking-tight">{viewingPartDetails.part_no}</span>
+                  <span className="text-slate-400 font-normal">|</span>
+                  <span className="text-slate-700 text-sm font-semibold">{viewingPartDetails.part_name}</span>
+                </h3>
+              </div>
+              <button 
+                onClick={() => {
+                  setViewingPartDetails(null);
+                  setMovementTab('all');
+                }}
+                className="p-1.5 hover:bg-slate-200 rounded-xl text-slate-500 cursor-pointer transition duration-150"
+                title="Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="p-6 overflow-y-auto space-y-6 flex-1 min-h-0">
+              
+              {/* Part Quick Meta / KPIs */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                
+                {/* Available Stock Card */}
+                <div className="bg-slate-50 border border-slate-200/80 p-4 rounded-xl flex flex-col justify-between shadow-xs">
+                  <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Current Stock</span>
+                  <div className="flex items-baseline gap-1.5 mt-2">
+                    <span className={`text-xl font-black font-mono ${viewingPartDetails.quantity <= lowStockThreshold ? 'text-rose-600' : 'text-slate-900'}`}>
+                      {viewingPartDetails.quantity.toLocaleString()}
+                    </span>
+                    <span className="text-[10px] text-slate-400 font-bold">units</span>
+                  </div>
+                  <div className="mt-1 flex items-center gap-1.5">
+                    {viewingPartDetails.quantity <= lowStockThreshold ? (
+                      <span className="text-[9px] text-rose-700 bg-rose-50 border border-rose-100 rounded px-1.5 py-0.5 font-bold uppercase tracking-wide flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-rose-500 animate-pulse"></span> Low Stock
+                      </span>
+                    ) : (
+                      <span className="text-[9px] text-emerald-700 bg-emerald-50 border border-emerald-100 rounded px-1.5 py-0.5 font-bold uppercase tracking-wide">
+                        In Stock &amp; Healthy
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Total Sales Outward */}
+                <div className="bg-rose-50/50 border border-rose-100 p-4 rounded-xl flex flex-col justify-between shadow-xs">
+                  <span className="text-[10px] text-rose-700 font-bold uppercase tracking-wider">Total Sales</span>
+                  <div className="flex items-baseline gap-1.5 mt-2">
+                    <span className="text-xl font-black font-mono text-rose-800">
+                      {partMovements.sales.reduce((acc, curr) => acc + curr.quantity, 0).toLocaleString()}
+                    </span>
+                    <span className="text-[10px] text-rose-500 font-bold font-sans">units</span>
+                  </div>
+                  <span className="text-[10px] text-slate-400 font-medium">Outward Log: {partMovements.sales.length} records</span>
+                </div>
+
+                {/* Total Purchases Inward */}
+                <div className="bg-emerald-50/50 border border-emerald-100 p-4 rounded-xl flex flex-col justify-between shadow-xs">
+                  <span className="text-[10px] text-emerald-700 font-bold uppercase tracking-wider">Total Purchases</span>
+                  <div className="flex items-baseline gap-1.5 mt-2">
+                    <span className="text-xl font-black font-mono text-emerald-800">
+                      {partMovements.purchases.reduce((acc, curr) => acc + curr.quantity, 0).toLocaleString()}
+                    </span>
+                    <span className="text-[10px] text-emerald-500 font-bold font-sans">units</span>
+                  </div>
+                  <span className="text-[10px] text-slate-400 font-medium">Inward Log: {partMovements.purchases.length} records</span>
+                </div>
+
+                {/* Sales Returns */}
+                <div className="bg-amber-50/50 border border-amber-100 p-4 rounded-xl flex flex-col justify-between shadow-xs">
+                  <span className="text-[10px] text-amber-700 font-bold uppercase tracking-wider">Total Returns</span>
+                  <div className="flex items-baseline gap-1.5 mt-2">
+                    <span className="text-xl font-black font-mono text-amber-800">
+                      {partMovements.returns.reduce((acc, curr) => acc + curr.quantity, 0).toLocaleString()}
+                    </span>
+                    <span className="text-[10px] text-amber-600 font-bold font-sans">units</span>
+                  </div>
+                  <span className="text-[10px] text-slate-400 font-medium">Returns Log: {partMovements.returns.length} records</span>
+                </div>
+
+              </div>
+
+              {/* Movement Sub-Tabs */}
+              <div className="border-b border-slate-200">
+                <nav className="flex gap-4" aria-label="Tabs">
+                  {[
+                    { id: 'all', label: `All Movements (${partMovements.unified.length})` },
+                    { id: 'sales', label: `Sales (${partMovements.sales.length})` },
+                    { id: 'purchases', label: `Purchases (${partMovements.purchases.length})` },
+                    { id: 'returns', label: `Returns (${partMovements.returns.length})` }
+                  ].map((tab) => (
+                    <button
+                      key={tab.id}
+                      onClick={() => setMovementTab(tab.id as any)}
+                      className={`pb-3 px-1 text-xs font-bold border-b-2 cursor-pointer transition ${
+                        movementTab === tab.id
+                          ? 'border-indigo-600 text-indigo-600'
+                          : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </nav>
+              </div>
+
+              {/* History Data Table */}
+              <div className="border border-slate-200 rounded-xl overflow-hidden bg-white shadow-xs">
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-slate-200 text-left text-xs font-sans">
+                    <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-[10px] tracking-wider">
+                      <tr>
+                        <th className="p-4">Type</th>
+                        <th className="p-4">Date</th>
+                        <th className="p-4">Quantity</th>
+                        <th className="p-4">Details / Counterparty</th>
+                        <th className="p-4">Unit Price (INR)</th>
+                        <th className="p-4">Total (INR)</th>
+                        <th className="p-4 text-right">Operator</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 text-slate-700">
+                      {(() => {
+                        const list = 
+                          movementTab === 'sales' ? partMovements.sales :
+                          movementTab === 'purchases' ? partMovements.purchases :
+                          movementTab === 'returns' ? partMovements.returns :
+                          partMovements.unified;
+
+                        if (list.length === 0) {
+                          return (
+                            <tr>
+                              <td colSpan={7} className="p-12 text-center text-slate-400 font-medium font-sans">
+                                <History className="w-8 h-8 text-slate-300 mx-auto mb-2.5" />
+                                No recorded movements matching this filter.
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        return list.map((mv) => (
+                          <tr key={mv.id} className="hover:bg-slate-50/50 transition duration-100">
+                            <td className="p-4 font-semibold">
+                              {mv.type === 'sale' && (
+                                <span className="px-2.5 py-0.5 text-[9px] bg-red-50 text-red-700 rounded-full border border-red-100 uppercase font-black tracking-wider shadow-2xs">
+                                  Sale
+                                </span>
+                              )}
+                              {mv.type === 'purchase' && (
+                                <span className="px-2.5 py-0.5 text-[9px] bg-emerald-50 text-emerald-700 rounded-full border border-emerald-100 uppercase font-black tracking-wider shadow-2xs">
+                                  Purchase
+                                </span>
+                              )}
+                              {mv.type === 'return' && (
+                                <span className="px-2.5 py-0.5 text-[9px] bg-amber-50 text-amber-800 rounded-full border border-amber-100 uppercase font-black tracking-wider shadow-2xs">
+                                  Return
+                                </span>
+                              )}
+                            </td>
+                            <td className="p-4 font-mono text-slate-500 whitespace-nowrap text-[11px]">
+                              {new Date(mv.date).toLocaleDateString(undefined, {
+                                year: 'numeric',
+                                month: 'short',
+                                day: 'numeric',
+                                hour: '2-digit',
+                                minute: '2-digit'
+                              })}
+                            </td>
+                            <td className="p-4 font-bold font-mono text-slate-900">
+                              {mv.quantity.toLocaleString()}
+                            </td>
+                            <td className="p-4 font-semibold text-slate-600 max-w-xs truncate" title={mv.info}>
+                              {mv.info}
+                            </td>
+                            <td className="p-4 font-mono text-slate-600">
+                              ₹{mv.mrp.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
+                            </td>
+                            <td className="p-4 font-bold font-mono text-slate-900">
+                              ₹{mv.total.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 })}
+                            </td>
+                            <td className="p-4 text-right text-slate-500 text-[10px] whitespace-nowrap font-bold uppercase tracking-wider">
+                              {mv.operator}
+                            </td>
+                          </tr>
+                        ));
+                      })()}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Modal Footer */}
+            <div className="bg-slate-50 px-6 py-4 border-t border-slate-200 shrink-0 flex justify-between items-center text-slate-500 text-xs font-semibold">
+              <div className="font-medium">
+                Current Valuation: <span className="font-mono font-bold text-slate-900">₹{(viewingPartDetails.quantity * viewingPartDetails.mrp).toLocaleString()}</span> (Stock × MRP)
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setViewingPartDetails(null);
+                  setMovementTab('all');
+                }}
+                className="bg-white hover:bg-slate-100 border border-slate-200 text-slate-700 px-4 py-2 rounded-xl text-xs font-bold cursor-pointer transition shadow-xs hover:border-slate-300"
+              >
+                Close
+              </button>
+            </div>
+
           </div>
         </div>
       )}

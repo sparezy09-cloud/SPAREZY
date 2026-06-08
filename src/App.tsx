@@ -41,6 +41,7 @@ export default function App() {
   // Progressive Web App (PWA) installation state & triggers
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [showInstallBtn, setShowInstallBtn] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   useEffect(() => {
     const handleBeforeInstall = (e: Event) => {
@@ -262,6 +263,20 @@ export default function App() {
     setIsMobileMenuOpen(false);
   };
 
+  const handleGlobalRefresh = async () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      await db.refreshAllData(activeBrand);
+      // Brief aesthetic timeout for spin feedback
+      await new Promise(resolve => setTimeout(resolve, 500));
+    } catch (err) {
+      console.error("Global refresh failed:", err);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
+
   // 10 modules routing translation
   const sidebarItems = [
     { name: 'Dashboard', icon: LayoutDashboard },
@@ -269,7 +284,7 @@ export default function App() {
     { name: 'Sales', icon: ShoppingBag },
     { name: 'Returns', icon: RotateCcw },
     { name: 'Purchases', icon: FileText },
-    { name: 'Bulk Updates', icon: FileSpreadsheet },
+    { name: 'Bulk Updates', icon: FileSpreadsheet, ownerOnly: true },
     { name: 'Customer & Dealer Ledgers', icon: Users },
     { name: 'Transaction Records', icon: Terminal, ownerOnly: true },
     { name: 'Settings / User Management', icon: Shield },
@@ -558,6 +573,19 @@ export default function App() {
             <div className="md:hidden">
               {renderRealtimeBadge()}
             </div>
+            
+            {/* Global Refresh Sync Button */}
+            <button
+              id="global-refresh-button"
+              onClick={handleGlobalRefresh}
+              disabled={isRefreshing}
+              title="Sync & refresh all databases"
+              className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs shadow-xs hover:border-slate-300 transition duration-150 cursor-pointer disabled:opacity-60 active:scale-95`}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-indigo-600 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">{isRefreshing ? 'Syncing...' : 'Sync'}</span>
+            </button>
+
             <span className="hidden md:inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-100">
               <span className="w-1 h-1 rounded-full bg-indigo-500 animate-pulse"></span>
               {activeUser.role} Session Active

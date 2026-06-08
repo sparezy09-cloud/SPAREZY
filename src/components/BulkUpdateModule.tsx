@@ -29,6 +29,20 @@ interface ParsedBulkStockRow {
 }
 
 export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps) {
+  if (user.role !== 'Owner') {
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center space-y-4 max-w-md mx-auto my-12 font-sans">
+        <div className="w-12 h-12 bg-rose-50 border border-rose-200 text-rose-600 rounded-full flex items-center justify-center mx-auto">
+          <AlertTriangle className="w-6 h-6" />
+        </div>
+        <h3 className="text-base font-bold text-slate-800">Access Denied</h3>
+        <p className="text-slate-500 text-xs leading-relaxed">
+          The Bulk Updates module is restricted to Owner roles only.
+        </p>
+      </div>
+    );
+  }
+
   const [updateType, setUpdateType] = useState<'MRP' | 'Stock'>('MRP');
   const [fileName, setFileName] = useState('');
   const [isParsing, setIsParsing] = useState(false);

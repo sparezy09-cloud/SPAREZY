@@ -3,7 +3,8 @@ import { Brand, User, CustomerCategory, PaymentStatus, InventoryItem, Customer, 
 import { db } from '../dbStore';
 import { 
   ShoppingBag, Search, PlusCircle, Check, Trash2, Printer, 
-  ChevronRight, Calendar, UserCheck, CreditCard, Eye, X, Plus
+  ChevronRight, Calendar, UserCheck, CreditCard, Eye, X, Plus,
+  Share2, MessageSquare
 } from 'lucide-react';
 
 interface SalesModuleProps {
@@ -41,6 +42,55 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const [historyCategory, setHistoryCategory] = useState<string>('All');
   const [historyPayment, setHistoryPayment] = useState<string>('All');
   const [selectedInvoiceForSlip, setSelectedInvoiceForSlip] = useState<Sale | null>(null);
+  const [targetWhatsAppPhone, setTargetWhatsAppPhone] = useState('');
+
+  // Pending payment recording states
+  const [paymentRecordingSale, setPaymentRecordingSale] = useState<Sale | null>(null);
+  const [receivingAmount, setReceivingAmount] = useState<number | string>('');
+
+  const handleSavePaymentRecording = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!paymentRecordingSale) return;
+    const amountToReceive = Number(receivingAmount) || 0;
+    if (amountToReceive <= 0) {
+      alert("Please enter a valid amount greater than 0.");
+      return;
+    }
+    if (amountToReceive > paymentRecordingSale.pending_amount) {
+      alert(`Cannot receive more than the pending amount of ₹${paymentRecordingSale.pending_amount.toFixed(2)}`);
+      return;
+    }
+
+    const nextPaid = paymentRecordingSale.paid_amount + amountToReceive;
+    const nextPending = Math.max(0, paymentRecordingSale.total_amount - nextPaid);
+    let nextStatus: PaymentStatus = 'Custom Amount';
+    if (nextPending === 0) {
+      nextStatus = 'Paid';
+    }
+
+    try {
+      db.updateSalePayment(brand, paymentRecordingSale.id, nextPaid, nextStatus, user);
+      triggerToast(`Successfully recorded payment of ₹${amountToReceive.toLocaleString('en-IN')}!`);
+      setPaymentRecordingSale(null);
+      setReceivingAmount('');
+    } catch (err: any) {
+      alert(err.message || "Failed to update payment");
+    }
+  };
+
+  const handleClearFullBalance = () => {
+    if (!paymentRecordingSale) return;
+    const amountToReceive = paymentRecordingSale.pending_amount;
+    const nextPaid = paymentRecordingSale.total_amount;
+    try {
+      db.updateSalePayment(brand, paymentRecordingSale.id, nextPaid, 'Paid', user);
+      triggerToast(`Successfully recorded full outstanding payment of ₹${amountToReceive.toLocaleString('en-IN')}!`);
+      setPaymentRecordingSale(null);
+      setReceivingAmount('');
+    } catch (err: any) {
+      alert(err.message || "Failed to update payment");
+    }
+  };
 
   // Refresh references
   const [inventoryList, setInventoryList] = useState<InventoryItem[]>(() => db.getInventory(brand));
@@ -59,6 +109,15 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     return db.subscribe(refreshComponentData);
   }, [brand]);
 
+  React.useEffect(() => {
+    if (selectedInvoiceForSlip) {
+      const parentCustomer = customersList.find(c => c.id === selectedInvoiceForSlip.customer_id);
+      setTargetWhatsAppPhone(parentCustomer?.phone || '');
+    } else {
+      setTargetWhatsAppPhone('');
+    }
+  }, [selectedInvoiceForSlip, customersList]);
+
   const triggerToast = (msg: string) => {
     setToastMessageLocal(msg);
     setTimeout(() => setToastMessageLocal(null), 3000);
@@ -74,7 +133,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     }).slice(0, 5); // top 5 matches
   }, [inventoryList, partSearch]);
 
-  const handleCreateNewCustomer = () => {
+  const handleCreateNewCustomer = async () => {
     if (!customerName.trim()) return;
     const existing = customersList.find(c => c.customer_name.trim().toLowerCase() === customerName.trim().toLowerCase());
     if (existing) {
@@ -82,10 +141,14 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       triggerToast(`Found existing customer: ${existing.customer_name}`);
       return;
     }
-    const created = db.addCustomer(customerName, customerCategory, phone);
-    refreshComponentData();
-    setSelectedCustomerId(created.id);
-    triggerToast(`Registered new customer ${created.customer_name}`);
+    try {
+      const created = await db.addCustomer(customerName, customerCategory, phone);
+      refreshComponentData();
+      setSelectedCustomerId(created.id);
+      triggerToast(`Registered new customer ${created.customer_name}`);
+    } catch (err: any) {
+      alert(`Customer registration failed: ${err.message || err}`);
+    }
   };
 
   const handleSelectExistingCustomer = (c: Customer) => {
@@ -144,6 +207,15 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     }));
   };
 
+  const handleUpdateCheckoutMRP = (partNo: string, val: number) => {
+    setCheckoutParts(checkoutParts.map(p => {
+      if (p.part_no === partNo) {
+        return { ...p, mrp: Math.max(0, val) };
+      }
+      return p;
+    }));
+  };
+
   // Math Calculations
   const checkoutSubtotal = useMemo(() => {
     return checkoutParts.reduce((acc, p) => {
@@ -171,7 +243,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       : Math.max(0, checkoutTotal - customPaidAmount);
 
   // SAVE BILL DISPATCH
-  const handleSaveBill = (e: React.FormEvent) => {
+  const handleSaveBill = async (e: React.FormEvent) => {
     e.preventDefault();
     if (checkoutParts.length === 0) {
       alert("Please add at least one part to save invoice");
@@ -187,7 +259,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       // 1. Resolve Customer registration code
       let finalCustId = selectedCustomerId;
       if (!finalCustId) {
-        const created = db.addCustomer(customerName, customerCategory, phone);
+        const created = await db.addCustomer(customerName, customerCategory, phone);
         finalCustId = created.id;
       }
 
@@ -195,10 +267,11 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       const payloadItems = checkoutParts.map(p => ({
         part_no: p.part_no,
         quantity: p.qty_to_sell,
-        discount_percentage: p.discount_percentage
+        discount_percentage: p.discount_percentage,
+        mrp: p.mrp
       }));
 
-      const newSale = db.createSale(
+      const newSale = await db.createSale(
         brand,
         finalCustId,
         customerName,
@@ -251,6 +324,58 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     const allItems = db.getSaleItems(brand);
     return allItems.filter(item => item.sale_id === selectedInvoiceForSlip.id);
   }, [selectedInvoiceForSlip, brand]);
+
+  const handleShareWhatsApp = () => {
+    if (!selectedInvoiceForSlip) return;
+
+    // Clean phone number: remove any non-digit/non-plus characters
+    const cleanedPhone = targetWhatsAppPhone.replace(/[^\d+]/g, '').trim();
+    // Strip leading '+' or non-digits for standard wa.me API format
+    const finalPhoneDigits = cleanedPhone.replace(/\D/g, '');
+
+    const dateStr = new Date(selectedInvoiceForSlip.sale_date).toLocaleString(undefined, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+
+    let message = `*SPAREZY Auto Spares - Sale Slip*\n`;
+    message += `===============================\n`;
+    message += `*Invoice ID:* ${selectedInvoiceForSlip.id.substring(0, 8).toUpperCase()}\n`;
+    message += `*Date:* ${dateStr}\n`;
+    message += `*Customer:* ${selectedInvoiceForSlip.customer_name} (${selectedInvoiceForSlip.customer_category})\n`;
+    message += `===============================\n`;
+    message += `*Items:*\n`;
+
+    selectedInvoiceItems.forEach((line) => {
+      message += `• *${line.part_name}*\n  ${line.quantity} pcs × ₹${line.mrp.toFixed(0)}`;
+      if (line.discount_percentage > 0) {
+        message += ` (-${line.discount_percentage}%)`;
+      }
+      message += ` = *₹${line.final_amount.toFixed(0)}*\n`;
+    });
+
+    message += `===============================\n`;
+    message += `*Subtotal:* ₹${selectedInvoiceForSlip.subtotal.toFixed(2)}\n`;
+    if (selectedInvoiceForSlip.discount_amount > 0) {
+      message += `*Discount (${selectedInvoiceForSlip.discount_percentage}%):* -₹${selectedInvoiceForSlip.discount_amount.toFixed(2)}\n`;
+    }
+    message += `*Total Paid Amount:* *₹${selectedInvoiceForSlip.paid_amount.toFixed(2)}*\n`;
+    if (selectedInvoiceForSlip.pending_amount > 0) {
+      message += `*Pending Balance:* *₹${selectedInvoiceForSlip.pending_amount.toFixed(2)}*\n`;
+    }
+    message += `===============================\n`;
+    message += `Thank you for doing business with us!\n`;
+    message += `_SPAREZY POS system_`;
+
+    const encodedText = encodeURIComponent(message);
+    const whatsappUrl = `https://api.whatsapp.com/send?phone=${finalPhoneDigits}&text=${encodedText}`;
+    window.open(whatsappUrl, '_blank', 'noopener,noreferrer');
+    
+    triggerToast("Opening WhatsApp Share link...");
+  };
 
   return (
     <div className="space-y-6">
@@ -454,7 +579,19 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                               <p className="text-[10px] text-slate-400 font-normal leading-tight">{item.part_name}</p>
                             </td>
                             
-                            <td className="p-3 text-center">₹{item.mrp}</td>
+                            <td className="p-3 text-center">
+                              <div className="inline-flex items-center gap-1 justify-center">
+                                <span className="text-slate-400 font-bold">₹</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="any"
+                                  className="w-20 p-1 border border-slate-200 rounded text-center text-xs font-bold font-mono"
+                                  value={item.mrp}
+                                  onChange={(e) => handleUpdateCheckoutMRP(item.part_no, Number(e.target.value))}
+                                />
+                              </div>
+                            </td>
                             
                             <td className="p-3 text-center">
                               <div className="inline-flex items-center gap-1 justify-center">
@@ -688,18 +825,36 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                       <td className="p-4 text-center">{sale.discount_percentage}%</td>
                       <td className="p-4 font-bold text-slate-900">₹{sale.total_amount.toFixed(2)}</td>
                       <td className="p-4">
-                        <span className={`inline-flex px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                          sale.payment_status === 'Paid' 
-                            ? 'bg-emerald-50 text-emerald-700' 
-                            : 'bg-amber-50 text-amber-700'
-                        }`}>
-                          {sale.payment_status}
-                        </span>
+                        <div className="flex flex-col gap-0.5">
+                          <span className={`inline-flex self-start px-2 py-0.5 rounded-full text-[9px] font-bold ${
+                            sale.payment_status === 'Paid' 
+                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                              : 'bg-amber-50 text-amber-700 border border-amber-200'
+                          }`}>
+                            {sale.payment_status}
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-mono">Paid: ₹{(sale.paid_amount || 0).toLocaleString('en-IN')}</span>
+                          {(sale.pending_amount || 0) > 0 && (
+                            <span className="text-[10px] text-amber-600 font-bold font-mono">Due: ₹{sale.pending_amount.toLocaleString('en-IN')}</span>
+                          )}
+                        </div>
                       </td>
-                      <td className="p-4 text-right flex justify-end gap-1.5">
+                      <td className="p-4 text-right flex justify-end gap-1.5 items-center">
+                        {sale.pending_amount > 0 && (
+                          <button
+                            onClick={() => {
+                              setPaymentRecordingSale(sale);
+                              setReceivingAmount('');
+                            }}
+                            className="p-1 px-2 text-emerald-650 hover:bg-emerald-50 border border-emerald-200 hover:border-emerald-300 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
+                          >
+                            <CreditCard className="w-3 h-3 text-emerald-600" />
+                            Record Payment
+                          </button>
+                        )}
                         <button
                           onClick={() => setSelectedInvoiceForSlip(sale)}
-                          className="p-1 px-2 text-indigo-650 hover:bg-indigo-50 border border-slate-200 hover:border-indigo-200 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                          className="p-1 px-2 text-indigo-650 hover:bg-indigo-50 border border-slate-200 hover:border-indigo-200 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition"
                         >
                           <Eye className="w-3.5 h-3.5" />
                           View / Print Slip
@@ -815,33 +970,193 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
             </div>
 
             {/* Print and Save Options */}
-            <div className="p-4 bg-slate-50 border-t border-slate-200 flex gap-2.5 no-print">
-              <button
-                type="button"
-                onClick={() => {
-                  const content = document.getElementById('print-receipt-paper')?.innerHTML;
-                  const win = window.open('', '', 'height=600,width=400');
-                  if (win) {
-                    win.document.write('<html><head><title>Sparezy POS Slip</title><style>body { font-family: monospace; padding: 20px; text-transform: uppercase; color: #000; }</style></head><body>');
-                    win.document.write(content || '');
-                    win.document.write('</body></html>');
-                    win.document.close();
-                    win.print();
-                  }
-                }}
-                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+            <div className="p-5 bg-slate-50 border-t border-slate-200 flex flex-col gap-4 no-print">
+              
+              {/* WhatsApp Live Sharing Form */}
+              <div className="bg-white border border-slate-200 rounded-xl p-3.5 space-y-2.5 shadow-2xs">
+                <div className="flex items-center gap-1.5 text-indigo-700 font-bold uppercase tracking-wider text-[9px] font-sans">
+                  <MessageSquare className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>WhatsApp Sale Slip Share</span>
+                </div>
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 font-bold font-mono text-[10px]">+</span>
+                    <input
+                      id="whatsapp-share-phone"
+                      type="tel"
+                      placeholder="919876543210 (Country Code + Phone)"
+                      value={targetWhatsAppPhone}
+                      onChange={(e) => setTargetWhatsAppPhone(e.target.value)}
+                      className="w-full pl-5 pr-2.5 py-2 font-mono text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-indigo-500 bg-slate-50 focus:bg-white"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    id="whatsapp-share-submit"
+                    onClick={handleShareWhatsApp}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-3.5 py-2 rounded-lg flex items-center gap-1.5 transition duration-150 shadow-sm cursor-pointer whitespace-nowrap"
+                  >
+                    <Share2 className="w-3.5 h-3.5" />
+                    Share Slip
+                  </button>
+                </div>
+                <p className="text-[9px] text-slate-400 leading-normal font-sans">
+                  Make sure to include the country code (e.g. 91) without '+' or spaces.
+                </p>
+              </div>
+
+              {/* Print and Close buttons */}
+              <div className="flex gap-2.5">
+                <button
+                  type="button"
+                  id="print-trigger-button"
+                  onClick={() => {
+                    const content = document.getElementById('print-receipt-paper')?.innerHTML;
+                    const win = window.open('', '', 'height=600,width=400');
+                    if (win) {
+                      win.document.write('<html><head><title>Sparezy POS Slip</title><style>body { font-family: monospace; padding: 20px; text-transform: uppercase; color: #000; }</style></head><body>');
+                      win.document.write(content || '');
+                      win.document.write('</body></html>');
+                      win.document.close();
+                      win.print();
+                    }
+                  }}
+                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl font-bold flex items-center justify-center gap-1.5 cursor-pointer text-xs"
+                >
+                  <Printer className="w-4 h-4" />
+                  Trigger Print
+                </button>
+                <button
+                  type="button"
+                  id="close-view-button"
+                  onClick={() => setSelectedInvoiceForSlip(null)}
+                  className="bg-slate-200 hover:bg-slate-300 text-slate-700 px-4 py-2.5 rounded-xl font-medium cursor-pointer text-xs"
+                >
+                  Close View
+                </button>
+              </div>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* RECORD PAYMENT MODAL */}
+      {paymentRecordingSale !== null && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md border border-slate-200 overflow-hidden text-xs">
+            
+            {/* Header */}
+            <div className="bg-slate-50 px-5 py-4 border-b border-slate-200 flex justify-between items-center">
+              <div className="space-y-0.5">
+                <span className="text-[9px] uppercase font-bold text-indigo-600">Register Pending Payment</span>
+                <h3 className="font-extrabold text-slate-900 text-sm">Invoice #{paymentRecordingSale.id} Summary</h3>
+              </div>
+              <button 
+                onClick={() => setPaymentRecordingSale(null)}
+                className="p-1 hover:bg-slate-200 rounded text-slate-500 cursor-pointer"
               >
-                <Printer className="w-4 h-4" />
-                Trigger Print
-              </button>
-              <button
-                type="button"
-                onClick={() => setSelectedInvoiceForSlip(null)}
-                className="bg-slate-200 hover:bg-slate-300 text-slate-700 px-4 py-2.5 rounded-xl font-medium cursor-pointer"
-              >
-                Close View
+                <X className="w-4 h-4" />
               </button>
             </div>
+
+            <form onSubmit={handleSavePaymentRecording} className="p-6 space-y-5 font-sans">
+              
+              {/* Detailed Breakdown */}
+              <div className="bg-slate-50 p-4 border border-slate-200 rounded-xl space-y-2 text-slate-700">
+                <div className="flex justify-between items-center text-[10px] text-slate-400 font-bold uppercase tracking-wider pb-1.5 border-b border-slate-200">
+                  <span>Customer details</span>
+                  <span>Invoice info</span>
+                </div>
+                <div className="flex justify-between font-semibold">
+                  <span className="text-slate-900 font-bold text-sm">{paymentRecordingSale.customer_name}</span>
+                  <span className="text-slate-500 font-mono text-[11px]">{new Date(paymentRecordingSale.sale_date).toLocaleDateString()}</span>
+                </div>
+                <div className="flex justify-between text-xs font-medium text-slate-500">
+                  <span>Category: {paymentRecordingSale.customer_category}</span>
+                  <span>Total Bill: ₹{paymentRecordingSale.total_amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                </div>
+                <div className="h-px bg-slate-200 my-2"></div>
+                <div className="flex justify-between font-mono text-[11px]">
+                  <span className="text-emerald-700 font-bold font-sans">Already Cleared:</span>
+                  <span className="text-emerald-700 font-bold">₹{paymentRecordingSale.paid_amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                </div>
+                <div className="flex justify-between font-mono text-[11px]">
+                  <span className="text-amber-800 font-bold font-sans">Current Outstanding:</span>
+                  <span className="text-amber-800 font-bold text-amber-700">₹{paymentRecordingSale.pending_amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                </div>
+              </div>
+
+              {/* Input section */}
+              <div className="space-y-2 text-left">
+                <label className="block text-slate-500 font-bold text-[10px] uppercase tracking-wider text-left">
+                  Receive Additional Payment Amount
+                </label>
+                <div className="relative">
+                  <span className="absolute left-3 top-2.5 text-xs text-slate-400 font-bold">₹</span>
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="any"
+                    max={paymentRecordingSale.pending_amount}
+                    placeholder="Enter received amount (INR)"
+                    required
+                    className="w-full pl-7 pr-4 py-2 border border-slate-200 rounded-xl font-bold font-mono text-slate-900 focus:ring-1 focus:ring-indigo-650"
+                    value={receivingAmount}
+                    onChange={(e) => setReceivingAmount(e.target.value)}
+                  />
+                </div>
+                <p className="text-[10px] text-slate-450 leading-relaxed font-normal">
+                  Receive a custom partial amount or click "Clear Full Balance" below to wipe the balance off.
+                </p>
+              </div>
+
+              {/* Dynamic calculations on entry */}
+              {Number(receivingAmount) > 0 && Number(receivingAmount) <= paymentRecordingSale.pending_amount && (
+                <div className="bg-indigo-50/50 p-3.5 border border-indigo-100 rounded-xl space-y-1 font-semibold text-indigo-950 text-left">
+                  <div className="flex justify-between text-[11px]">
+                    <span className="font-sans">New Total Paid:</span>
+                    <span className="font-mono font-bold">₹{(paymentRecordingSale.paid_amount + Number(receivingAmount)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                  </div>
+                  <div className="flex justify-between text-[11px]">
+                    <span className="font-sans">Remaining Outstanding Due:</span>
+                    <span className="font-mono font-bold text-amber-700">₹{Math.max(0, paymentRecordingSale.pending_amount - Number(receivingAmount)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className="flex flex-col gap-2 pt-2 text-xs font-bold font-sans">
+                <button
+                  type="submit"
+                  className="w-full bg-slate-900 hover:bg-black text-white py-2.5 rounded-xl cursor-pointer text-center flex items-center justify-center gap-1 shadow-sm transition"
+                >
+                  <Check className="w-4 h-4 text-emerald-450" />
+                  Save Partial Payment
+                </button>
+                
+                <button
+                  type="button"
+                  onClick={handleClearFullBalance}
+                  className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-2.5 rounded-xl cursor-pointer text-center flex items-center justify-center gap-1 shadow-sm transition"
+                >
+                  <Check className="w-4 h-4" />
+                  Clear Full Balance (₹{paymentRecordingSale.pending_amount.toLocaleString('en-IN')})
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPaymentRecordingSale(null);
+                    setReceivingAmount('');
+                  }}
+                  className="w-full bg-slate-100 text-slate-600 hover:bg-slate-200 py-2.5 rounded-xl cursor-pointer text-center transition"
+                >
+                  Cancel
+                </button>
+              </div>
+
+            </form>
 
           </div>
         </div>

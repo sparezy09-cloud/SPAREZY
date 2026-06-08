@@ -287,6 +287,43 @@ export const db = {
     return b === 'hyundai' ? !!diagnosticStats.hyundaiInventoryOk : !!diagnosticStats.mahindraInventoryOk;
   },
 
+  refreshAllData: async (brand: Brand | null): Promise<void> => {
+    if (!isSupabaseConfigured || !supabase) {
+      db.notify();
+      return;
+    }
+    try {
+      console.log("[Refresh Engine] Purging stale metadata & reloading public tables...");
+      const [usersRes, customersRes, logsRes] = await Promise.all([
+        supabase.from('users').select('*'),
+        supabase.from('customers').select('*'),
+        supabase.from('transaction_logs').select('*').order('created_at', { ascending: false }),
+      ]);
+      if (usersRes.data) {
+        cache.users = usersRes.data.map(scrubRow) as User[];
+      }
+      if (customersRes.data) {
+        cache.customers = customersRes.data.map(scrubRow) as Customer[];
+      }
+      if (logsRes.data) {
+        cache.transaction_logs = logsRes.data.map(scrubRow) as TransactionLog[];
+      }
+    } catch (err) {
+      console.error("[Refresh Engine] Error refreshing public tables:", err);
+    }
+
+    if (brand) {
+      try {
+        console.log(`[Refresh Engine] Re-fetching active brand partitions for: ${brand}`);
+        await db.loadBrandData(brand);
+      } catch (err) {
+        console.error(`[Refresh Engine] Error refreshing brand data for ${brand}:`, err);
+      }
+    } else {
+      db.notify();
+    }
+  },
+
   // Load and bootstrap Supabase integration async (public tables only)
   initialize: async () => {
     initLocalFallback();
@@ -369,16 +406,16 @@ export const db = {
         if (profile) {
           if (profile.status === 'Disabled') {
             await supabase.auth.signOut();
-            localStorage.removeItem(KEY_ACTIVE_USER);
+            sessionStorage.removeItem(KEY_ACTIVE_USER);
           } else {
-            localStorage.setItem(KEY_ACTIVE_USER, JSON.stringify(profile));
+            sessionStorage.setItem(KEY_ACTIVE_USER, JSON.stringify(profile));
           }
         } else {
           await supabase.auth.signOut();
-          localStorage.removeItem(KEY_ACTIVE_USER);
+          sessionStorage.removeItem(KEY_ACTIVE_USER);
         }
       } else {
-        localStorage.removeItem(KEY_ACTIVE_USER);
+        sessionStorage.removeItem(KEY_ACTIVE_USER);
       }
 
       // Handle Current Schema RPC result
@@ -726,17 +763,17 @@ export const db = {
 
   // Active Preference Helpers
   getActiveUser: (): User | null => {
-    const active = localStorage.getItem(KEY_ACTIVE_USER);
+    const active = sessionStorage.getItem(KEY_ACTIVE_USER);
     if (active) return JSON.parse(active);
     return null;
   },
 
   setActiveUser: (user: User | null) => {
     if (user) {
-      localStorage.setItem(KEY_ACTIVE_USER, JSON.stringify(user));
+      sessionStorage.setItem(KEY_ACTIVE_USER, JSON.stringify(user));
       db.logTransaction(user.id, user.name, 'Login', 'User Management', `User ${user.name} logged in successfully`, null, null);
     } else {
-      localStorage.removeItem(KEY_ACTIVE_USER);
+      sessionStorage.removeItem(KEY_ACTIVE_USER);
     }
     db.notify();
   },
@@ -964,7 +1001,7 @@ export const db = {
     return cache.customers;
   },
 
-  addCustomer: (name: string, category: CustomerCategory, phone?: string): Customer => {
+  addCustomer: async (name: string, category: CustomerCategory, phone?: string): Promise<Customer> => {
     const newCust: Customer = {
       id: uuid(),
       customer_name: name,
@@ -972,16 +1009,22 @@ export const db = {
       phone: phone || '',
       created_at: new Date().toISOString()
     };
-    cache.customers.push(newCust);
+    cache.customers.unshift(newCust); // Use unshift to add to top of lists
     
     if (isSupabaseConfigured && supabase) {
-      supabase.from('customers').insert(newCust).then();
+      const { error } = await supabase.from('customers').insert(newCust);
+      if (error) {
+        console.error("❌ Error inserting customer into Supabase:", error);
+        throw new Error(`Failed to create customer: ${error.message}`);
+      }
     } else {
       localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(cache.customers));
     }
     
     const activeUser = db.getActiveUser();
-    db.logTransaction(activeUser.id, activeUser.name, 'Create Customer', 'Customer Ledger', `Created customer ${name} categorised under ${category}`, null, newCust);
+    const userId = activeUser ? activeUser.id : 'system';
+    const userName = activeUser ? activeUser.name : 'System';
+    db.logTransaction(userId, userName, 'Create Customer', 'Customer Ledger', `Created customer ${name} categorised under ${category}`, null, newCust);
     db.notify();
     return newCust;
   },
@@ -1330,17 +1373,17 @@ export const db = {
     db.notify();
   },
 
-  createSale: (
+  createSale: async (
     brand: Brand, 
     customerId: string, 
     customerName: string, 
     customerCategory: CustomerCategory,
-    items: { part_no: string; quantity: number; discount_percentage: number }[],
+    items: { part_no: string; quantity: number; discount_percentage: number; mrp?: number }[],
     discountPercentage: number,
     paymentStatus: PaymentStatus,
     paidAmount: number,
     user: User
-  ): Sale => {
+  ): Promise<Sale> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const inventory = cache[b].inventory;
     const saleId = uuid();
@@ -1378,7 +1421,8 @@ export const db = {
         }).eq('id', invItem.id).then();
       }
       
-      const itemSubtotal = invItem.mrp * shopItem.quantity;
+      const partMrp = shopItem.mrp !== undefined ? shopItem.mrp : invItem.mrp;
+      const itemSubtotal = partMrp * shopItem.quantity;
       const disAmount = itemSubtotal * (shopItem.discount_percentage / 100);
       const finalAmount = itemSubtotal - disAmount;
       
@@ -1390,7 +1434,7 @@ export const db = {
         part_no: invItem.part_no,
         part_name: invItem.part_name,
         quantity: shopItem.quantity,
-        mrp: invItem.mrp,
+        mrp: partMrp,
         discount_percentage: shopItem.discount_percentage,
         final_amount: finalAmount,
         returned_quantity: 0,
@@ -1439,15 +1483,60 @@ export const db = {
     saleItemsList.push(...itemsToSave);
     
     if (isSupabaseConfigured && supabase) {
-      supabase.schema(b).from('sales').insert(sale).then(() => {
-        supabase.schema(b).from('sale_items').insert(itemsToSave).then();
-      });
+      const { error: saleErr } = await supabase.schema(b).from('sales').insert(sale);
+      if (saleErr) {
+        console.error("❌ Error inserting sale into Supabase:", saleErr);
+        // Rollback memory cache so list stays in sync with real database
+        cache[b].sales.shift();
+        throw new Error(`Failed to save invoice in database: ${saleErr.message}`);
+      }
+      
+      const { error: itemsErr } = await supabase.schema(b).from('sale_items').insert(itemsToSave);
+      if (itemsErr) {
+        console.error("❌ Error inserting sale items into Supabase:", itemsErr);
+        throw new Error(`Invoice saved, but item details failed to save in database: ${itemsErr.message}`);
+      }
     } else {
       localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(cache[b].sales));
       localStorage.setItem(`sparezy_schema_${b}_sale_items`, JSON.stringify(saleItemsList));
     }
     
     db.logTransaction(user.id, user.name, 'Create Sale', 'Sales', `Created invoice ${saleId} for ${customerName} (₹${totalAmount.toFixed(2)})`, null, sale);
+    db.notify();
+    return sale;
+  },
+
+  updateSalePayment: (
+    brand: Brand,
+    saleId: string,
+    paidAmount: number,
+    paymentStatus: PaymentStatus,
+    user: User
+  ): Sale => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    const sales = cache[b].sales;
+    const saleIdx = sales.findIndex(s => s.id === saleId);
+    if (saleIdx === -1) {
+      throw new Error(`Sale ID ${saleId} not found.`);
+    }
+    const sale = sales[saleIdx];
+    const oldSale = { ...sale };
+
+    sale.paid_amount = paidAmount;
+    sale.pending_amount = Math.max(0, sale.total_amount - paidAmount);
+    sale.payment_status = paymentStatus;
+    
+    if (isSupabaseConfigured && supabase) {
+      supabase.schema(b).from('sales').update({
+        paid_amount: sale.paid_amount,
+        pending_amount: sale.pending_amount,
+        payment_status: sale.payment_status
+      }).eq('id', sale.id).then();
+    } else {
+      localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(sales));
+    }
+
+    db.logTransaction(user.id, user.name, 'Receive Payment', 'Sales', `Received payment for invoice ${saleId} (Total: ₹${sale.total_amount}, Paid: ₹${paidAmount}, Pending: ₹${sale.pending_amount})`, oldSale, sale);
     db.notify();
     return sale;
   },

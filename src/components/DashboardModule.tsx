@@ -237,7 +237,13 @@ export default function DashboardModule({ brand, user, onNavigateToModule }: Das
             </div>
           </div>
           <div className="mt-4">
-            <h3 className="text-2xl font-black text-slate-900 tracking-tight">₹{totalValuation.toLocaleString('en-IN')}</h3>
+            {user.role === 'Manager' ? (
+              <h3 className="text-base font-bold text-slate-400 tracking-tight py-1 inline-flex items-center gap-1">
+                <span>🔒 Restricted</span>
+              </h3>
+            ) : (
+              <h3 className="text-2xl font-black text-slate-900 tracking-tight">₹{totalValuation.toLocaleString('en-IN')}</h3>
+            )}
             <p className="text-[10px] text-slate-400 font-semibold mt-1 flex items-center gap-1 uppercase tracking-wider">
               <span>Qty: {totalQty.toLocaleString()} units in stock</span>
             </p>
