@@ -10,6 +10,7 @@ interface ReturnModuleProps {
 
 export default function ReturnModule({ brand, user }: ReturnModuleProps) {
   const [search, setSearch] = useState('');
+  const [selectedCustomer, setSelectedCustomer] = useState('All');
   const [returnQty, setReturnQty] = useState<Record<string, number>>({});
   const [toastMessageLocal, setToastMessageLocal] = useState<string | null>(null);
 
@@ -26,6 +27,7 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
 
   useEffect(() => {
     refreshComponentData();
+    setSelectedCustomer('All');
     return db.subscribe(refreshComponentData);
   }, [brand]);
 
@@ -72,9 +74,23 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
     return lines;
   }, [salesList, saleItemsList]);
 
+  // Compile unique customer names for tab filtering
+  const customerTabs = useMemo(() => {
+    const namesSet = new Set<string>();
+    saleLinesView.forEach(line => {
+      if (line.customer_name) {
+        namesSet.add(line.customer_name);
+      }
+    });
+    return ['All', ...Array.from(namesSet).sort()];
+  }, [saleLinesView]);
+
   // Filters for available products we can return
   const filteredLines = useMemo(() => {
     return saleLinesView.filter(line => {
+      const matchesCustomer = selectedCustomer === 'All' || line.customer_name.toLowerCase() === selectedCustomer.toLowerCase();
+      if (!matchesCustomer) return false;
+
       const matchesSearch = line.part_no.toLowerCase().includes(search.toLowerCase()) || 
                             line.part_name.toLowerCase().includes(search.toLowerCase()) ||
                             line.customer_name.toLowerCase().includes(search.toLowerCase()) ||
@@ -83,7 +99,7 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
       const hasReturnableStock = line.quantity - line.returned_quantity > 0;
       return matchesSearch && hasReturnableStock;
     });
-  }, [saleLinesView, search]);
+  }, [saleLinesView, search, selectedCustomer]);
 
   const handleReturnAmountOfLine = (lineId: string, item: typeof saleLinesView[0]) => {
     const qtyToReturn = returnQty[lineId] || 0;
@@ -160,6 +176,43 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
             <h3 className="font-bold text-slate-800 text-xs uppercase tracking-wide">
               Step 1: Search Original sold item line
             </h3>
+
+            {/* Customer Name Tabs Filter */}
+            <div className="space-y-1.5 pt-1">
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">
+                Select Customer Name Tab:
+              </span>
+              <div id="customer-tabs-scroll-container" className="flex items-center gap-1.5 overflow-x-auto pb-1.5 scrollbar-none snap-x">
+                {customerTabs.map((customer) => {
+                  const isSelected = selectedCustomer.toLowerCase() === customer.toLowerCase();
+                  // Count of items sold to this customer
+                  const count = saleLinesView.filter(l => 
+                    (customer === 'All' || l.customer_name.toLowerCase() === customer.toLowerCase()) && 
+                    (l.quantity - l.returned_quantity > 0)
+                  ).length;
+
+                  return (
+                    <button
+                      key={customer}
+                      id={`customer-tab-${customer.replace(/\s+/g, '-').toLowerCase()}`}
+                      onClick={() => setSelectedCustomer(customer)}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold transition whitespace-nowrap flex items-center gap-1.5 border cursor-pointer snap-start ${
+                        isSelected
+                          ? 'bg-indigo-600 text-white border-indigo-650 shadow-sm'
+                          : 'bg-slate-50 text-slate-650 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      <span>{customer === 'All' ? '📂 All Customers' : customer}</span>
+                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                        isSelected ? 'bg-indigo-700/80 text-white' : 'bg-slate-200 text-slate-600'
+                      }`}>
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
             
             <div className="relative">
               <Search className="absolute left-3 top-2.5 w-4.5 h-4.5 text-slate-400" />
