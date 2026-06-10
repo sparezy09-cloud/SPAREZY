@@ -180,6 +180,66 @@ export default function App() {
     };
   }, []);
 
+  // Automated background real-time synchronization without user disruption
+  useEffect(() => {
+    if (!activeUser || !activeBrand) return;
+
+    let isSyncingInBackground = false;
+
+    const silentSync = async () => {
+      if (isSyncingInBackground) return;
+      isSyncingInBackground = true;
+      try {
+        await db.refreshAllData(activeBrand);
+      } catch (err) {
+        console.warn("[Background Sync] Silent database refresh notice:", err);
+      } finally {
+        isSyncingInBackground = false;
+      }
+    };
+
+    // 1. Periodic silent background sync every 8 seconds
+    const intervalId = setInterval(() => {
+      // Only sync if tab is currently visible and device is online
+      if (document.visibilityState === 'visible' && navigator.onLine) {
+        silentSync();
+      }
+    }, 8000);
+
+    // 2. Tab Visibility Focus Sync: Sync immediately on tab focus or visibility change
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        silentSync();
+      }
+    };
+
+    window.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    window.addEventListener('focus', handleVisibilityOrFocus);
+
+    // 3. Tab-to-Tab Instant Sync Broadcast Channel
+    let syncChannel: BroadcastChannel | null = null;
+    try {
+      syncChannel = new BroadcastChannel('sparezy_data_sync_channel');
+      syncChannel.onmessage = (event) => {
+        if (event.data === 'sync_trigger') {
+          console.log("⚡ [Data Sync Channel] Mutation signal received from other tab. Syncing silently...");
+          silentSync();
+        }
+      };
+    } catch (e) {
+      console.warn("Failed to initialize data sync BroadcastChannel:", e);
+    }
+
+    return () => {
+      clearInterval(intervalId);
+      window.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+      if (syncChannel) {
+        syncChannel.close();
+      }
+    };
+  }, [activeUser, activeBrand]);
+
   // 20 minutes inactivity timeout logic (synchronized across tabs/sessions via localStorage)
   useEffect(() => {
     if (!activeUser) return;

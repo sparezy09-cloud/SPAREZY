@@ -42,6 +42,12 @@ export interface Customer {
   created_at: string;
 }
 
+export interface PaymentBreakdown {
+  cash: number;
+  upi: number;
+  bank: number;
+}
+
 export interface Sale {
   id: string;
   customer_id: string;
@@ -57,6 +63,7 @@ export interface Sale {
   pending_amount: number;
   created_by: string; // User Name
   created_at: string;
+  payment_breakdown?: PaymentBreakdown;
 }
 
 export interface SaleItem {

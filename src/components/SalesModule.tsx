@@ -1,10 +1,10 @@
 import React, { useState, useMemo } from 'react';
 import { Brand, User, CustomerCategory, PaymentStatus, InventoryItem, Customer, Sale, SaleItem } from '../types';
-import { db } from '../dbStore';
+import { db, parseCreatedBy } from '../dbStore';
 import { 
   ShoppingBag, Search, PlusCircle, Check, Trash2, Printer, 
   ChevronRight, Calendar, UserCheck, CreditCard, Eye, X, Plus,
-  Share2, MessageSquare
+  Share2, MessageSquare, RotateCcw
 } from 'lucide-react';
 
 interface SalesModuleProps {
@@ -36,6 +36,9 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const [globalDiscount, setGlobalDiscount] = useState<number>(0);
   const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('Paid');
   const [customPaidAmount, setCustomPaidAmount] = useState<number>(0);
+  const [splitCash, setSplitCash] = useState<number>(0);
+  const [splitUpi, setSplitUpi] = useState<number>(0);
+  const [splitBank, setSplitBank] = useState<number>(0);
 
   // History states
   const [historySearch, setHistorySearch] = useState('');
@@ -47,13 +50,20 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   // Pending payment recording states
   const [paymentRecordingSale, setPaymentRecordingSale] = useState<Sale | null>(null);
   const [receivingAmount, setReceivingAmount] = useState<number | string>('');
+  const [recCash, setRecCash] = useState<number>(0);
+  const [recUpi, setRecUpi] = useState<number>(0);
+  const [recBank, setRecBank] = useState<number>(0);
 
   const handleSavePaymentRecording = (e: React.FormEvent) => {
     e.preventDefault();
     if (!paymentRecordingSale) return;
-    const amountToReceive = Number(receivingAmount) || 0;
+    const recCashNum = Number(recCash) || 0;
+    const recUpiNum = Number(recUpi) || 0;
+    const recBankNum = Number(recBank) || 0;
+    const amountToReceive = recCashNum + recUpiNum + recBankNum;
+
     if (amountToReceive <= 0) {
-      alert("Please enter a valid amount greater than 0.");
+      alert("Please enter a valid amount greater than 0 by allocating to Cash, UPI, or Bank Transfer.");
       return;
     }
     if (amountToReceive > paymentRecordingSale.pending_amount) {
@@ -68,11 +78,21 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       nextStatus = 'Paid';
     }
 
+    const currentBreakdown = paymentRecordingSale.payment_breakdown || { cash: 0, upi: 0, bank: 0 };
+    const nextBreakdown = {
+      cash: currentBreakdown.cash + recCashNum,
+      upi: currentBreakdown.upi + recUpiNum,
+      bank: currentBreakdown.bank + recBankNum
+    };
+
     try {
-      db.updateSalePayment(brand, paymentRecordingSale.id, nextPaid, nextStatus, user);
+      db.updateSalePayment(brand, paymentRecordingSale.id, nextPaid, nextStatus, user, nextBreakdown);
       triggerToast(`Successfully recorded payment of ₹${amountToReceive.toLocaleString('en-IN')}!`);
       setPaymentRecordingSale(null);
       setReceivingAmount('');
+      setRecCash(0);
+      setRecUpi(0);
+      setRecBank(0);
     } catch (err: any) {
       alert(err.message || "Failed to update payment");
     }
@@ -82,11 +102,40 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     if (!paymentRecordingSale) return;
     const amountToReceive = paymentRecordingSale.pending_amount;
     const nextPaid = paymentRecordingSale.total_amount;
+
+    const recCashNum = Number(recCash) || 0;
+    const recUpiNum = Number(recUpi) || 0;
+    const recBankNum = Number(recBank) || 0;
+    const currentSum = recCashNum + recUpiNum + recBankNum;
+
+    let cashToReceive = recCashNum;
+    let upiToReceive = recUpiNum;
+    let bankToReceive = recBankNum;
+
+    if (currentSum === 0) {
+      cashToReceive = amountToReceive;
+    } else {
+      const remainder = amountToReceive - currentSum;
+      if (remainder > 0) {
+        cashToReceive += remainder;
+      }
+    }
+
+    const currentBreakdown = paymentRecordingSale.payment_breakdown || { cash: 0, upi: 0, bank: 0 };
+    const nextBreakdown = {
+      cash: currentBreakdown.cash + cashToReceive,
+      upi: currentBreakdown.upi + upiToReceive,
+      bank: currentBreakdown.bank + bankToReceive
+    };
+
     try {
-      db.updateSalePayment(brand, paymentRecordingSale.id, nextPaid, 'Paid', user);
+      db.updateSalePayment(brand, paymentRecordingSale.id, nextPaid, 'Paid', user, nextBreakdown);
       triggerToast(`Successfully recorded full outstanding payment of ₹${amountToReceive.toLocaleString('en-IN')}!`);
       setPaymentRecordingSale(null);
       setReceivingAmount('');
+      setRecCash(0);
+      setRecUpi(0);
+      setRecBank(0);
     } catch (err: any) {
       alert(err.message || "Failed to update payment");
     }
@@ -121,6 +170,19 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const triggerToast = (msg: string) => {
     setToastMessageLocal(msg);
     setTimeout(() => setToastMessageLocal(null), 3000);
+  };
+
+  const handleUndoSale = async (saleId: string) => {
+    if (!window.confirm("Are you sure you want to UNDO / CANCEL this sale? This will delete the sale history and ADD all sold part quantities back to the inventory.")) {
+      return;
+    }
+    try {
+      await db.undoSale(brand, saleId, user);
+      triggerToast("Sale successfully undone. Stock levels restored!");
+      refreshComponentData();
+    } catch (err: any) {
+      alert(err.message || "Failed to undo sale");
+    }
   };
 
   // 1. Part search matching
@@ -255,6 +317,26 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       return;
     }
 
+    const splitSum = splitCash + splitUpi + splitBank;
+    const targetPaying = paymentStatus === 'Paid' ? checkoutTotal : (paymentStatus === 'Pending' ? 0 : customPaidAmount);
+
+    if (paymentStatus === 'Paid' && splitSum > 0 && splitSum !== checkoutTotal) {
+      alert(`Payment breakdown split sum (₹${splitSum}) must exactly equal the final payable total (₹${checkoutTotal}) when marked as fully Paid.`);
+      return;
+    }
+
+    if (paymentStatus === 'Custom Amount' && splitSum > 0 && splitSum !== customPaidAmount) {
+      alert(`Payment breakdown split sum (₹${splitSum}) must exactly equal the custom paid amount entered (₹${customPaidAmount}).`);
+      return;
+    }
+
+    // Set fallback to default full Cash if no split was customized
+    const payloadBreakdown = {
+      cash: splitSum === 0 ? (paymentStatus === 'Paid' ? checkoutTotal : (paymentStatus === 'Pending' ? 0 : customPaidAmount)) : splitCash,
+      upi: splitSum === 0 ? 0 : splitUpi,
+      bank: splitSum === 0 ? 0 : splitBank
+    };
+
     try {
       // 1. Resolve Customer registration code
       let finalCustId = selectedCustomerId;
@@ -280,7 +362,8 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
         globalDiscount,
         paymentStatus,
         paymentStatus === 'Custom Amount' ? customPaidAmount : 0,
-        user
+        user,
+        payloadBreakdown
       );
 
       // Clean checkout page
@@ -290,6 +373,9 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       setPhone('');
       setGlobalDiscount(0);
       setCustomPaidAmount(0);
+      setSplitCash(0);
+      setSplitUpi(0);
+      setSplitBank(0);
 
       refreshComponentData();
       triggerToast(`Saved checkout successfully! Invoice: ${newSale.id}`);
@@ -689,7 +775,17 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                     <button
                       key={st}
                       type="button"
-                      onClick={() => setPaymentStatus(st)}
+                      onClick={() => {
+                        setPaymentStatus(st);
+                        if (st === 'Paid') {
+                          setCustomPaidAmount(0);
+                        } else if (st === 'Pending') {
+                          setCustomPaidAmount(0);
+                          setSplitCash(0);
+                          setSplitUpi(0);
+                          setSplitBank(0);
+                        }
+                      }}
                       className={`py-2 rounded-xl text-[10px] font-bold text-center border transition ${
                         paymentStatus === st
                           ? 'bg-emerald-600 text-white border-transparent'
@@ -703,7 +799,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
                 {paymentStatus === 'Custom Amount' && (
                   <div className="space-y-2 bg-slate-850/80 p-3 rounded-xl border border-slate-800">
-                    <label className="block text-slate-400">Enter Cash Received (INR)</label>
+                    <label className="block text-slate-400">Total Custom Amount Received (INR)</label>
                     <input
                       type="number"
                       min="0.5"
@@ -711,12 +807,149 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                       max={checkoutTotal}
                       className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-900 text-white font-mono font-bold"
                       value={customPaidAmount || ''}
-                      onChange={(e) => setCustomPaidAmount(Number(e.target.value))}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        setCustomPaidAmount(val);
+                        setSplitCash(val);
+                        setSplitUpi(0);
+                        setSplitBank(0);
+                      }}
                     />
                     <div className="flex justify-between text-[11px] font-normal text-slate-400 pt-1">
                       <span>Calculated Pending:</span>
                       <span className="font-mono text-red-400 font-semibold">₹{(checkoutTotal - customPaidAmount).toFixed(2)}</span>
                     </div>
+                  </div>
+                )}
+
+                {paymentStatus !== 'Pending' && (
+                  <div className="space-y-3 bg-slate-850/40 p-4 rounded-xl border border-slate-800 text-xs">
+                    <div className="flex justify-between items-center pb-2 border-b border-slate-800">
+                      <span className="text-slate-300 font-extrabold text-[10px] uppercase tracking-wider">Split Payment Ways</span>
+                      <span className="text-slate-400">Target: <strong className="font-mono text-emerald-400">₹{paymentStatus === 'Paid' ? checkoutTotal.toLocaleString('en-IN') : customPaidAmount.toLocaleString('en-IN')}</strong></span>
+                    </div>
+
+                    <div className="space-y-2.5">
+                      <div className="flex items-center gap-2">
+                        <span className="w-16 text-slate-400 font-medium">💸 Cash:</span>
+                        <div className="relative flex-1">
+                          <span className="absolute left-2.5 top-1 font-bold text-slate-500 font-mono">₹</span>
+                          <input
+                            type="number"
+                            min="0"
+                            className="w-full pl-5 pr-2 py-1 rounded-lg border border-slate-700 bg-slate-900 text-white font-mono font-bold"
+                            value={splitCash || ''}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setSplitCash(val);
+                              if (paymentStatus === 'Custom Amount') {
+                                setCustomPaidAmount(val + splitUpi + splitBank);
+                              }
+                            }}
+                            placeholder="0"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="w-16 text-slate-400 font-medium">📱 UPI / QR:</span>
+                        <div className="relative flex-1">
+                          <span className="absolute left-2.5 top-1 font-bold text-slate-500 font-mono">₹</span>
+                          <input
+                            type="number"
+                            min="0"
+                            className="w-full pl-5 pr-2 py-1 rounded-lg border border-slate-700 bg-slate-900 text-white font-mono font-bold"
+                            value={splitUpi || ''}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setSplitUpi(val);
+                              if (paymentStatus === 'Custom Amount') {
+                                setCustomPaidAmount(splitCash + val + splitBank);
+                              }
+                            }}
+                            placeholder="0"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="w-16 text-slate-400 font-medium">🏢 Transfer:</span>
+                        <div className="relative flex-1">
+                          <span className="absolute left-2.5 top-1 font-bold text-slate-500 font-mono">₹</span>
+                          <input
+                            type="number"
+                            min="0"
+                            className="w-full pl-5 pr-2 py-1 rounded-lg border border-slate-700 bg-slate-900 text-white font-mono font-bold"
+                            value={splitBank || ''}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setSplitBank(val);
+                              if (paymentStatus === 'Custom Amount') {
+                                setCustomPaidAmount(splitCash + splitUpi + val);
+                              }
+                            }}
+                            placeholder="0"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-800 flex justify-between items-center gap-1">
+                      <span className="text-[9px] text-slate-400">Sum: <strong className="font-mono text-white">₹{splitCash + splitUpi + splitBank}</strong></span>
+                      <div className="flex gap-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const target = paymentStatus === 'Paid' ? checkoutTotal : customPaidAmount;
+                            setSplitCash(target);
+                            setSplitUpi(0);
+                            setSplitBank(0);
+                            if (paymentStatus === 'Custom Amount' && customPaidAmount === 0) {
+                              setCustomPaidAmount(target);
+                            }
+                          }}
+                          className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[8px] font-bold cursor-pointer"
+                        >
+                          All Cash
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const target = paymentStatus === 'Paid' ? checkoutTotal : customPaidAmount;
+                            setSplitCash(0);
+                            setSplitUpi(target);
+                            setSplitBank(0);
+                            if (paymentStatus === 'Custom Amount' && customPaidAmount === 0) {
+                              setCustomPaidAmount(target);
+                            }
+                          }}
+                          className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[8px] font-bold cursor-pointer"
+                        >
+                          All UPI
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const target = paymentStatus === 'Paid' ? checkoutTotal : customPaidAmount;
+                            setSplitCash(0);
+                            setSplitUpi(0);
+                            setSplitBank(target);
+                            if (paymentStatus === 'Custom Amount' && customPaidAmount === 0) {
+                              setCustomPaidAmount(target);
+                            }
+                          }}
+                          className="px-1 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[8px] font-bold cursor-pointer"
+                        >
+                          All Bank
+                        </button>
+                      </div>
+                    </div>
+
+                    {paymentStatus === 'Paid' && (splitCash + splitUpi + splitBank > 0) && (splitCash + splitUpi + splitBank !== checkoutTotal) && (
+                      <p className="text-[10px] text-red-400 font-semibold leading-tight">
+                        ⚠️ Split sum (₹{splitCash + splitUpi + splitBank}) must equal Total Bill (₹{checkoutTotal})
+                      </p>
+                    )}
                   </div>
                 )}
               </div>
@@ -837,6 +1070,25 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                           {(sale.pending_amount || 0) > 0 && (
                             <span className="text-[10px] text-amber-600 font-bold font-mono">Due: ₹{sale.pending_amount.toLocaleString('en-IN')}</span>
                           )}
+                          {(() => {
+                            const parsed = parseCreatedBy(sale.created_by);
+                            if (parsed.breakdown && (parsed.breakdown.cash > 0 || parsed.breakdown.upi > 0 || parsed.breakdown.bank > 0)) {
+                              return (
+                                <div className="text-[9px] text-slate-500 font-mono mt-1 flex flex-wrap gap-x-1 border-t border-slate-100 pt-1">
+                                  {parsed.breakdown.cash > 0 && (
+                                    <span className="bg-slate-100 px-1 py-0.5 rounded text-slate-600">Cash: ₹{parsed.breakdown.cash}</span>
+                                  )}
+                                  {parsed.breakdown.upi > 0 && (
+                                    <span className="bg-slate-100 px-1 py-0.5 rounded text-slate-600">UPI: ₹{parsed.breakdown.upi}</span>
+                                  )}
+                                  {parsed.breakdown.bank > 0 && (
+                                    <span className="bg-slate-100 px-1 py-0.5 rounded text-slate-600">Bank: ₹{parsed.breakdown.bank}</span>
+                                  )}
+                                </div>
+                              );
+                            }
+                            return null;
+                          })()}
                         </div>
                       </td>
                       <td className="p-4 text-right flex justify-end gap-1.5 items-center">
@@ -845,6 +1097,9 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                             onClick={() => {
                               setPaymentRecordingSale(sale);
                               setReceivingAmount('');
+                              setRecCash(0);
+                              setRecUpi(0);
+                              setRecBank(0);
                             }}
                             className="p-1 px-2 text-emerald-650 hover:bg-emerald-50 border border-emerald-200 hover:border-emerald-300 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
                           >
@@ -858,6 +1113,14 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                         >
                           <Eye className="w-3.5 h-3.5" />
                           View / Print Slip
+                        </button>
+                        <button
+                          onClick={() => handleUndoSale(sale.id)}
+                          className="p-1 px-2 text-rose-605 hover:bg-rose-50 border border-rose-100 hover:border-rose-300 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
+                          title="Undo / Cancel Sale and restore stock levels"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5 text-rose-500" />
+                          Undo Sale
                         </button>
                       </td>
                     </tr>
@@ -962,9 +1225,39 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                 </div>
               </div>
 
+              {(() => {
+                const parsed = parseCreatedBy(selectedInvoiceForSlip.created_by);
+                if (parsed.breakdown && (parsed.breakdown.cash > 0 || parsed.breakdown.upi > 0 || parsed.breakdown.bank > 0)) {
+                  return (
+                    <div className="mt-1.5 pt-1.5 border-t border-dashed border-slate-300 text-left text-[10px] text-slate-600 space-y-0.5">
+                      <p className="font-bold text-[#000] uppercase tracking-wide text-[9px] mb-1">Receipt Payment Split:</p>
+                      {parsed.breakdown.cash > 0 && (
+                        <div className="flex justify-between">
+                          <span>💸 Paid by Cash:</span>
+                          <span>₹{parsed.breakdown.cash.toFixed(2)}</span>
+                        </div>
+                      )}
+                      {parsed.breakdown.upi > 0 && (
+                        <div className="flex justify-between">
+                          <span>📱 Paid by UPI/gPay:</span>
+                          <span>₹{parsed.breakdown.upi.toFixed(2)}</span>
+                        </div>
+                      )}
+                      {parsed.breakdown.bank > 0 && (
+                        <div className="flex justify-between">
+                          <span>🏢 Paid by Account Transfer:</span>
+                          <span>₹{parsed.breakdown.bank.toFixed(2)}</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+                return null;
+              })()}
+
               <div className="text-center pt-4 border-t-2 border-dashed border-slate-350 text-[10px] text-slate-400">
                 <p>Thank you for doing business with us!</p>
-                <p className="mt-1">Generated by User: {selectedInvoiceForSlip.created_by}</p>
+                <p className="mt-1">Generated by User: {parseCreatedBy(selectedInvoiceForSlip.created_by).name}</p>
               </div>
 
             </div>
@@ -1087,40 +1380,126 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                 </div>
               </div>
 
-              {/* Input section */}
-              <div className="space-y-2 text-left">
+              {/* Input section with categorized payment splits */}
+              <div className="space-y-3 pt-1 border-t border-slate-100 text-left">
                 <label className="block text-slate-500 font-bold text-[10px] uppercase tracking-wider text-left">
-                  Receive Additional Payment Amount
+                  Receive Additional Payment Ways
                 </label>
-                <div className="relative">
-                  <span className="absolute left-3 top-2.5 text-xs text-slate-400 font-bold">₹</span>
-                  <input
-                    type="number"
-                    min="0.01"
-                    step="any"
-                    max={paymentRecordingSale.pending_amount}
-                    placeholder="Enter received amount (INR)"
-                    required
-                    className="w-full pl-7 pr-4 py-2 border border-slate-200 rounded-xl font-bold font-mono text-slate-900 focus:ring-1 focus:ring-indigo-650"
-                    value={receivingAmount}
-                    onChange={(e) => setReceivingAmount(e.target.value)}
-                  />
+                
+                <div className="grid grid-cols-3 gap-2 pb-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRecCash(paymentRecordingSale.pending_amount);
+                      setRecUpi(0);
+                      setRecBank(0);
+                    }}
+                    className="py-1.5 px-2 bg-slate-50 hover:bg-slate-100 text-slate-705 rounded-xl text-[10px] font-bold border border-slate-200 cursor-pointer text-center duration-100"
+                  >
+                    💸 All Cash
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRecCash(0);
+                      setRecUpi(paymentRecordingSale.pending_amount);
+                      setRecBank(0);
+                    }}
+                    className="py-1.5 px-2 bg-slate-50 hover:bg-slate-100 text-slate-705 rounded-xl text-[10px] font-bold border border-slate-200 cursor-pointer text-center duration-100"
+                  >
+                    📱 All UPI
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRecCash(0);
+                      setRecUpi(0);
+                      setRecBank(paymentRecordingSale.pending_amount);
+                    }}
+                    className="py-1.5 px-2 bg-slate-50 hover:bg-slate-100 text-slate-705 rounded-xl text-[10px] font-bold border border-slate-200 cursor-pointer text-center duration-100"
+                  >
+                    🏢 All Bank
+                  </button>
                 </div>
-                <p className="text-[10px] text-slate-450 leading-relaxed font-normal">
-                  Receive a custom partial amount or click "Clear Full Balance" below to wipe the balance off.
-                </p>
+
+                <div className="space-y-2.5 pt-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className="w-16 text-slate-500 font-bold text-[9px] uppercase">💸 Cash:</span>
+                    <div className="relative flex-1">
+                      <span className="absolute left-2.5 top-1.5 font-bold text-slate-400 font-mono">₹</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        max={paymentRecordingSale.pending_amount}
+                        className="w-full pl-5 pr-2 py-1.5 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-mono font-bold"
+                        value={recCash || ''}
+                        onChange={(e) => {
+                          const val = Math.min(paymentRecordingSale.pending_amount, Math.max(0, Number(e.target.value)));
+                          setRecCash(val);
+                        }}
+                        placeholder="0"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="w-16 text-slate-500 font-bold text-[9px] uppercase">📱 UPI/gPay:</span>
+                    <div className="relative flex-1">
+                      <span className="absolute left-2.5 top-1.5 font-bold text-slate-400 font-mono">₹</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        max={paymentRecordingSale.pending_amount}
+                        className="w-full pl-5 pr-2 py-1.5 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-mono font-bold"
+                        value={recUpi || ''}
+                        onChange={(e) => {
+                          const val = Math.min(paymentRecordingSale.pending_amount, Math.max(0, Number(e.target.value)));
+                          setRecUpi(val);
+                        }}
+                        placeholder="0"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <span className="w-16 text-slate-500 font-bold text-[9px] uppercase">🏢 Transfer:</span>
+                    <div className="relative flex-1">
+                      <span className="absolute left-2.5 top-1.5 font-bold text-slate-400 font-mono">₹</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        max={paymentRecordingSale.pending_amount}
+                        className="w-full pl-5 pr-2 py-1.5 rounded-xl border border-slate-200 bg-white text-slate-800 text-xs font-mono font-bold"
+                        value={recBank || ''}
+                        onChange={(e) => {
+                          const val = Math.min(paymentRecordingSale.pending_amount, Math.max(0, Number(e.target.value)));
+                          setRecBank(val);
+                        }}
+                        placeholder="0"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-2 border-t border-slate-100 flex justify-between text-xs font-bold text-slate-900 leading-normal">
+                  <span>Additional Amount Received:</span>
+                  <span className="font-mono text-indigo-600">₹{(recCash + recUpi + recBank).toLocaleString('en-IN')}</span>
+                </div>
               </div>
 
               {/* Dynamic calculations on entry */}
-              {Number(receivingAmount) > 0 && Number(receivingAmount) <= paymentRecordingSale.pending_amount && (
+              {(recCash + recUpi + recBank) > 0 && (recCash + recUpi + recBank) <= paymentRecordingSale.pending_amount && (
                 <div className="bg-indigo-50/50 p-3.5 border border-indigo-100 rounded-xl space-y-1 font-semibold text-indigo-950 text-left">
                   <div className="flex justify-between text-[11px]">
                     <span className="font-sans">New Total Paid:</span>
-                    <span className="font-mono font-bold">₹{(paymentRecordingSale.paid_amount + Number(receivingAmount)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                    <span className="font-mono font-bold">₹{(paymentRecordingSale.paid_amount + (recCash + recUpi + recBank)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                   </div>
                   <div className="flex justify-between text-[11px]">
                     <span className="font-sans">Remaining Outstanding Due:</span>
-                    <span className="font-mono font-bold text-amber-700">₹{Math.max(0, paymentRecordingSale.pending_amount - Number(receivingAmount)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                    <span className="font-mono font-bold text-amber-700">₹{Math.max(0, paymentRecordingSale.pending_amount - (recCash + recUpi + recBank)).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
                   </div>
                 </div>
               )}

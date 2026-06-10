@@ -2,7 +2,7 @@ import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
-  ScanSource
+  ScanSource, PaymentBreakdown
 } from './types';
 
 // Storage keys for active preferences and local storage fallback
@@ -80,6 +80,7 @@ let cache = {
 type DBListener = () => void;
 const listeners = new Set<DBListener>();
 let isRealtimeSubscribed = false;
+let isSilentUpdating = false;
 const subscribedSchemas = new Set<string>();
 const loadedBrands = new Set<'hyundai' | 'mahindra'>();
 
@@ -183,6 +184,30 @@ function initLocalFallback() {
   }
 }
 
+export function parseCreatedBy(createdBy: string): { name: string; breakdown: PaymentBreakdown | null } {
+  if (!createdBy) return { name: 'Staff', breakdown: null };
+  const parts = createdBy.split('|');
+  const name = parts[0].trim();
+  if (parts.length > 1 && parts[1].includes('[Breakdown]')) {
+    try {
+      const indexStr = parts[1].indexOf('[Breakdown]') + 11;
+      const jsonStr = parts[1].substring(indexStr).trim();
+      const breakdown = JSON.parse(jsonStr) as PaymentBreakdown;
+      return { name, breakdown };
+    } catch {
+      return { name, breakdown: null };
+    }
+  }
+  return { name, breakdown: null };
+}
+
+export function formatCreatedBy(name: string, breakdown?: PaymentBreakdown): string {
+  if (!breakdown || (breakdown.cash === 0 && breakdown.upi === 0 && breakdown.bank === 0)) {
+    return name;
+  }
+  return `${name} | [Breakdown] ${JSON.stringify(breakdown)}`;
+}
+
 // Convert schema fields to JS numeric variables safely
 const scrubRow = (row: any) => {
   if (!row) return row;
@@ -210,50 +235,62 @@ const scrubRow = (row: any) => {
   if (r.backup_data_json !== undefined) {
     r.backup_data_json = r.backup_data_json ? (typeof r.backup_data_json === 'string' ? r.backup_data_json : JSON.stringify(r.backup_data_json)) : undefined;
   }
+
+  // Hydrate payment_breakdown if this row has created_by representing a Sale
+  if (r.created_by !== undefined && r.payment_status !== undefined) {
+    const parsed = parseCreatedBy(r.created_by);
+    r.payment_breakdown = parsed.breakdown || { cash: 0, upi: 0, bank: 0 };
+  }
+  
   return r;
 };
 
 // Handle incoming realtime signals to propagate changes instantly across browser ports
 function handleRealtimePayload(schema: string, payload: any) {
-  const { table, eventType, new: newRow, old: oldRow } = payload;
-  console.log(`📡 realtime: schema=${schema} table=${table} type=${eventType}`, payload);
+  isSilentUpdating = true;
+  try {
+    const { table, eventType, new: newRow, old: oldRow } = payload;
+    console.log(`📡 realtime: schema=${schema} table=${table} type=${eventType}`, payload);
 
-  let targetArray: any[] | null = null;
-  
-  if (schema === 'public') {
-    if (table === 'users') targetArray = cache.users;
-    else if (table === 'customers') targetArray = cache.customers;
-    else if (table === 'transaction_logs') targetArray = cache.transaction_logs;
-  } else if (schema === 'hyundai') {
-    targetArray = (cache.hyundai as any)[table];
-  } else if (schema === 'mahindra') {
-    targetArray = (cache.mahindra as any)[table];
+    let targetArray: any[] | null = null;
+    
+    if (schema === 'public') {
+      if (table === 'users') targetArray = cache.users;
+      else if (table === 'customers') targetArray = cache.customers;
+      else if (table === 'transaction_logs') targetArray = cache.transaction_logs;
+    } else if (schema === 'hyundai') {
+      targetArray = (cache.hyundai as any)[table];
+    } else if (schema === 'mahindra') {
+      targetArray = (cache.mahindra as any)[table];
+    }
+
+    if (!targetArray) return;
+
+    const processedNewRow = scrubRow(newRow);
+
+    if (eventType === 'INSERT') {
+      const exists = targetArray.some(x => x.id === processedNewRow.id);
+      if (!exists) {
+        targetArray.unshift(processedNewRow);
+      }
+    } else if (eventType === 'UPDATE') {
+      const idx = targetArray.findIndex(x => x.id === processedNewRow.id);
+      if (idx > -1) {
+        targetArray[idx] = { ...targetArray[idx], ...processedNewRow };
+      } else {
+        targetArray.unshift(processedNewRow);
+      }
+    } else if (eventType === 'DELETE') {
+      const idx = targetArray.findIndex(x => x.id === oldRow.id);
+      if (idx > -1) {
+        targetArray.splice(idx, 1);
+      }
+    }
+
+    db.notify();
+  } finally {
+    isSilentUpdating = false;
   }
-
-  if (!targetArray) return;
-
-  const processedNewRow = scrubRow(newRow);
-
-  if (eventType === 'INSERT') {
-    const exists = targetArray.some(x => x.id === processedNewRow.id);
-    if (!exists) {
-      targetArray.unshift(processedNewRow);
-    }
-  } else if (eventType === 'UPDATE') {
-    const idx = targetArray.findIndex(x => x.id === processedNewRow.id);
-    if (idx > -1) {
-      targetArray[idx] = { ...targetArray[idx], ...processedNewRow };
-    } else {
-      targetArray.unshift(processedNewRow);
-    }
-  } else if (eventType === 'DELETE') {
-    const idx = targetArray.findIndex(x => x.id === oldRow.id);
-    if (idx > -1) {
-      targetArray.splice(idx, 1);
-    }
-  }
-
-  db.notify();
 }
 
 export const db = {
@@ -269,6 +306,17 @@ export const db = {
     listeners.forEach(l => {
       try { l(); } catch (e) { console.error("Error invoking listener:", e); }
     });
+    if (!isSilentUpdating) {
+      try {
+        if (typeof window !== 'undefined' && typeof BroadcastChannel !== 'undefined') {
+          const channel = new BroadcastChannel('sparezy_data_sync_channel');
+          channel.postMessage('sync_trigger');
+          channel.close();
+        }
+      } catch (e) {
+        console.warn("[Sync Broadcast Channel] Failed to send update message:", e);
+      }
+    }
   },
 
   // Support fetching current health connection indicators React-side
@@ -288,476 +336,491 @@ export const db = {
   },
 
   refreshAllData: async (brand: Brand | null): Promise<void> => {
-    if (!isSupabaseConfigured || !supabase) {
-      db.notify();
-      return;
-    }
+    isSilentUpdating = true;
     try {
-      console.log("[Refresh Engine] Purging stale metadata & reloading public tables...");
-      const [usersRes, customersRes, logsRes] = await Promise.all([
-        supabase.from('users').select('*'),
-        supabase.from('customers').select('*'),
-        supabase.from('transaction_logs').select('*').order('created_at', { ascending: false }),
-      ]);
-      if (usersRes.data) {
-        cache.users = usersRes.data.map(scrubRow) as User[];
+      if (!isSupabaseConfigured || !supabase) {
+        db.notify();
+        return;
       }
-      if (customersRes.data) {
-        cache.customers = customersRes.data.map(scrubRow) as Customer[];
-      }
-      if (logsRes.data) {
-        cache.transaction_logs = logsRes.data.map(scrubRow) as TransactionLog[];
-      }
-    } catch (err) {
-      console.error("[Refresh Engine] Error refreshing public tables:", err);
-    }
-
-    if (brand) {
       try {
-        console.log(`[Refresh Engine] Re-fetching active brand partitions for: ${brand}`);
-        await db.loadBrandData(brand);
+        console.log("[Refresh Engine] Purging stale metadata & reloading public tables...");
+        const [usersRes, customersRes, logsRes] = await Promise.all([
+          supabase.from('users').select('*'),
+          supabase.from('customers').select('*'),
+          supabase.from('transaction_logs').select('*').order('created_at', { ascending: false }),
+        ]);
+        if (usersRes.data) {
+          cache.users = usersRes.data.map(scrubRow) as User[];
+        }
+        if (customersRes.data) {
+          cache.customers = customersRes.data.map(scrubRow) as Customer[];
+        }
+        if (logsRes.data) {
+          cache.transaction_logs = logsRes.data.map(scrubRow) as TransactionLog[];
+        }
       } catch (err) {
-        console.error(`[Refresh Engine] Error refreshing brand data for ${brand}:`, err);
+        console.error("[Refresh Engine] Error refreshing public tables:", err);
       }
-    } else {
-      db.notify();
+
+      if (brand) {
+        try {
+          console.log(`[Refresh Engine] Re-fetching active brand partitions for: ${brand}`);
+          await db.loadBrandData(brand);
+        } catch (err) {
+          console.error(`[Refresh Engine] Error refreshing brand data for ${brand}:`, err);
+        }
+      } else {
+        db.notify();
+      }
+    } finally {
+      isSilentUpdating = false;
     }
   },
 
   // Load and bootstrap Supabase integration async (public tables only)
   initialize: async () => {
-    initLocalFallback();
-    
-    if (!isSupabaseConfigured || !supabase) {
-      connectionStatus = 'failed';
-      connectionError = 'VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are missing. Please add them inside environmental secrets in your workspace configuration settings.';
-      db.notify();
-      return;
-    }
-
+    isSilentUpdating = true;
     try {
-      console.log("Supabase configured! Fast-bootstrapping public tables and diagnostics in parallel...");
-      if (connectionStatus !== 'connected') {
-        connectionStatus = 'checking';
-      }
-
-      // Execute all independent initialization queries in parallel to maximize login & checkout speed
-      const [
-        usersRes,
-        customersRes,
-        logsRes,
-        sessionRes,
-        curSchRes,
-        hInvRes,
-        mInvRes
-      ] = await Promise.all([
-        supabase.from('users').select('*'),
-        supabase.from('customers').select('*'),
-        supabase.from('transaction_logs').select('*').order('created_at', { ascending: false }),
-        supabase.auth.getSession(),
-        supabase.rpc('current_schema'),
-        supabase.schema('hyundai').from('inventory').select('id').limit(1),
-        supabase.schema('mahindra').from('inventory').select('id').limit(1)
-      ]);
+      initLocalFallback();
       
-      const usersData = usersRes.data;
-      const usersError = usersRes.error;
-      if (usersError) {
-        if (usersError.message && (usersError.message.includes('fetch') || usersError.message.includes('Network') || usersError.message.includes('network') || usersError.message.includes('Failed to fetch'))) {
-          throw usersError;
+      if (!isSupabaseConfigured || !supabase) {
+        connectionStatus = 'failed';
+        connectionError = 'VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are missing. Please add them inside environmental secrets in your workspace configuration settings.';
+        db.notify();
+        return;
+      }
+
+      try {
+        console.log("Supabase configured! Fast-bootstrapping public tables and diagnostics in parallel...");
+        if (connectionStatus !== 'connected') {
+          connectionStatus = 'checking';
         }
-        reportSupabaseError('public', 'users', 'select', usersError.message);
-      }
 
-      const customersData = customersRes.data;
-      const customersError = customersRes.error;
-      if (customersError) {
-        reportSupabaseError('public', 'customers', 'select', customersError.message);
-      }
-
-      const logsData = logsRes.data;
-      const logsError = logsRes.error;
-      if (logsError) {
-        reportSupabaseError('public', 'transaction_logs', 'select', logsError.message);
-      }
-
-      cache.users = (usersData || []).map(scrubRow) as User[];
-      cache.customers = (customersData || []).map(scrubRow) as Customer[];
-      cache.transaction_logs = (logsData || []).map(scrubRow) as TransactionLog[];
-
-      // Check live Supabase Auth session from the parallel auth result
-      const session = (sessionRes as any).data?.session;
-      if (session && session.user) {
-        const userEmail = session.user.email;
-        diagnosticStats.activeUserEmail = userEmail;
-        let profile = cache.users.find(u => u.email.toLowerCase() === userEmail?.toLowerCase());
+        // Execute all independent initialization queries in parallel to maximize login & checkout speed
+        const [
+          usersRes,
+          customersRes,
+          logsRes,
+          sessionRes,
+          curSchRes,
+          hInvRes,
+          mInvRes
+        ] = await Promise.all([
+          supabase.from('users').select('*'),
+          supabase.from('customers').select('*'),
+          supabase.from('transaction_logs').select('*').order('created_at', { ascending: false }),
+          supabase.auth.getSession(),
+          supabase.rpc('current_schema'),
+          supabase.schema('hyundai').from('inventory').select('id').limit(1),
+          supabase.schema('mahindra').from('inventory').select('id').limit(1)
+        ]);
         
-        if (!profile && userEmail) {
-          const { data: directProfile } = await supabase
-            .from('users')
-            .select('*')
-            .eq('email', userEmail.toLowerCase())
-            .maybeSingle();
-          if (directProfile) {
-            profile = scrubRow(directProfile) as User;
+        const usersData = usersRes.data;
+        const usersError = usersRes.error;
+        if (usersError) {
+          if (usersError.message && (usersError.message.includes('fetch') || usersError.message.includes('Network') || usersError.message.includes('network') || usersError.message.includes('Failed to fetch'))) {
+            throw usersError;
           }
+          reportSupabaseError('public', 'users', 'select', usersError.message);
         }
 
-        if (profile) {
-          if (profile.status === 'Disabled') {
+        const customersData = customersRes.data;
+        const customersError = customersRes.error;
+        if (customersError) {
+          reportSupabaseError('public', 'customers', 'select', customersError.message);
+        }
+
+        const logsData = logsRes.data;
+        const logsError = logsRes.error;
+        if (logsError) {
+          reportSupabaseError('public', 'transaction_logs', 'select', logsError.message);
+        }
+
+        cache.users = (usersData || []).map(scrubRow) as User[];
+        cache.customers = (customersData || []).map(scrubRow) as Customer[];
+        cache.transaction_logs = (logsData || []).map(scrubRow) as TransactionLog[];
+
+        // Check live Supabase Auth session from the parallel auth result
+        const session = (sessionRes as any).data?.session;
+        if (session && session.user) {
+          const userEmail = session.user.email;
+          diagnosticStats.activeUserEmail = userEmail;
+          let profile = cache.users.find(u => u.email.toLowerCase() === userEmail?.toLowerCase());
+          
+          if (!profile && userEmail) {
+            const { data: directProfile } = await supabase
+              .from('users')
+              .select('*')
+              .eq('email', userEmail.toLowerCase())
+              .maybeSingle();
+            if (directProfile) {
+              profile = scrubRow(directProfile) as User;
+            }
+          }
+
+          if (profile) {
+            if (profile.status === 'Disabled') {
+              await supabase.auth.signOut();
+              sessionStorage.removeItem(KEY_ACTIVE_USER);
+            } else {
+              sessionStorage.setItem(KEY_ACTIVE_USER, JSON.stringify(profile));
+            }
+          } else {
             await supabase.auth.signOut();
             sessionStorage.removeItem(KEY_ACTIVE_USER);
-          } else {
-            sessionStorage.setItem(KEY_ACTIVE_USER, JSON.stringify(profile));
           }
         } else {
-          await supabase.auth.signOut();
           sessionStorage.removeItem(KEY_ACTIVE_USER);
         }
-      } else {
-        sessionStorage.removeItem(KEY_ACTIVE_USER);
-      }
 
-      // Handle Current Schema RPC result
-      const curSch = curSchRes.data;
-      const curSchErr = curSchRes.error;
-      if (curSchErr) {
-        if (curSchErr.message && (curSchErr.message.toLowerCase().includes('could not find the function') || curSchErr.message.toLowerCase().includes('does not exist'))) {
-          console.log("⚠️ SUPABASE INFO - public.current_schema() RPC function not defined in SQL yet. Falling back to default public schema.");
-          diagnosticStats.currentSchemaResult = "public (Default)";
+        // Handle Current Schema RPC result
+        const curSch = curSchRes.data;
+        const curSchErr = curSchRes.error;
+        if (curSchErr) {
+          if (curSchErr.message && (curSchErr.message.toLowerCase().includes('could not find the function') || curSchErr.message.toLowerCase().includes('does not exist'))) {
+            console.log("⚠️ SUPABASE INFO - public.current_schema() RPC function not defined in SQL yet. Falling back to default public schema.");
+            diagnosticStats.currentSchemaResult = "public (Default)";
+            diagnosticStats.currentSchemaError = null;
+          } else {
+            console.warn("[Diagnostic Notice - SELECT current_schema() failed]:", curSchErr.message);
+            diagnosticStats.currentSchemaError = curSchErr.message;
+            diagnosticStats.currentSchemaResult = null;
+          }
+        } else {
+          console.log("✅ SUPABASE CONSOLE LOG - SELECT current_schema() succeeded:", curSch);
+          diagnosticStats.currentSchemaResult = curSch ? String(curSch) : "public (Default)";
           diagnosticStats.currentSchemaError = null;
-        } else {
-          console.warn("[Diagnostic Notice - SELECT current_schema() failed]:", curSchErr.message);
-          diagnosticStats.currentSchemaError = curSchErr.message;
-          diagnosticStats.currentSchemaResult = null;
         }
-      } else {
-        console.log("✅ SUPABASE CONSOLE LOG - SELECT current_schema() succeeded:", curSch);
-        diagnosticStats.currentSchemaResult = curSch ? String(curSch) : "public (Default)";
-        diagnosticStats.currentSchemaError = null;
-      }
 
-      // Handle Hyundai Inventory Diagnostic
-      const hInvCheck = hInvRes.data;
-      const hInvErr = hInvRes.error;
-      if (hInvErr) {
-        console.warn("⚠️ SUPABASE DIAGNOSTIC INFO - hyundai.inventory query feedback on startup:", hInvErr.message);
-        diagnosticStats.hyundaiInventoryError = hInvErr.message;
-        diagnosticStats.hyundaiInventoryOk = false;
-      } else {
-        console.log("✅ SUPABASE CONSOLE LOG - hyundai.inventory query succeeded. Row count:", hInvCheck?.length);
-        diagnosticStats.hyundaiInventoryOk = true;
-        diagnosticStats.hyundaiInventoryError = null;
-      }
-
-      // Handle Mahindra Inventory Diagnostic
-      const mInvCheck = mInvRes.data;
-      const mInvErr = mInvRes.error;
-      if (mInvErr) {
-        console.warn("⚠️ SUPABASE DIAGNOSTIC INFO - mahindra.inventory query feedback on startup:", mInvErr.message);
-        diagnosticStats.mahindraInventoryError = mInvErr.message;
-        diagnosticStats.mahindraInventoryOk = false;
-      } else {
-        console.log("✅ SUPABASE CONSOLE LOG - mahindra.inventory query succeeded. Row count:", mInvCheck?.length);
-        diagnosticStats.mahindraInventoryOk = true;
-        diagnosticStats.mahindraInventoryError = null;
-      }
-      // -------------------------------------------------
-
-      console.log("Supabase public schema initialization success.");
-      connectionStatus = 'connected';
-      connectionError = null;
-
-      // Subscribe strictly to public schema channel initially
-      try {
-        if (!subscribedSchemas.has('public')) {
-          subscribedSchemas.add('public');
-          diagnosticStats.realtimeStatus = 'Checking';
-          const publicChannel = supabase.channel('public-realtime');
-          publicChannel
-            .on('postgres_changes', { event: '*', schema: 'public' }, (payload) => {
-              handleRealtimePayload('public', payload);
-            })
-            .subscribe((status) => {
-              console.log(`[Supabase Realtime Status] public schema channel update: ${status}`);
-              if (status === 'SUBSCRIBED') {
-                diagnosticStats.realtimeStatus = 'Connected';
-              } else if (status === 'CLOSED') {
-                diagnosticStats.realtimeStatus = 'Disabled';
-              } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-                diagnosticStats.realtimeStatus = 'Failed';
-              }
-              db.notify();
-            });
+        // Handle Hyundai Inventory Diagnostic
+        const hInvCheck = hInvRes.data;
+        const hInvErr = hInvRes.error;
+        if (hInvErr) {
+          console.warn("⚠️ SUPABASE DIAGNOSTIC INFO - hyundai.inventory query feedback on startup:", hInvErr.message);
+          diagnosticStats.hyundaiInventoryError = hInvErr.message;
+          diagnosticStats.hyundaiInventoryOk = false;
         } else {
-          diagnosticStats.realtimeStatus = 'Connected';
+          console.log("✅ SUPABASE CONSOLE LOG - hyundai.inventory query succeeded. Row count:", hInvCheck?.length);
+          diagnosticStats.hyundaiInventoryOk = true;
+          diagnosticStats.hyundaiInventoryError = null;
         }
+
+        // Handle Mahindra Inventory Diagnostic
+        const mInvCheck = mInvRes.data;
+        const mInvErr = mInvRes.error;
+        if (mInvErr) {
+          console.warn("⚠️ SUPABASE DIAGNOSTIC INFO - mahindra.inventory query feedback on startup:", mInvErr.message);
+          diagnosticStats.mahindraInventoryError = mInvErr.message;
+          diagnosticStats.mahindraInventoryOk = false;
+        } else {
+          console.log("✅ SUPABASE CONSOLE LOG - mahindra.inventory query succeeded. Row count:", mInvCheck?.length);
+          diagnosticStats.mahindraInventoryOk = true;
+          diagnosticStats.mahindraInventoryError = null;
+        }
+        // -------------------------------------------------
+
+        console.log("Supabase public schema initialization success.");
+        connectionStatus = 'connected';
+        connectionError = null;
+
+        // Subscribe strictly to public schema channel initially
+        try {
+          if (!subscribedSchemas.has('public')) {
+            subscribedSchemas.add('public');
+            diagnosticStats.realtimeStatus = 'Checking';
+            const publicChannel = supabase.channel('public-realtime');
+            publicChannel
+              .on('postgres_changes', { event: '*', schema: 'public' }, (payload) => {
+                handleRealtimePayload('public', payload);
+              })
+              .subscribe((status) => {
+                console.log(`[Supabase Realtime Status] public schema channel update: ${status}`);
+                if (status === 'SUBSCRIBED') {
+                  diagnosticStats.realtimeStatus = 'Connected';
+                } else if (status === 'CLOSED') {
+                  diagnosticStats.realtimeStatus = 'Disabled';
+                } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                  diagnosticStats.realtimeStatus = 'Failed';
+                }
+                db.notify();
+              });
+          } else {
+            diagnosticStats.realtimeStatus = 'Connected';
+          }
+        } catch (err: any) {
+          console.warn("[Realtime Setup Notice] Supabase Realtime subscription optional connection failed:", err);
+          diagnosticStats.realtimeStatus = 'Failed';
+        }
+
+        // Lazy load saved active brand on mount if it exists
+        const savedBrand = db.getActiveBrand();
+        if (savedBrand) {
+          db.loadBrandData(savedBrand).catch(err => {
+            console.error("Delayed load brand data notice:", err);
+          });
+        }
+
+        db.notify();
       } catch (err: any) {
-        console.warn("[Realtime Setup Notice] Supabase Realtime subscription optional connection failed:", err);
-        diagnosticStats.realtimeStatus = 'Failed';
+        console.error("Failed to sync datasets from Supabase:", err);
+        connectionStatus = 'failed';
+        connectionError = err.message || "Failed to reach your active Supabase endpoint. Check your VITE_SUPABASE_URL network connection, API variables, or firewall guidelines.";
+        db.notify();
       }
-
-      // Lazy load saved active brand on mount if it exists
-      const savedBrand = db.getActiveBrand();
-      if (savedBrand) {
-        db.loadBrandData(savedBrand).catch(err => {
-          console.error("Delayed load brand data notice:", err);
-        });
-      }
-
-      db.notify();
-    } catch (err: any) {
-      console.error("Failed to sync datasets from Supabase:", err);
-      connectionStatus = 'failed';
-      connectionError = err.message || "Failed to reach your active Supabase endpoint. Check your VITE_SUPABASE_URL network connection, API variables, or firewall guidelines.";
-      db.notify();
+    } finally {
+      isSilentUpdating = false;
     }
   },
 
   // Lazy-load a selective brand dynamic data schema partition
   loadBrandData: async (brand: Brand) => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    console.log(`[Schema Select Diagnostic] Schema selected: ${brand}`);
-    
-    const activeUser = db.getActiveUser();
-    console.log(`[User Active Diagnostic] User email requested access: ${activeUser?.email || "No session email"}`);
-    diagnosticStats.activeUserEmail = activeUser?.email || null;
+    isSilentUpdating = true;
+    try {
+      const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+      console.log(`[Schema Select Diagnostic] Schema selected: ${brand}`);
+      
+      const activeUser = db.getActiveUser();
+      console.log(`[User Active Diagnostic] User email requested access: ${activeUser?.email || "No session email"}`);
+      diagnosticStats.activeUserEmail = activeUser?.email || null;
 
-    if (isSupabaseConfigured && supabase) {
-      try {
-        // 1. INVENTORY ACCESS CHECK - OPTIMIZED PARALLEL RANGE FETCH TO BYPASS POSTGREST 1000 ROW LIMIT
-        console.log(`[Query Diagnostic] Running inventory select for schema: ${b}`);
-        
-        let bInv: any[] = [];
-        let errInv: any = null;
-        
+      if (isSupabaseConfigured && supabase) {
         try {
-          const { count, error: countErr } = await supabase
-            .schema(b)
-            .from('inventory')
-            .select('*', { count: 'exact', head: true });
-            
-          if (countErr) {
-            errInv = countErr;
-          } else {
-            const totalRows = count || 0;
-            console.log(`[Optimized Sync] Found total ${totalRows} parts in '${b}.inventory'. Initiating parallel range downloads...`);
-            
-            if (totalRows === 0) {
-              bInv = [];
+          // 1. INVENTORY ACCESS CHECK - OPTIMIZED PARALLEL RANGE FETCH TO BYPASS POSTGREST 1000 ROW LIMIT
+          console.log(`[Query Diagnostic] Running inventory select for schema: ${b}`);
+          
+          let bInv: any[] = [];
+          let errInv: any = null;
+          
+          try {
+            const { count, error: countErr } = await supabase
+              .schema(b)
+              .from('inventory')
+              .select('*', { count: 'exact', head: true });
+              
+            if (countErr) {
+              errInv = countErr;
             } else {
-              const pageSize = 1000;
-              const pages = Math.ceil(totalRows / pageSize);
-              const rangePromises = [];
+              const totalRows = count || 0;
+              console.log(`[Optimized Sync] Found total ${totalRows} parts in '${b}.inventory'. Initiating parallel range downloads...`);
               
-              for (let i = 0; i < pages; i++) {
-                const from = i * pageSize;
-                const to = (i + 1) * pageSize - 1;
-                rangePromises.push(
-                  supabase.schema(b).from('inventory').select('*').range(from, to)
-                );
-              }
-              
-              const rangeResults = await Promise.all(rangePromises);
-              for (const res of rangeResults) {
-                if (res.error) {
-                  errInv = res.error;
-                  break;
+              if (totalRows === 0) {
+                bInv = [];
+              } else {
+                const pageSize = 1000;
+                const pages = Math.ceil(totalRows / pageSize);
+                const rangePromises = [];
+                
+                for (let i = 0; i < pages; i++) {
+                  const from = i * pageSize;
+                  const to = (i + 1) * pageSize - 1;
+                  rangePromises.push(
+                    supabase.schema(b).from('inventory').select('*').range(from, to)
+                  );
                 }
-                if (res.data) {
-                  bInv = bInv.concat(res.data);
+                
+                const rangeResults = await Promise.all(rangePromises);
+                for (const res of rangeResults) {
+                  if (res.error) {
+                    errInv = res.error;
+                    break;
+                  }
+                  if (res.data) {
+                    bInv = bInv.concat(res.data);
+                  }
                 }
               }
             }
+          } catch (fetchExc: any) {
+            errInv = fetchExc;
           }
-        } catch (fetchExc: any) {
-          errInv = fetchExc;
-        }
 
-        if (errInv) {
-          const category = getErrorCategory(errInv.code, errInv.message);
-          console.error(`❌ [${category}] Schema: ${b}, Table: inventory, Error: ${errInv.message}`, errInv);
-          reportSupabaseError(b, 'inventory', 'select', errInv.message, errInv.code);
-          diagnosticStats.inventoryTest = { success: false, error: errInv.message };
-          
-          if (b === 'hyundai') {
-            diagnosticStats.hyundaiInventoryOk = false;
-            diagnosticStats.hyundaiInventoryError = errInv.message;
+          if (errInv) {
+            const category = getErrorCategory(errInv.code, errInv.message);
+            console.error(`❌ [${category}] Schema: ${b}, Table: inventory, Error: ${errInv.message}`, errInv);
+            reportSupabaseError(b, 'inventory', 'select', errInv.message, errInv.code);
+            diagnosticStats.inventoryTest = { success: false, error: errInv.message };
+            
+            if (b === 'hyundai') {
+              diagnosticStats.hyundaiInventoryOk = false;
+              diagnosticStats.hyundaiInventoryError = errInv.message;
+            } else {
+              diagnosticStats.mahindraInventoryOk = false;
+              diagnosticStats.mahindraInventoryError = errInv.message;
+            }
+            // Do not use local fallback data if query fails
+            cache[b].inventory = [];
           } else {
-            diagnosticStats.mahindraInventoryOk = false;
-            diagnosticStats.mahindraInventoryError = errInv.message;
+            console.log(`✅ [Query Result] Schema: ${b}, Table: inventory, Count: ${bInv?.length || 0}`);
+            diagnosticStats.inventoryTest = { success: true, error: null };
+            
+            if (b === 'hyundai') {
+              diagnosticStats.hyundaiInventoryOk = true;
+              diagnosticStats.hyundaiInventoryError = null;
+            } else {
+              diagnosticStats.mahindraInventoryOk = true;
+              diagnosticStats.mahindraInventoryError = null;
+            }
+            clearSchemaError(b, 'inventory');
+            cache[b].inventory = (bInv || []).map(scrubRow);
           }
-          // Do not use local fallback data if query fails
-          cache[b].inventory = [];
-        } else {
-          console.log(`✅ [Query Result] Schema: ${b}, Table: inventory, Count: ${bInv?.length || 0}`);
-          diagnosticStats.inventoryTest = { success: true, error: null };
-          
-          if (b === 'hyundai') {
-            diagnosticStats.hyundaiInventoryOk = true;
-            diagnosticStats.hyundaiInventoryError = null;
+
+          // 2. SALES ACCESS CHECK
+          console.log(`[Query Diagnostic] Running sales select for schema: ${b}`);
+          const { data: bSales, error: errSales } = await supabase.schema(b).from('sales').select('*').order('created_at', { ascending: false });
+          if (errSales) {
+            const category = getErrorCategory(errSales.code, errSales.message);
+            console.error(`❌ [${category}] Schema: ${b}, Table: sales, Error: ${errSales.message}`, errSales);
+            reportSupabaseError(b, 'sales', 'select', errSales.message, errSales.code);
+            diagnosticStats.salesTest = { success: false, error: errSales.message };
+            cache[b].sales = [];
           } else {
-            diagnosticStats.mahindraInventoryOk = true;
-            diagnosticStats.mahindraInventoryError = null;
+            console.log(`✅ [Query Result] Schema: ${b}, Table: sales, Count: ${bSales?.length || 0}`);
+            diagnosticStats.salesTest = { success: true, error: null };
+            clearSchemaError(b, 'sales');
+            cache[b].sales = (bSales || []).map(scrubRow);
           }
-          clearSchemaError(b, 'inventory');
-          cache[b].inventory = (bInv || []).map(scrubRow);
-        }
 
-        // 2. SALES ACCESS CHECK
-        console.log(`[Query Diagnostic] Running sales select for schema: ${b}`);
-        const { data: bSales, error: errSales } = await supabase.schema(b).from('sales').select('*').order('created_at', { ascending: false });
-        if (errSales) {
-          const category = getErrorCategory(errSales.code, errSales.message);
-          console.error(`❌ [${category}] Schema: ${b}, Table: sales, Error: ${errSales.message}`, errSales);
-          reportSupabaseError(b, 'sales', 'select', errSales.message, errSales.code);
-          diagnosticStats.salesTest = { success: false, error: errSales.message };
-          cache[b].sales = [];
-        } else {
-          console.log(`✅ [Query Result] Schema: ${b}, Table: sales, Count: ${bSales?.length || 0}`);
-          diagnosticStats.salesTest = { success: true, error: null };
-          clearSchemaError(b, 'sales');
-          cache[b].sales = (bSales || []).map(scrubRow);
-        }
+          // 3. SALE ITEMS ACCESS CHECK
+          console.log(`[Query Diagnostic] Running sale_items select for schema: ${b}`);
+          const { data: bSaleItems, error: errSalesItems } = await supabase.schema(b).from('sale_items').select('*');
+          if (errSalesItems) {
+            const category = getErrorCategory(errSalesItems.code, errSalesItems.message);
+            console.error(`❌ [${category}] Schema: ${b}, Table: sale_items, Error: ${errSalesItems.message}`, errSalesItems);
+            reportSupabaseError(b, 'sale_items', 'select', errSalesItems.message, errSalesItems.code);
+            cache[b].sale_items = [];
+          } else {
+            console.log(`✅ [Query Result] Schema: ${b}, Table: sale_items, Count: ${bSaleItems?.length || 0}`);
+            clearSchemaError(b, 'sale_items');
+            cache[b].sale_items = (bSaleItems || []).map(scrubRow);
+          }
 
-        // 3. SALE ITEMS ACCESS CHECK
-        console.log(`[Query Diagnostic] Running sale_items select for schema: ${b}`);
-        const { data: bSaleItems, error: errSalesItems } = await supabase.schema(b).from('sale_items').select('*');
-        if (errSalesItems) {
-          const category = getErrorCategory(errSalesItems.code, errSalesItems.message);
-          console.error(`❌ [${category}] Schema: ${b}, Table: sale_items, Error: ${errSalesItems.message}`, errSalesItems);
-          reportSupabaseError(b, 'sale_items', 'select', errSalesItems.message, errSalesItems.code);
-          cache[b].sale_items = [];
-        } else {
-          console.log(`✅ [Query Result] Schema: ${b}, Table: sale_items, Count: ${bSaleItems?.length || 0}`);
-          clearSchemaError(b, 'sale_items');
-          cache[b].sale_items = (bSaleItems || []).map(scrubRow);
-        }
+          // 4. RETURNS ACCESS CHECK
+          console.log(`[Query Diagnostic] Running returns select for schema: ${b}`);
+          const { data: bReturns, error: errReturns } = await supabase.schema(b).from('returns').select('*').order('return_date', { ascending: false });
+          if (errReturns) {
+            const category = getErrorCategory(errReturns.code, errReturns.message);
+            console.error(`❌ [${category}] Schema: ${b}, Table: returns, Error: ${errReturns.message}`, errReturns);
+            reportSupabaseError(b, 'returns', 'select', errReturns.message, errReturns.code);
+            cache[b].returns = [];
+          } else {
+            console.log(`✅ [Query Result] Schema: ${b}, Table: returns, Count: ${bReturns?.length || 0}`);
+            clearSchemaError(b, 'returns');
+            cache[b].returns = (bReturns || []).map(scrubRow);
+          }
 
-        // 4. RETURNS ACCESS CHECK
-        console.log(`[Query Diagnostic] Running returns select for schema: ${b}`);
-        const { data: bReturns, error: errReturns } = await supabase.schema(b).from('returns').select('*').order('return_date', { ascending: false });
-        if (errReturns) {
-          const category = getErrorCategory(errReturns.code, errReturns.message);
-          console.error(`❌ [${category}] Schema: ${b}, Table: returns, Error: ${errReturns.message}`, errReturns);
-          reportSupabaseError(b, 'returns', 'select', errReturns.message, errReturns.code);
-          cache[b].returns = [];
-        } else {
-          console.log(`✅ [Query Result] Schema: ${b}, Table: returns, Count: ${bReturns?.length || 0}`);
-          clearSchemaError(b, 'returns');
-          cache[b].returns = (bReturns || []).map(scrubRow);
-        }
+          // 4b. RETURNS DIAGNOCTICS ACCESS CHECK (Requirement 5)
+          console.log(`[Query Diagnostic] Running returns diagnostic select for schema: ${b}`);
+          const { error: errReturnsDiag } = await supabase
+            .schema(b)
+            .from('returns')
+            .select('id, return_date')
+            .order('return_date', { ascending: false })
+            .limit(1);
+          if (errReturnsDiag) {
+            diagnosticStats.returnsTest = { success: false, error: errReturnsDiag.message };
+          } else {
+            diagnosticStats.returnsTest = { success: true, error: null };
+          }
 
-        // 4b. RETURNS DIAGNOCTICS ACCESS CHECK (Requirement 5)
-        console.log(`[Query Diagnostic] Running returns diagnostic select for schema: ${b}`);
-        const { error: errReturnsDiag } = await supabase
-          .schema(b)
-          .from('returns')
-          .select('id, return_date')
-          .order('return_date', { ascending: false })
-          .limit(1);
-        if (errReturnsDiag) {
-          diagnosticStats.returnsTest = { success: false, error: errReturnsDiag.message };
-        } else {
-          diagnosticStats.returnsTest = { success: true, error: null };
-        }
+          // 5. PURCHASES ACCESS CHECK
+          console.log(`[Query Diagnostic] Running purchases select for schema: ${b}`);
+          const { data: bPurchases, error: errPurchases } = await supabase.schema(b).from('purchases').select('*').order('created_at', { ascending: false });
+          if (errPurchases) {
+            const category = getErrorCategory(errPurchases.code, errPurchases.message);
+            console.error(`❌ [${category}] Schema: ${b}, Table: purchases, Error: ${errPurchases.message}`, errPurchases);
+            reportSupabaseError(b, 'purchases', 'select', errPurchases.message, errPurchases.code);
+            diagnosticStats.purchaseTest = { success: false, error: errPurchases.message };
+            cache[b].purchases = [];
+          } else {
+            console.log(`✅ [Query Result] Schema: ${b}, Table: purchases, Count: ${bPurchases?.length || 0}`);
+            diagnosticStats.purchaseTest = { success: true, error: null };
+            clearSchemaError(b, 'purchases');
+            cache[b].purchases = (bPurchases || []).map(scrubRow);
+          }
 
-        // 5. PURCHASES ACCESS CHECK
-        console.log(`[Query Diagnostic] Running purchases select for schema: ${b}`);
-        const { data: bPurchases, error: errPurchases } = await supabase.schema(b).from('purchases').select('*').order('created_at', { ascending: false });
-        if (errPurchases) {
-          const category = getErrorCategory(errPurchases.code, errPurchases.message);
-          console.error(`❌ [${category}] Schema: ${b}, Table: purchases, Error: ${errPurchases.message}`, errPurchases);
-          reportSupabaseError(b, 'purchases', 'select', errPurchases.message, errPurchases.code);
-          diagnosticStats.purchaseTest = { success: false, error: errPurchases.message };
-          cache[b].purchases = [];
-        } else {
-          console.log(`✅ [Query Result] Schema: ${b}, Table: purchases, Count: ${bPurchases?.length || 0}`);
-          diagnosticStats.purchaseTest = { success: true, error: null };
-          clearSchemaError(b, 'purchases');
-          cache[b].purchases = (bPurchases || []).map(scrubRow);
-        }
+          // 6. PURCHASE ITEMS ACCESS CHECK
+          console.log(`[Query Diagnostic] Running purchase_items select for schema: ${b}`);
+          const { data: bPItems, error: errPItems } = await supabase.schema(b).from('purchase_items').select('*');
+          if (errPItems) {
+            const category = getErrorCategory(errPItems.code, errPItems.message);
+            console.error(`❌ [${category}] Schema: ${b}, Table: purchase_items, Error: ${errPItems.message}`, errPItems);
+            reportSupabaseError(b, 'purchase_items', 'select', errPItems.message, errPItems.code);
+            cache[b].purchase_items = [];
+          } else {
+            console.log(`✅ [Query Result] Schema: ${b}, Table: purchase_items, Count: ${bPItems?.length || 0}`);
+            clearSchemaError(b, 'purchase_items');
+            cache[b].purchase_items = (bPItems || []).map(scrubRow);
+          }
 
-        // 6. PURCHASE ITEMS ACCESS CHECK
-        console.log(`[Query Diagnostic] Running purchase_items select for schema: ${b}`);
-        const { data: bPItems, error: errPItems } = await supabase.schema(b).from('purchase_items').select('*');
-        if (errPItems) {
-          const category = getErrorCategory(errPItems.code, errPItems.message);
-          console.error(`❌ [${category}] Schema: ${b}, Table: purchase_items, Error: ${errPItems.message}`, errPItems);
-          reportSupabaseError(b, 'purchase_items', 'select', errPItems.message, errPItems.code);
-          cache[b].purchase_items = [];
-        } else {
-          console.log(`✅ [Query Result] Schema: ${b}, Table: purchase_items, Count: ${bPItems?.length || 0}`);
-          clearSchemaError(b, 'purchase_items');
-          cache[b].purchase_items = (bPItems || []).map(scrubRow);
-        }
+          // 7. BULK UPDATE HISTORY ACCESS CHECK
+          console.log(`[Query Diagnostic] Running bulk_update_history select for schema: ${b}`);
+          const { data: bBulk, error: errBulk } = await supabase.schema(b).from('bulk_update_history').select('*').order('created_at', { ascending: false });
+          if (errBulk) {
+            const category = getErrorCategory(errBulk.code, errBulk.message);
+            console.error(`❌ [${category}] Schema: ${b}, Table: bulk_update_history, Error: ${errBulk.message}`, errBulk);
+            reportSupabaseError(b, 'bulk_update_history', 'select', errBulk.message, errBulk.code);
+            diagnosticStats.bulkUpdateHistoryTest = { success: false, error: errBulk.message };
+            cache[b].bulk_update_history = [];
+          } else {
+            console.log(`✅ [Query Result] Schema: ${b}, Table: bulk_update_history, Count: ${bBulk?.length || 0}`);
+            diagnosticStats.bulkUpdateHistoryTest = { success: true, error: null };
+            clearSchemaError(b, 'bulk_update_history');
+            cache[b].bulk_update_history = (bBulk || []).map(scrubRow);
+          }
 
-        // 7. BULK UPDATE HISTORY ACCESS CHECK
-        console.log(`[Query Diagnostic] Running bulk_update_history select for schema: ${b}`);
-        const { data: bBulk, error: errBulk } = await supabase.schema(b).from('bulk_update_history').select('*').order('created_at', { ascending: false });
-        if (errBulk) {
-          const category = getErrorCategory(errBulk.code, errBulk.message);
-          console.error(`❌ [${category}] Schema: ${b}, Table: bulk_update_history, Error: ${errBulk.message}`, errBulk);
-          reportSupabaseError(b, 'bulk_update_history', 'select', errBulk.message, errBulk.code);
-          diagnosticStats.bulkUpdateHistoryTest = { success: false, error: errBulk.message };
-          cache[b].bulk_update_history = [];
-        } else {
-          console.log(`✅ [Query Result] Schema: ${b}, Table: bulk_update_history, Count: ${bBulk?.length || 0}`);
-          diagnosticStats.bulkUpdateHistoryTest = { success: true, error: null };
-          clearSchemaError(b, 'bulk_update_history');
-          cache[b].bulk_update_history = (bBulk || []).map(scrubRow);
-        }
+          // 8. MRP HISTORY ACCESS CHECK
+          console.log(`[Query Diagnostic] Running mrp_history select for schema: ${b}`);
+          const { data: bMrp, error: errMrp } = await supabase.schema(b).from('mrp_history').select('*').order('changed_at', { ascending: false });
+          if (errMrp) {
+            const category = getErrorCategory(errMrp.code, errMrp.message);
+            console.error(`❌ [${category}] Schema: ${b}, Table: mrp_history, Error: ${errMrp.message}`, errMrp);
+            reportSupabaseError(b, 'mrp_history', 'select', errMrp.message, errMrp.code);
+            diagnosticStats.mrpHistoryTest = { success: false, error: errMrp.message };
+            cache[b].mrp_history = [];
+          } else {
+            console.log(`✅ [Query Result] Schema: ${b}, Table: mrp_history, Count: ${bMrp?.length || 0}`);
+            diagnosticStats.mrpHistoryTest = { success: true, error: null };
+            clearSchemaError(b, 'mrp_history');
+            cache[b].mrp_history = (bMrp || []).map(scrubRow);
+          }
 
-        // 8. MRP HISTORY ACCESS CHECK
-        console.log(`[Query Diagnostic] Running mrp_history select for schema: ${b}`);
-        const { data: bMrp, error: errMrp } = await supabase.schema(b).from('mrp_history').select('*').order('changed_at', { ascending: false });
-        if (errMrp) {
-          const category = getErrorCategory(errMrp.code, errMrp.message);
-          console.error(`❌ [${category}] Schema: ${b}, Table: mrp_history, Error: ${errMrp.message}`, errMrp);
-          reportSupabaseError(b, 'mrp_history', 'select', errMrp.message, errMrp.code);
-          diagnosticStats.mrpHistoryTest = { success: false, error: errMrp.message };
-          cache[b].mrp_history = [];
-        } else {
-          console.log(`✅ [Query Result] Schema: ${b}, Table: mrp_history, Count: ${bMrp?.length || 0}`);
-          diagnosticStats.mrpHistoryTest = { success: true, error: null };
-          clearSchemaError(b, 'mrp_history');
-          cache[b].mrp_history = (bMrp || []).map(scrubRow);
-        }
-
-        // Subscribing specifically to this active brand's schema channels
-        try {
-          if (!subscribedSchemas.has(b)) {
-            subscribedSchemas.add(b);
-            const brandChannel = supabase.channel(`${b}-realtime`);
-            brandChannel
-              .on('postgres_changes', { event: '*', schema: b }, (payload) => {
-                handleRealtimePayload(b, payload);
-              })
-              .subscribe((status) => {
-                console.log(`[Supabase Realtime Status] Schema ${b} channel update: ${status}`);
-                if (status === 'SUBSCRIBED') {
-                  diagnosticStats.realtimeStatus = 'Connected';
-                } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-                  if (diagnosticStats.realtimeStatus !== 'Connected') {
-                    diagnosticStats.realtimeStatus = 'Failed';
+          // Subscribing specifically to this active brand's schema channels
+          try {
+            if (!subscribedSchemas.has(b)) {
+              subscribedSchemas.add(b);
+              const brandChannel = supabase.channel(`${b}-realtime`);
+              brandChannel
+                .on('postgres_changes', { event: '*', schema: b }, (payload) => {
+                  handleRealtimePayload(b, payload);
+                })
+                .subscribe((status) => {
+                  console.log(`[Supabase Realtime Status] Schema ${b} channel update: ${status}`);
+                  if (status === 'SUBSCRIBED') {
+                    diagnosticStats.realtimeStatus = 'Connected';
+                  } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                    if (diagnosticStats.realtimeStatus !== 'Connected') {
+                      diagnosticStats.realtimeStatus = 'Failed';
+                    }
                   }
-                }
-                db.notify();
-              });
+                  db.notify();
+                });
+            }
+          } catch (subErr) {
+            console.warn(`[Realtime Optional Setup] Failed to subscribe to brand ${b} schema channel:`, subErr);
           }
-        } catch (subErr) {
-          console.warn(`[Realtime Optional Setup] Failed to subscribe to brand ${b} schema channel:`, subErr);
-        }
 
-        console.log(`Lazy-loaded brand schema for ${brand} successfully.`);
-        loadedBrands.add(b);
-        db.notify();
-      } catch (err: any) {
-        console.error(`Failed to load dynamic schema partition for ${brand}:`, err);
-        throw err;
+          console.log(`Lazy-loaded brand schema for ${brand} successfully.`);
+          loadedBrands.add(b);
+          db.notify();
+        } catch (err: any) {
+          console.error(`Failed to load dynamic schema partition for ${brand}:`, err);
+          throw err;
+        }
+      } else {
+        console.warn(`Offline load brand data invocation blocked for ${brand}.`);
       }
-    } else {
-      console.warn(`Offline load brand data invocation blocked for ${brand}.`);
+    } finally {
+      isSilentUpdating = false;
     }
   },
 
@@ -771,7 +834,6 @@ export const db = {
   setActiveUser: (user: User | null) => {
     if (user) {
       sessionStorage.setItem(KEY_ACTIVE_USER, JSON.stringify(user));
-      db.logTransaction(user.id, user.name, 'Login', 'User Management', `User ${user.name} logged in successfully`, null, null);
     } else {
       sessionStorage.removeItem(KEY_ACTIVE_USER);
     }
@@ -826,6 +888,9 @@ export const db = {
     userId: string, userName: string, actionType: string, moduleName: string, 
     description: string, oldData: any = null, newData: any = null
   ) => {
+    if (actionType === 'Login') {
+      return;
+    }
     const newLog: TransactionLog = {
       id: uuid(),
       user_id: userId,
@@ -1382,7 +1447,8 @@ export const db = {
     discountPercentage: number,
     paymentStatus: PaymentStatus,
     paidAmount: number,
-    user: User
+    user: User,
+    paymentBreakdown?: PaymentBreakdown
   ): Promise<Sale> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const inventory = cache[b].inventory;
@@ -1475,9 +1541,12 @@ export const db = {
       payment_status: paymentStatus,
       paid_amount: calculatedPaid,
       pending_amount: calculatedPending,
-      created_by: user.name,
+      created_by: formatCreatedBy(user.name, paymentBreakdown),
       created_at: new Date().toISOString()
     };
+    
+    // Set local instance helper directly as well
+    sale.payment_breakdown = paymentBreakdown || { cash: 0, upi: 0, bank: 0 };
     
     cache[b].sales.unshift(sale);
     saleItemsList.push(...itemsToSave);
@@ -1504,14 +1573,15 @@ export const db = {
     db.logTransaction(user.id, user.name, 'Create Sale', 'Sales', `Created invoice ${saleId} for ${customerName} (₹${totalAmount.toFixed(2)})`, null, sale);
     db.notify();
     return sale;
-  },
+  }, associateBreakdownWithName: formatCreatedBy,
 
   updateSalePayment: (
     brand: Brand,
     saleId: string,
     paidAmount: number,
     paymentStatus: PaymentStatus,
-    user: User
+    user: User,
+    paymentBreakdown?: PaymentBreakdown
   ): Sale => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const sales = cache[b].sales;
@@ -1526,11 +1596,18 @@ export const db = {
     sale.pending_amount = Math.max(0, sale.total_amount - paidAmount);
     sale.payment_status = paymentStatus;
     
+    if (paymentBreakdown) {
+      const originalUser = parseCreatedBy(sale.created_by).name;
+      sale.created_by = formatCreatedBy(originalUser, paymentBreakdown);
+      sale.payment_breakdown = paymentBreakdown;
+    }
+    
     if (isSupabaseConfigured && supabase) {
       supabase.schema(b).from('sales').update({
         paid_amount: sale.paid_amount,
         pending_amount: sale.pending_amount,
-        payment_status: sale.payment_status
+        payment_status: sale.payment_status,
+        created_by: sale.created_by
       }).eq('id', sale.id).then();
     } else {
       localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(sales));
@@ -1539,6 +1616,62 @@ export const db = {
     db.logTransaction(user.id, user.name, 'Receive Payment', 'Sales', `Received payment for invoice ${saleId} (Total: ₹${sale.total_amount}, Paid: ₹${paidAmount}, Pending: ₹${sale.pending_amount})`, oldSale, sale);
     db.notify();
     return sale;
+  },
+
+  undoSale: async (brand: Brand, saleId: string, user: User): Promise<void> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    const sales = cache[b].sales;
+    const saleItems = cache[b].sale_items;
+    const inventory = cache[b].inventory;
+
+    const saleIndex = sales.findIndex(s => s.id === saleId);
+    if (saleIndex === -1) throw new Error("Sale not found");
+    const sale = sales[saleIndex];
+
+    // Find sale items related to this sale
+    const relatedItems = saleItems.filter(si => si.sale_id === saleId);
+
+    // Update inventory quantity by adding sold parts back
+    relatedItems.forEach(item => {
+      const invIdx = inventory.findIndex(inv => inv.part_no.toLowerCase() === item.part_no.toLowerCase());
+      if (invIdx !== -1) {
+        inventory[invIdx].quantity += item.quantity;
+        inventory[invIdx].updated_at = new Date().toISOString();
+        if (isSupabaseConfigured && supabase) {
+          supabase.schema(b).from('inventory').update({
+            quantity: inventory[invIdx].quantity,
+            updated_at: inventory[invIdx].updated_at
+          }).eq('id', inventory[invIdx].id).then();
+        }
+      }
+    });
+
+    // Remove the sale items
+    const remainingSaleItems = saleItems.filter(si => si.sale_id !== saleId);
+    cache[b].sale_items = remainingSaleItems;
+
+    // Remove the sale
+    const remainingSales = sales.filter(s => s.id !== saleId);
+    cache[b].sales = remainingSales;
+
+    if (isSupabaseConfigured && supabase) {
+      await supabase.schema(b).from('sales').delete().eq('id', saleId);
+    } else {
+      localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(remainingSales));
+      localStorage.setItem(`sparezy_schema_${b}_sale_items`, JSON.stringify(remainingSaleItems));
+      localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
+    }
+
+    db.logTransaction(
+      user.id,
+      user.name,
+      'Undo Sale',
+      'Sales',
+      `Undid sale invoice #${sale.id} for ${sale.customer_name} (₹${sale.total_amount.toFixed(2)}) and added items back to inventory`,
+      sale,
+      null
+    );
+    db.notify();
   },
 
   // Returns

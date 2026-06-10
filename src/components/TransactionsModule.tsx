@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, Fragment } from 'react';
 import { Brand, User, TransactionLog } from '../types';
 import { db } from '../dbStore';
 import { Terminal, ShieldAlert, Eye, EyeOff, Search } from 'lucide-react';
@@ -103,8 +103,8 @@ export default function TransactionsModule({ brand, user }: TransactionsModulePr
                 const hasDataDiff = log.old_data || log.new_data;
 
                 return (
-                  <>
-                    <tr key={log.id} className="hover:bg-slate-50/50">
+                  <Fragment key={log.id}>
+                    <tr className="hover:bg-slate-50/50">
                       <td className="p-3 text-slate-450 font-normal">
                         {new Date(log.created_at).toLocaleString()}
                       </td>
@@ -156,7 +156,7 @@ export default function TransactionsModule({ brand, user }: TransactionsModulePr
                         </td>
                       </tr>
                     )}
-                  </>
+                  </Fragment>
                 );
               })}
               {filteredLogs.length === 0 && (
