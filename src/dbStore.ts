@@ -1655,6 +1655,7 @@ export const db = {
     cache[b].sales = remainingSales;
 
     if (isSupabaseConfigured && supabase) {
+      await supabase.schema(b).from('sale_items').delete().eq('sale_id', saleId);
       await supabase.schema(b).from('sales').delete().eq('id', saleId);
     } else {
       localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(remainingSales));
@@ -1980,7 +1981,9 @@ export const db = {
     cache[b].purchase_items = remainingItems;
     
     if (isSupabaseConfigured && supabase) {
-      supabase.schema(b).from('purchases').delete().eq('id', purchaseId).then();
+      supabase.schema(b).from('purchase_items').delete().eq('purchase_id', purchaseId).then(() => {
+        supabase.schema(b).from('purchases').delete().eq('id', purchaseId).then();
+      });
     } else {
       localStorage.setItem(`sparezy_schema_${b}_purchases`, JSON.stringify(remainingPurchases));
       localStorage.setItem(`sparezy_schema_${b}_purchase_items`, JSON.stringify(remainingItems));
