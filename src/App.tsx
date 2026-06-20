@@ -452,11 +452,22 @@ export default function App() {
   // Gate entrance if mock auth didn't sign in yet
   if (!activeBrand || !activeUser) {
     return (
-      <BrandSelector 
-        activeUser={activeUser}
-        onSelect={handleBrandSelect} 
-        onLogout={handleLogout}
-      />
+      <div className="relative min-h-screen w-full">
+        <BrandSelector 
+          activeUser={activeUser}
+          onSelect={handleBrandSelect} 
+          onLogout={handleLogout}
+        />
+        {/* Universal Floating Refresh Website Button */}
+        <button
+          onClick={() => window.location.reload()}
+          title="Refresh Website Page"
+          className="fixed bottom-6 right-6 z-[9999] flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-full shadow-2xl transition-all duration-250 cursor-pointer active:scale-95 border border-emerald-505/30"
+        >
+          <RefreshCw className="w-4 h-4" />
+          <span>Refresh Website</span>
+        </button>
+      </div>
     );
   }
 
@@ -643,7 +654,18 @@ export default function App() {
               className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs shadow-xs hover:border-slate-300 transition duration-150 cursor-pointer disabled:opacity-60 active:scale-95`}
             >
               <RefreshCw className={`w-3.5 h-3.5 text-indigo-600 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">{isRefreshing ? 'Syncing...' : 'Sync'}</span>
+              <span className="hidden sm:inline">{isRefreshing ? 'Syncing...' : 'Sync Data'}</span>
+            </button>
+
+            {/* Global Web Page Reload Button */}
+            <button
+              id="global-page-reload-button"
+              onClick={() => window.location.reload()}
+              title="Reload the entire website page"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100/80 text-emerald-800 font-bold text-xs shadow-xs hover:border-emerald-305 transition duration-150 cursor-pointer active:scale-95"
+            >
+              <RefreshCw className="w-3.5 h-3.5 text-emerald-600" />
+              <span className="inline-flex">{isRefreshing ? 'Refreshing...' : 'Refresh Website'}</span>
             </button>
 
             <span className="hidden md:inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-100">
@@ -768,6 +790,16 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Global Floating Refresh Website Button */}
+      <button
+        onClick={() => window.location.reload()}
+        title="Refresh Website Page"
+        className="fixed bottom-6 right-6 z-[9999] flex items-center gap-2 px-4 py-2.5 bg-emerald-650 hover:bg-emerald-700 text-white font-bold text-xs rounded-full shadow-2xl transition hover:scale-105 active:scale-95 border border-emerald-505/30 cursor-pointer"
+      >
+        <RefreshCw className="w-4 h-4" />
+        <span>Refresh Website</span>
+      </button>
 
     </div>
   );
