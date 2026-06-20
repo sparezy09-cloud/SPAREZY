@@ -324,7 +324,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
 
     } catch (err: any) {
       console.warn("AI Scanning Engine fallback triggered:", err.message);
-      alert(`Notice: Live AI process was unresolved because of key structure or endpoint limit. Falling back to simulated scan data.`);
+      alert(`Notice: Live AI process was unresolved: ${err.message || "Unknown error"}. Falling back to simulated scan data.`);
       
       const primaryFileName = uploadedFiles[0]?.file.name || 'procurement_bill.pdf';
       triggerSimulationOfScan(primaryFileName);
