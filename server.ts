@@ -223,4 +223,8 @@ async function bootServer() {
   });
 }
 
-bootServer();
+if (process.env.NODE_ENV !== "production" || !process.env.VERCEL) {
+  bootServer();
+}
+
+export default app;
