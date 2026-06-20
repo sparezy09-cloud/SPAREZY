@@ -203,7 +203,8 @@ Return the data strictly as a JSON object matching the requested schema.`;
 async function bootServer() {
   // Vite dev server middleware integration
   if (process.env.NODE_ENV !== "production") {
-    const { createServer: createViteServer } = await import("vite");
+    const viteModuleName = "vite";
+    const { createServer: createViteServer } = await import(viteModuleName);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",

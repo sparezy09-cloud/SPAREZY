@@ -281,8 +281,22 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
       });
 
       if (!res.ok) {
-        const errPayload = await res.json().catch(() => ({}));
-        throw new Error(errPayload.error || `Server HTTP Error ${res.status}`);
+        const rawText = await res.text().catch(() => "");
+        let errorMsg = `Server HTTP Error ${res.status}`;
+        try {
+          const parsed = JSON.parse(rawText);
+          if (parsed && parsed.error) {
+            errorMsg = parsed.error;
+          }
+        } catch {
+          const cleanText = rawText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+          if (cleanText) {
+            errorMsg = `Server HTTP Error ${res.status}: ${cleanText.substring(0, 300)}`;
+          } else {
+            errorMsg = `Server Error status ${res.status}`;
+          }
+        }
+        throw new Error(errorMsg);
       }
 
       const payload = await res.json();
