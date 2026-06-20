@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/server.ts"
+    },
+    {
+      "source": "/assets/:path*",
+      "destination": "/dist/assets/:path*"
+    },
+    {
+      "source": "/(index.html)?",
+      "destination": "/dist/index.html"
+    },
+    {
+      "source": "/:path*",
+      "destination": "/dist/:path*"
+    }
+  ]
+}
