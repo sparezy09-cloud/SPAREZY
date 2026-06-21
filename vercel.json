@@ -1,13 +1,15 @@
 {
   "version": 2,
   "functions": {
-    "api/gemini/scan-invoice.ts": {
+    "api/index.ts": {
       "maxDuration": 60,
       "memory": 1024
-    },
-    "api/health.ts": {
-      "maxDuration": 10,
-      "memory": 512
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.ts"
+    }
+  ]
 }
