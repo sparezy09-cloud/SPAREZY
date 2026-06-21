@@ -1575,6 +1575,84 @@ export const db = {
     return sale;
   },
 
+  undoSale: async (
+    brand: Brand,
+    saleId: string,
+    user: User
+  ): Promise<void> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    const sales = cache[b].sales;
+    const saleIdx = sales.findIndex(s => s.id === saleId);
+    if (saleIdx === -1) {
+      throw new Error(`Sale ID ${saleId} not found.`);
+    }
+    const sale = sales[saleIdx];
+
+    // Find all sale items for this sale
+    const saleItems = cache[b].sale_items.filter(item => item.sale_id === saleId);
+
+    // Verify inventory items exist and update quantities
+    const inventory = cache[b].inventory;
+    
+    // Perform safety check first
+    for (const item of saleItems) {
+      const invItem = inventory.find(inv => inv.part_no === item.part_no);
+      if (!invItem) {
+        throw new Error(`Part number ${item.part_no} from sale not found in inventory. Cannot undo.`);
+      }
+    }
+
+    // Now restore inventory quantities
+    for (const item of saleItems) {
+      const invItem = inventory.find(inv => inv.part_no === item.part_no)!;
+      invItem.quantity += item.quantity;
+      invItem.updated_at = new Date().toISOString();
+
+      if (isSupabaseConfigured && supabase) {
+        const { error: invErr } = await supabase.schema(b).from('inventory').update({
+          quantity: invItem.quantity,
+          updated_at: invItem.updated_at
+        }).eq('id', invItem.id);
+        if (invErr) {
+          throw new Error(`Failed to update inventory stock in database: ${invErr.message}`);
+        }
+      }
+    }
+
+    // Delete Sale Items and Sale from tables/cache
+    cache[b].sale_items = cache[b].sale_items.filter(item => item.sale_id !== saleId);
+    cache[b].sales = cache[b].sales.filter(s => s.id !== saleId);
+
+    if (isSupabaseConfigured && supabase) {
+      // First delete sale_items due to foreign keys if they exist
+      const { error: sItemsErr } = await supabase.schema(b).from('sale_items').delete().eq('sale_id', saleId);
+      if (sItemsErr) {
+        console.error("❌ Error deleting sale items from database:", sItemsErr);
+      }
+
+      const { error: saleErr } = await supabase.schema(b).from('sales').delete().eq('id', saleId);
+      if (saleErr) {
+        throw new Error(`Failed to delete sale invoice from database: ${saleErr.message}`);
+      }
+    } else {
+      localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
+      localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(cache[b].sales));
+      localStorage.setItem(`sparezy_schema_${b}_sale_items`, JSON.stringify(cache[b].sale_items));
+    }
+
+    db.logTransaction(
+      user.id,
+      user.name,
+      'Undo Sale',
+      'Sales',
+      `Undid sale invoice ${saleId} for ${sale.customer_name}. Returned ${saleItems.length} items (total parts quantity: ${saleItems.reduce((acc, curr) => acc + curr.quantity, 0)}) to inventory.`,
+      sale,
+      null
+    );
+
+    db.notify();
+  },
+
   // Returns
   getReturns: (brand: Brand): ReturnRecord[] => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';

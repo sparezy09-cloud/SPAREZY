@@ -4,7 +4,7 @@ import { db } from '../dbStore';
 import { 
   ShoppingBag, Search, PlusCircle, Check, Trash2, Printer, 
   ChevronRight, Calendar, UserCheck, CreditCard, Eye, X, Plus,
-  Share2, MessageSquare
+  Share2, MessageSquare, RotateCcw
 } from 'lucide-react';
 
 interface SalesModuleProps {
@@ -97,6 +97,32 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const [customersList, setCustomersList] = useState<Customer[]>(() => db.getCustomers());
   const [salesList, setSalesList] = useState<Sale[]>(() => db.getSales(brand));
   const [toastMessageLocal, setToastMessageLocal] = useState<string | null>(null);
+
+  // Undo confirmation states
+  const [undoConfirmSale, setUndoConfirmSale] = useState<Sale | null>(null);
+  const [isUndoing, setIsUndoing] = useState(false);
+  const [undoError, setUndoError] = useState<string | null>(null);
+
+  const itemsToRestore = useMemo(() => {
+    if (!undoConfirmSale) return [];
+    return db.getSaleItems(brand).filter(item => item.sale_id === undoConfirmSale.id);
+  }, [undoConfirmSale, brand, salesList]);
+
+  const handleUndoSale = async () => {
+    if (!undoConfirmSale) return;
+    setIsUndoing(true);
+    setUndoError(null);
+    try {
+      await db.undoSale(brand, undoConfirmSale.id, user);
+      triggerToast(`Successfully undone invoice #${undoConfirmSale.id.substring(0, 8).toUpperCase()}! Stock has been returned to inventory.`);
+      setUndoConfirmSale(null);
+    } catch (err: any) {
+      console.error(err);
+      setUndoError(err.message || 'Failed to undo sale. Please try again.');
+    } finally {
+      setIsUndoing(false);
+    }
+  };
 
   const refreshComponentData = () => {
     setInventoryList(db.getInventory(brand));
@@ -861,6 +887,17 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                           <Eye className="w-3.5 h-3.5" />
                           View / Print Slip
                         </button>
+                        <button
+                          onClick={() => {
+                            setUndoConfirmSale(sale);
+                            setUndoError(null);
+                          }}
+                          className="p-1 px-2 text-rose-650 hover:bg-rose-50 border border-rose-250 hover:border-rose-400 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
+                          title="Undo sale & return parts to stock"
+                        >
+                          <RotateCcw className="w-3 h-3 text-rose-600" />
+                          Undo
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -1161,6 +1198,107 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
               </div>
 
             </form>
+
+          </div>
+        </div>
+      )}
+
+      {/* UNDO CONFIRMATION MODAL */}
+      {undoConfirmSale && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg border border-slate-200 overflow-hidden text-xs">
+            
+            <div className="bg-slate-50 px-5 py-4 border-b border-slate-200 flex justify-between items-center">
+              <div className="space-y-0.5">
+                <span className="text-[9px] uppercase font-bold text-rose-650 tracking-wider">CRITICAL INVOICE CONTROL</span>
+                <h3 className="font-extrabold text-slate-900 text-sm">
+                  Undo Sale Invoice #{undoConfirmSale.id.length > 10 ? undoConfirmSale.id.substring(0, 8).toUpperCase() : undoConfirmSale.id}
+                </h3>
+              </div>
+              <button 
+                onClick={() => setUndoConfirmSale(null)} 
+                className="p-1.5 rounded-lg hover:bg-slate-100 transition text-slate-400 hover:text-slate-600 cursor-pointer"
+                disabled={isUndoing}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="space-y-1">
+                <p className="text-slate-500 font-medium">
+                  Are you absolutely certain you want to undo this sale? Doing so will:
+                </p>
+                <ul className="list-disc pl-5 text-slate-600 font-semibold space-y-1 py-1 text-left">
+                  <li>Permanently remove this invoice record from history</li>
+                  <li>Revert all parts quantities of this sale directly back to the active stock inventory</li>
+                  <li>Remove outstanding due balances or processed collections for this sale</li>
+                </ul>
+              </div>
+
+              {undoError && (
+                <div className="p-3 bg-red-50 text-red-700 border border-red-200 rounded-xl font-semibold text-left">
+                  Error: {undoError}
+                </div>
+              )}
+
+              {/* Items Summary list to restore */}
+              {itemsToRestore.length > 0 && (
+                <div className="border border-slate-150 rounded-xl overflow-hidden">
+                  <div className="bg-slate-50 px-3 py-1.5 border-b border-slate-150 text-[10px] uppercase font-bold tracking-wider text-slate-500 text-left">
+                    Part(s) to be restored to stock
+                  </div>
+                  <div className="max-h-[160px] overflow-y-auto divide-y divide-slate-100">
+                    {itemsToRestore.map((item) => (
+                      <div key={item.id} className="p-3 flex items-center justify-between font-semibold">
+                        <div className="text-left">
+                          <p className="text-slate-800 font-bold">{item.part_name}</p>
+                          <p className="text-[10px] text-slate-450 font-mono">{item.part_no}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-slate-900 font-bold">Qty: +{item.quantity}</p>
+                          <p className="text-[10px] text-slate-400 font-medium">MRP: ₹{item.mrp.toFixed(2)}</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="p-3.5 bg-rose-50 border border-rose-100 rounded-xl space-y-1 font-semibold text-rose-950 text-left">
+                <div className="flex justify-between text-[11px]">
+                  <span>Total Amount Refundable/Reverting:</span>
+                  <span className="font-mono font-bold">₹{undoConfirmSale.total_amount.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span>
+                </div>
+                <div className="flex justify-between text-[11px] text-rose-800 font-bold">
+                  <span>Customer:</span>
+                  <span>{undoConfirmSale.customer_name} ({undoConfirmSale.customer_category})</span>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="flex flex-col gap-2 pt-2 text-xs font-bold font-sans">
+                <button
+                  type="button"
+                  onClick={handleUndoSale}
+                  disabled={isUndoing}
+                  className="w-full bg-rose-600 hover:bg-rose-700 disabled:bg-rose-400 text-white py-2.5 rounded-xl cursor-pointer text-center flex items-center justify-center gap-1 shadow-sm transition"
+                >
+                  <RotateCcw className={`w-4 h-4 ${isUndoing ? 'animate-spin' : ''}`} />
+                  {isUndoing ? 'Reverting Sale and Restoring Stock...' : 'Confirm Undo Sale & Revert Stock'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setUndoConfirmSale(null)}
+                  disabled={isUndoing}
+                  className="w-full bg-slate-100 text-slate-600 hover:bg-slate-200 py-2.5 rounded-xl cursor-pointer text-center transition"
+                >
+                  Cancel
+                </button>
+              </div>
+
+            </div>
 
           </div>
         </div>
