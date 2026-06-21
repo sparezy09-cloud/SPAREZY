@@ -287,4 +287,8 @@ async function bootServer() {
   });
 }
 
-bootServer();
+if (!process.env.VERCEL) {
+  bootServer();
+}
+
+export default app;
