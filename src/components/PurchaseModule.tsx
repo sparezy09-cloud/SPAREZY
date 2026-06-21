@@ -271,18 +271,39 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
 
       const processedFilesList = await Promise.all(filesEncryptedPromises);
 
+      const requestHeaders = {
+        "Content-Type": "application/json"
+      };
+      const requestPayload = { files: processedFilesList };
+
+      console.log("[DETAILED AI SCAN FRONTEND REQUEST BUILD] Preparing /api/gemini/scan-invoice request:", {
+        url: "/api/gemini/scan-invoice",
+        headers: requestHeaders,
+        payloadFileCount: processedFilesList.length,
+        payloadTotalSizeCharacters: JSON.stringify(requestPayload).length,
+        filesMetadata: processedFilesList.map(f => ({ name: f.name, size: f.fileBase64.length, mimeType: f.mimeType }))
+      });
+
       console.log(`Posting ${processedFilesList.length} files to server-side scan proxy...`);
       const res = await fetch("/api/gemini/scan-invoice", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ files: processedFilesList })
+        headers: requestHeaders,
+        body: JSON.stringify(requestPayload)
       });
 
       if (!res.ok) {
-        const errPayload = await res.json().catch(() => ({}));
-        throw new Error(errPayload.error || `Server HTTP Error ${res.status}`);
+        const errorResponseBodyText = await res.text().catch(() => "Could not extract error response body text");
+        console.error(`[AI CLIENT SCAN HTTP ERROR] Server returned status ${res.status}. Response Body Text:`, errorResponseBodyText);
+        
+        let extractedErrorMsg = `Server HTTP Error ${res.status}`;
+        try {
+          const parsedErr = JSON.parse(errorResponseBodyText);
+          if (parsedErr && parsedErr.error) {
+            extractedErrorMsg = parsedErr.error;
+          }
+        } catch (_) {}
+        
+        throw new Error(`${extractedErrorMsg} | Status: ${res.status} | Body: ${errorResponseBodyText}`);
       }
 
       const payload = await res.json();
