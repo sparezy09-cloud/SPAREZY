@@ -323,8 +323,11 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
       triggerToast(`Live AI multi-page invoice processed! Scanned ${processedFilesList.length} pages. Powered by ${payload.modelUsed}`);
 
     } catch (err: any) {
-      console.warn("AI Scanning Engine fallback triggered:", err.message);
-      alert(`Notice: Live AI process was unresolved because of key structure or endpoint limit. Falling back to simulated scan data.`);
+      console.error("[DETAILED AI SCAN CLIENT EXCEPTION]", err);
+      console.warn("AI Scanning Engine fallback triggered. Root Cause:", err.message || err);
+      
+      const detailedErrorMessage = err.message || "Unknown Connection/Network Failure";
+      alert(`Notice: Live AI process was unresolved because of key structure, endpoint limit, or payload size. \n\nExact Error: ${detailedErrorMessage}\n\nFalling back to simulated scan data.`);
       
       const primaryFileName = uploadedFiles[0]?.file.name || 'procurement_bill.pdf';
       triggerSimulationOfScan(primaryFileName);
