@@ -28,74 +28,6 @@ interface ParsedAIScanRow {
   isNewPart: boolean;
 }
 
-function compressImageIfNeeded(file: File, maxWidth = 1200, maxHeight = 1600, quality = 0.8): Promise<string> {
-  return new Promise((resolve) => {
-    if (!file.type.startsWith("image/")) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const resultSrc = e.target?.result as string || "";
-        const commaIdx = resultSrc.indexOf(',');
-        resolve(commaIdx > -1 ? resultSrc.substring(commaIdx + 1) : resultSrc);
-      };
-      reader.onerror = () => resolve("");
-      reader.readAsDataURL(file);
-      return;
-    }
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        let width = img.width;
-        let height = img.height;
-
-        if (width > maxWidth || height > maxHeight) {
-          if (width / height > maxWidth / maxHeight) {
-            height = Math.round((height * maxWidth) / width);
-            width = maxWidth;
-          } else {
-            width = Math.round((width * maxHeight) / height);
-            height = maxHeight;
-          }
-        }
-
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-
-        const ctx = canvas.getContext("2d");
-        if (ctx) {
-          ctx.drawImage(img, 0, 0, width, height);
-          canvas.toBlob((blob) => {
-            if (blob) {
-              const fileReader = new FileReader();
-              fileReader.onloadend = () => {
-                const base64data = fileReader.result as string || "";
-                const commaIdx = base64data.indexOf(',');
-                resolve(commaIdx > -1 ? base64data.substring(commaIdx + 1) : base64data);
-              };
-              fileReader.readAsDataURL(blob);
-            } else {
-              const commaIdx = (event.target?.result as string || "").indexOf(',');
-              resolve(commaIdx > -1 ? (event.target?.result as string || "").substring(commaIdx + 1) : (event.target?.result as string || ""));
-            }
-          }, "image/jpeg", quality);
-        } else {
-          const commaIdx = (event.target?.result as string || "").indexOf(',');
-          resolve(commaIdx > -1 ? (event.target?.result as string || "").substring(commaIdx + 1) : (event.target?.result as string || ""));
-        }
-      };
-      img.onerror = () => {
-        const commaIdx = (event.target?.result as string || "").indexOf(',');
-        resolve(commaIdx > -1 ? (event.target?.result as string || "").substring(commaIdx + 1) : (event.target?.result as string || ""));
-      };
-      img.src = event.target?.result as string || "";
-    };
-    reader.onerror = () => resolve("");
-    reader.readAsDataURL(file);
-  });
-}
-
 export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   const [activeTab, setActiveTab] = useState<'scan' | 'manual' | 'history'>('scan');
   
@@ -318,17 +250,23 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
     setScannedFilesLoaded(false);
 
     try {
-      const filesEncryptedPromises = uploadedFiles.map(async item => {
-        try {
-          const fileBase64 = await compressImageIfNeeded(item.file);
-          if (!fileBase64) {
-            throw new Error(`Could not read or process file: ${item.file.name}`);
-          }
-          const mimeType = item.file.type || "image/jpeg";
-          return { fileBase64, mimeType, name: item.file.name };
-        } catch (fileErr: any) {
-          throw new Error(`Error processing ${item.file.name}: ${fileErr.message || fileErr}`);
-        }
+      const filesEncryptedPromises = uploadedFiles.map(item => {
+        return new Promise<{ fileBase64: string; mimeType: string; name: string }>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            const resultSrc = e.target?.result as string;
+            if (!resultSrc) {
+              reject(new Error(`Could not load context of file: ${item.file.name}`));
+              return;
+            }
+            const commaIdx = resultSrc.indexOf(',');
+            const fileBase64 = commaIdx > -1 ? resultSrc.substring(commaIdx + 1) : resultSrc;
+            const mimeType = item.file.type || "image/jpeg";
+            resolve({ fileBase64, mimeType, name: item.file.name });
+          };
+          reader.onerror = () => reject(new Error(`Error reading file: ${item.file.name}`));
+          reader.readAsDataURL(item.file);
+        });
       });
 
       const processedFilesList = await Promise.all(filesEncryptedPromises);
@@ -343,22 +281,8 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
       });
 
       if (!res.ok) {
-        const rawText = await res.text().catch(() => "");
-        let errorMsg = `Server HTTP Error ${res.status}`;
-        try {
-          const parsed = JSON.parse(rawText);
-          if (parsed && parsed.error) {
-            errorMsg = parsed.error;
-          }
-        } catch {
-          const cleanText = rawText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-          if (cleanText) {
-            errorMsg = `Server HTTP Error ${res.status}: ${cleanText.substring(0, 300)}`;
-          } else {
-            errorMsg = `Server Error status ${res.status}`;
-          }
-        }
-        throw new Error(errorMsg);
+        const errPayload = await res.json().catch(() => ({}));
+        throw new Error(errPayload.error || `Server HTTP Error ${res.status}`);
       }
 
       const payload = await res.json();
@@ -400,7 +324,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
 
     } catch (err: any) {
       console.warn("AI Scanning Engine fallback triggered:", err.message);
-      alert(`Notice: Live AI process was unresolved: ${err.message || "Unknown error"}. Falling back to simulated scan data.`);
+      alert(`Notice: Live AI process was unresolved because of key structure or endpoint limit. Falling back to simulated scan data.`);
       
       const primaryFileName = uploadedFiles[0]?.file.name || 'procurement_bill.pdf';
       triggerSimulationOfScan(primaryFileName);

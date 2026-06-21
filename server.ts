@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 
@@ -16,50 +17,32 @@ let aiClient: GoogleGenAI | null = null;
 
 function getGeminiClient(): GoogleGenAI {
   if (!aiClient) {
-    const key = process.env.GEMINI_API_KEY || process.env.API_KEY;
+    const key = process.env.GEMINI_API_KEY;
     if (!key) {
-      throw new Error("GEMINI_API_KEY or API_KEY environment variable is not defined. Please configure it in secrets.");
+      throw new Error("GEMINI_API_KEY environment variable is not defined. Please configure it in Secrets.");
     }
-    aiClient = new GoogleGenAI({ apiKey: key });
+    aiClient = new GoogleGenAI({
+      apiKey: key,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        }
+      }
+    });
   }
   return aiClient;
 }
 
 // API endpoint for health checking
 app.get("/api/health", (req, res) => {
-  const isVercel = !!process.env.VERCEL;
-  const hasGeminiKey = !!(process.env.GEMINI_API_KEY || process.env.API_KEY);
-  console.log(`[Health Endpoint] Request processed. Vercel: ${isVercel}, NodeEnv: ${process.env.NODE_ENV}, HasGeminiKey: ${hasGeminiKey}`);
-  res.json({
-    status: "ok",
-    port: PORT,
-    environment: {
-      vercel: isVercel,
-      nodeEnv: process.env.NODE_ENV || "development",
-      hasGeminiApiKey: hasGeminiKey
-    }
-  });
+  res.json({ status: "ok", port: PORT });
 });
 
 // AI Scanning endpoint using Gemini with Fallback
 app.post("/api/gemini/scan-invoice", async (req, res) => {
-  const hasGeminiKey = !!(process.env.GEMINI_API_KEY || process.env.API_KEY);
-  console.log(`[AI SCAN] Request incoming. Payload keys: ${Object.keys(req.body || {})}, HasGeminiKey: ${hasGeminiKey}`);
   try {
     const { fileBase64, mimeType, files } = req.body;
-    
-    // Log details about files to process
-    if (files && Array.isArray(files)) {
-      console.log(`[AI SCAN] Processing multiple files array. Count: ${files.length}`);
-      files.forEach((f, idx) => {
-        console.log(` - File ${idx + 1}: mimeType: ${f.mimeType}, dataPrefix: ${f.fileBase64 ? f.fileBase64.substring(0, 30) + '...' : 'empty'}`);
-      });
-    } else {
-      console.log(`[AI SCAN] Processing single file payload. mimeType: ${mimeType}, dataPrefix: ${fileBase64 ? fileBase64.substring(0, 30) + '...' : 'empty'}`);
-    }
-
     if ((!fileBase64 || !mimeType) && (!files || !Array.isArray(files) || files.length === 0)) {
-       console.warn("[AI SCAN] Invalid payload. Missing files or mimeType content.");
        res.status(400).json({ error: "Missing fileBase64, mimeType, or multiple files array payload." });
        return;
     }
@@ -221,8 +204,6 @@ Return the data strictly as a JSON object matching the requested schema.`;
 async function bootServer() {
   // Vite dev server middleware integration
   if (process.env.NODE_ENV !== "production") {
-    const viteModuleName = "vite";
-    const { createServer: createViteServer } = await import(viteModuleName);
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -242,11 +223,4 @@ async function bootServer() {
   });
 }
 
-if (!process.env.VERCEL) {
-  console.log("[Server] Standalone environment detected. Starting Express listener...");
-  bootServer();
-} else {
-  console.log("[Server] Vercel environment detected. Serverless mode active, bypassing Express app.listen()");
-}
-
-export default app;
+bootServer();

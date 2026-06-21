@@ -2,7 +2,7 @@ import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
-  ScanSource, PaymentBreakdown
+  ScanSource
 } from './types';
 
 // Storage keys for active preferences and local storage fallback
@@ -184,30 +184,6 @@ function initLocalFallback() {
   }
 }
 
-export function parseCreatedBy(createdBy: string): { name: string; breakdown: PaymentBreakdown | null } {
-  if (!createdBy) return { name: 'Staff', breakdown: null };
-  const parts = createdBy.split('|');
-  const name = parts[0].trim();
-  if (parts.length > 1 && parts[1].includes('[Breakdown]')) {
-    try {
-      const indexStr = parts[1].indexOf('[Breakdown]') + 11;
-      const jsonStr = parts[1].substring(indexStr).trim();
-      const breakdown = JSON.parse(jsonStr) as PaymentBreakdown;
-      return { name, breakdown };
-    } catch {
-      return { name, breakdown: null };
-    }
-  }
-  return { name, breakdown: null };
-}
-
-export function formatCreatedBy(name: string, breakdown?: PaymentBreakdown): string {
-  if (!breakdown || (breakdown.cash === 0 && breakdown.upi === 0 && breakdown.bank === 0)) {
-    return name;
-  }
-  return `${name} | [Breakdown] ${JSON.stringify(breakdown)}`;
-}
-
 // Convert schema fields to JS numeric variables safely
 const scrubRow = (row: any) => {
   if (!row) return row;
@@ -235,13 +211,6 @@ const scrubRow = (row: any) => {
   if (r.backup_data_json !== undefined) {
     r.backup_data_json = r.backup_data_json ? (typeof r.backup_data_json === 'string' ? r.backup_data_json : JSON.stringify(r.backup_data_json)) : undefined;
   }
-
-  // Hydrate payment_breakdown if this row has created_by representing a Sale
-  if (r.created_by !== undefined && r.payment_status !== undefined) {
-    const parsed = parseCreatedBy(r.created_by);
-    r.payment_breakdown = parsed.breakdown || { cash: 0, upi: 0, bank: 0 };
-  }
-  
   return r;
 };
 
@@ -1447,8 +1416,7 @@ export const db = {
     discountPercentage: number,
     paymentStatus: PaymentStatus,
     paidAmount: number,
-    user: User,
-    paymentBreakdown?: PaymentBreakdown
+    user: User
   ): Promise<Sale> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const inventory = cache[b].inventory;
@@ -1541,12 +1509,9 @@ export const db = {
       payment_status: paymentStatus,
       paid_amount: calculatedPaid,
       pending_amount: calculatedPending,
-      created_by: formatCreatedBy(user.name, paymentBreakdown),
+      created_by: user.name,
       created_at: new Date().toISOString()
     };
-    
-    // Set local instance helper directly as well
-    sale.payment_breakdown = paymentBreakdown || { cash: 0, upi: 0, bank: 0 };
     
     cache[b].sales.unshift(sale);
     saleItemsList.push(...itemsToSave);
@@ -1573,15 +1538,14 @@ export const db = {
     db.logTransaction(user.id, user.name, 'Create Sale', 'Sales', `Created invoice ${saleId} for ${customerName} (₹${totalAmount.toFixed(2)})`, null, sale);
     db.notify();
     return sale;
-  }, associateBreakdownWithName: formatCreatedBy,
+  },
 
   updateSalePayment: (
     brand: Brand,
     saleId: string,
     paidAmount: number,
     paymentStatus: PaymentStatus,
-    user: User,
-    paymentBreakdown?: PaymentBreakdown
+    user: User
   ): Sale => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const sales = cache[b].sales;
@@ -1596,18 +1560,11 @@ export const db = {
     sale.pending_amount = Math.max(0, sale.total_amount - paidAmount);
     sale.payment_status = paymentStatus;
     
-    if (paymentBreakdown) {
-      const originalUser = parseCreatedBy(sale.created_by).name;
-      sale.created_by = formatCreatedBy(originalUser, paymentBreakdown);
-      sale.payment_breakdown = paymentBreakdown;
-    }
-    
     if (isSupabaseConfigured && supabase) {
       supabase.schema(b).from('sales').update({
         paid_amount: sale.paid_amount,
         pending_amount: sale.pending_amount,
-        payment_status: sale.payment_status,
-        created_by: sale.created_by
+        payment_status: sale.payment_status
       }).eq('id', sale.id).then();
     } else {
       localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(sales));
@@ -1616,63 +1573,6 @@ export const db = {
     db.logTransaction(user.id, user.name, 'Receive Payment', 'Sales', `Received payment for invoice ${saleId} (Total: ₹${sale.total_amount}, Paid: ₹${paidAmount}, Pending: ₹${sale.pending_amount})`, oldSale, sale);
     db.notify();
     return sale;
-  },
-
-  undoSale: async (brand: Brand, saleId: string, user: User): Promise<void> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    const sales = cache[b].sales;
-    const saleItems = cache[b].sale_items;
-    const inventory = cache[b].inventory;
-
-    const saleIndex = sales.findIndex(s => s.id === saleId);
-    if (saleIndex === -1) throw new Error("Sale not found");
-    const sale = sales[saleIndex];
-
-    // Find sale items related to this sale
-    const relatedItems = saleItems.filter(si => si.sale_id === saleId);
-
-    // Update inventory quantity by adding sold parts back
-    relatedItems.forEach(item => {
-      const invIdx = inventory.findIndex(inv => inv.part_no.toLowerCase() === item.part_no.toLowerCase());
-      if (invIdx !== -1) {
-        inventory[invIdx].quantity += item.quantity;
-        inventory[invIdx].updated_at = new Date().toISOString();
-        if (isSupabaseConfigured && supabase) {
-          supabase.schema(b).from('inventory').update({
-            quantity: inventory[invIdx].quantity,
-            updated_at: inventory[invIdx].updated_at
-          }).eq('id', inventory[invIdx].id).then();
-        }
-      }
-    });
-
-    // Remove the sale items
-    const remainingSaleItems = saleItems.filter(si => si.sale_id !== saleId);
-    cache[b].sale_items = remainingSaleItems;
-
-    // Remove the sale
-    const remainingSales = sales.filter(s => s.id !== saleId);
-    cache[b].sales = remainingSales;
-
-    if (isSupabaseConfigured && supabase) {
-      await supabase.schema(b).from('sale_items').delete().eq('sale_id', saleId);
-      await supabase.schema(b).from('sales').delete().eq('id', saleId);
-    } else {
-      localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(remainingSales));
-      localStorage.setItem(`sparezy_schema_${b}_sale_items`, JSON.stringify(remainingSaleItems));
-      localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
-    }
-
-    db.logTransaction(
-      user.id,
-      user.name,
-      'Undo Sale',
-      'Sales',
-      `Undid sale invoice #${sale.id} for ${sale.customer_name} (₹${sale.total_amount.toFixed(2)}) and added items back to inventory`,
-      sale,
-      null
-    );
-    db.notify();
   },
 
   // Returns
@@ -1981,9 +1881,7 @@ export const db = {
     cache[b].purchase_items = remainingItems;
     
     if (isSupabaseConfigured && supabase) {
-      supabase.schema(b).from('purchase_items').delete().eq('purchase_id', purchaseId).then(() => {
-        supabase.schema(b).from('purchases').delete().eq('id', purchaseId).then();
-      });
+      supabase.schema(b).from('purchases').delete().eq('id', purchaseId).then();
     } else {
       localStorage.setItem(`sparezy_schema_${b}_purchases`, JSON.stringify(remainingPurchases));
       localStorage.setItem(`sparezy_schema_${b}_purchase_items`, JSON.stringify(remainingItems));
