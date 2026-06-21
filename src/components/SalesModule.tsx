@@ -817,7 +817,9 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                 <tbody className="divide-y divide-slate-100 text-slate-700">
                   {filteredSalesHistory.map((sale) => (
                     <tr key={sale.id} className="hover:bg-slate-50/50">
-                      <td className="p-4 font-mono font-bold text-slate-900">{sale.id}</td>
+                      <td className="p-4 font-mono font-bold text-slate-900 animate-fade-in" title={sale.id}>
+                        {sale.id.length > 10 ? `#${sale.id.substring(0, 8).toUpperCase()}` : sale.id}
+                      </td>
                       <td className="p-4 font-normal text-slate-450">{new Date(sale.sale_date).toLocaleDateString()}</td>
                       <td className="p-4 font-medium text-slate-800">{sale.customer_name}</td>
                       <td className="p-4">{sale.customer_category}</td>
@@ -902,7 +904,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                 <p className="text-[10px] text-slate-650">Brand Gateway: {brand}</p>
                 <p className="text-[10px] text-slate-650">Email: info@sparezy.com</p>
                 <div className="text-[10px] text-slate-500 pt-2 text-left space-y-0.5">
-                  <p>Invoice ID : {selectedInvoiceForSlip.id}</p>
+                  <p title={selectedInvoiceForSlip.id}>Invoice ID : {selectedInvoiceForSlip.id.length > 10 ? selectedInvoiceForSlip.id.substring(0, 8).toUpperCase() : selectedInvoiceForSlip.id}</p>
                   <p>Date       : {new Date(selectedInvoiceForSlip.sale_date).toLocaleString()}</p>
                   <p>Customer   : {selectedInvoiceForSlip.customer_name} ({selectedInvoiceForSlip.customer_category})</p>
                 </div>
@@ -1050,7 +1052,9 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
             <div className="bg-slate-50 px-5 py-4 border-b border-slate-200 flex justify-between items-center">
               <div className="space-y-0.5">
                 <span className="text-[9px] uppercase font-bold text-indigo-600">Register Pending Payment</span>
-                <h3 className="font-extrabold text-slate-900 text-sm">Invoice #{paymentRecordingSale.id} Summary</h3>
+                <h3 className="font-extrabold text-slate-900 text-sm" title={paymentRecordingSale.id}>
+                  Invoice #{paymentRecordingSale.id.length > 10 ? paymentRecordingSale.id.substring(0, 8).toUpperCase() : paymentRecordingSale.id} Summary
+                </h3>
               </div>
               <button 
                 onClick={() => setPaymentRecordingSale(null)}
