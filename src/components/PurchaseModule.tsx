@@ -83,7 +83,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
     return manualLines.reduce((acc, l) => acc + (l.quantity * l.mrp), 0);
   }, [manualLines]);
 
-  const handleSaveManualPurchase = (e: React.FormEvent) => {
+  const handleSaveManualPurchase = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!dealerName || !invoiceNo || !invoiceDate) {
       alert("Dealer details and Invoice details are mandatory");
@@ -91,7 +91,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
     }
 
     try {
-      db.createPurchase(
+      await db.createPurchase(
         brand,
         dealerName,
         invoiceNo,
@@ -391,7 +391,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
 
   const is12DiscountMatched = Math.abs(scanDiscount - 12) < 0.01;
 
-  const handleAIScanCompleteSync = () => {
+  const handleAIScanCompleteSync = async () => {
     if (scanRows.length === 0) return;
     if (!scanDealer || !scanInvoiceNo || !scanInvoiceDate) {
       alert("Header fields are required before syncing.");
@@ -399,7 +399,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
     }
 
     try {
-      db.createPurchase(
+      await db.createPurchase(
         brand,
         scanDealer,
         scanInvoiceNo,

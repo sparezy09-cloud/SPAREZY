@@ -796,7 +796,13 @@ export const db = {
   // Active Preference Helpers
   getActiveUser: (): User | null => {
     const active = sessionStorage.getItem(KEY_ACTIVE_USER);
-    if (active) return JSON.parse(active);
+    if (active) {
+      try {
+        return JSON.parse(active);
+      } catch {
+        return null;
+      }
+    }
     return null;
   },
 
@@ -888,7 +894,11 @@ export const db = {
         old_data: oldData ? safeParseJSON(oldData) : null,
         new_data: newData ? safeParseJSON(newData) : null,
         created_at: newLog.created_at
-      }).then();
+      }).then(({ error }) => {
+        if (error) {
+          console.error("❌ Failed to insert transaction log in DB:", error.message);
+        }
+      });
     } else {
       localStorage.setItem(KEY_LOGS, JSON.stringify(cache.transaction_logs));
     }
@@ -1426,7 +1436,7 @@ export const db = {
     let subtotal = 0;
     const itemsToSave: SaleItem[] = [];
     
-    items.forEach((shopItem, idx) => {
+    for (const shopItem of items) {
       const invIdx = inventory.findIndex(inv => inv.part_no === shopItem.part_no);
       if (invIdx === -1) {
         throw new Error(`Part number ${shopItem.part_no} not found in inventory.`);
@@ -1447,12 +1457,15 @@ export const db = {
       invItem.updated_at = new Date().toISOString();
       
       if (isSupabaseConfigured && supabase) {
-        supabase.schema(b).from('inventory').update({
+        const { error: invErr } = await supabase.schema(b).from('inventory').update({
           quantity: invItem.quantity,
           is_active: invItem.is_active,
           archived_at: invItem.archived_at,
           updated_at: invItem.updated_at
-        }).eq('id', invItem.id).then();
+        }).eq('id', invItem.id);
+        if (invErr) {
+          throw new Error(`Failed to update inventory stock in database: ${invErr.message}`);
+        }
       }
       
       const partMrp = shopItem.mrp !== undefined ? shopItem.mrp : invItem.mrp;
@@ -1476,7 +1489,7 @@ export const db = {
       };
       
       itemsToSave.push(saleItem);
-    });
+    }
     
     if (!isSupabaseConfigured) {
       localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
@@ -1795,7 +1808,7 @@ export const db = {
     db.notify();
   },
 
-  createPurchase: (
+  createPurchase: async (
     brand: Brand, 
     dealerName: string, 
     invoiceNo: string, 
@@ -1805,7 +1818,7 @@ export const db = {
     items: { part_no: string; part_name: string; quantity: number; mrp: number; hsn: string; is_new_part?: boolean }[],
     scanSource: ScanSource,
     user: User
-  ): Purchase => {
+  ): Promise<Purchase> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const listPurchases = cache[b].purchases;
     const purchaseItemsList = cache[b].purchase_items;
@@ -1821,7 +1834,7 @@ export const db = {
     const purchaseId = uuid();
     const pItemsToSave: PurchaseItem[] = [];
     
-    items.forEach((pItem, idx) => {
+    for (const pItem of items) {
       const invIdx = inventory.findIndex(i => i.part_no.toLowerCase() === pItem.part_no.toLowerCase());
       const hasMatched = invIdx > -1;
       
@@ -1837,13 +1850,16 @@ export const db = {
         invPart.updated_at = new Date().toISOString();
         
         if (isSupabaseConfigured && supabase) {
-          supabase.schema(b).from('inventory').update({
+          const { error: invErr } = await supabase.schema(b).from('inventory').update({
             quantity: invPart.quantity,
             mrp: invPart.mrp,
             is_active: invPart.is_active,
             archived_at: invPart.archived_at,
             updated_at: invPart.updated_at
-          }).eq('id', invPart.id).then();
+          }).eq('id', invPart.id);
+          if (invErr) {
+            throw new Error(`Failed to update stock quantity for part ${invPart.part_no}: ${invErr.message}`);
+          }
         }
         
         if (pItem.mrp !== oldInv.mrp) {
@@ -1858,7 +1874,10 @@ export const db = {
           };
           mrpHistory.unshift(mrpRec);
           if (isSupabaseConfigured && supabase) {
-            supabase.schema(b).from('mrp_history').insert(mrpRec).then();
+            const { error: mrpErr } = await supabase.schema(b).from('mrp_history').insert(mrpRec);
+            if (mrpErr) {
+               console.warn("❌ Failed to log MRP change in DB:", mrpErr.message);
+            }
           }
         }
       } else {
@@ -1877,7 +1896,10 @@ export const db = {
         };
         inventory.push(newInv);
         if (isSupabaseConfigured && supabase) {
-          supabase.schema(b).from('inventory').insert(newInv).then();
+          const { error: invErr } = await supabase.schema(b).from('inventory').insert(newInv);
+          if (invErr) {
+             throw new Error(`Failed to add new part ${pItem.part_no} to DB: ${invErr.message}`);
+          }
         }
         db.logTransaction(user.id, user.name, 'Create Inventory', 'Inventory', `Auto-added new part ${pItem.part_no} from Purchase ${invoiceNo}`, null, newInv);
       }
@@ -1896,7 +1918,7 @@ export const db = {
       };
       
       pItemsToSave.push(purchaseItemRec);
-    });
+    }
     
     const purchase: Purchase = {
       id: purchaseId,
@@ -1916,9 +1938,16 @@ export const db = {
     purchaseItemsList.push(...pItemsToSave);
     
     if (isSupabaseConfigured && supabase) {
-      supabase.schema(b).from('purchases').insert(purchase).then(() => {
-        supabase.schema(b).from('purchase_items').insert(pItemsToSave).then();
-      });
+      const { error: pErr } = await supabase.schema(b).from('purchases').insert(purchase);
+      if (pErr) {
+        // Rollback purchases cache
+        listPurchases.shift();
+        throw new Error(`Failed to save purchase details: ${pErr.message}`);
+      }
+      const { error: itemsErr } = await supabase.schema(b).from('purchase_items').insert(pItemsToSave);
+      if (itemsErr) {
+        throw new Error(`Purchase main record saved, but line items failed: ${itemsErr.message}`);
+      }
     } else {
       localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
       localStorage.setItem(`sparezy_schema_${b}_purchases`, JSON.stringify(listPurchases));
