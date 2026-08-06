@@ -36,11 +36,6 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   const [purchasesList, setPurchasesList] = useState<Purchase[]>(() => db.getPurchases(brand));
   const [toastMessageLocal, setToastMessageLocal] = useState<string | null>(null);
 
-  // --- EXPORT STATE ---
-  const [showExportModal, setShowExportModal] = useState(false);
-  const [exportScope, setExportScope] = useState<'current' | 'all'>('current');
-  const [exportType, setExportType] = useState<'detailed' | 'summary'>('detailed');
-
   const refreshComponentData = () => {
     setInventoryList(db.getInventory(brand));
     setPurchasesList(db.getPurchases(brand));
@@ -428,136 +423,6 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
     }
   };
 
-  // --- REPORT EXPORT SYSTEM ---
-  const generateAndDownloadExcel = (scope: 'current' | 'all', type: 'detailed' | 'summary') => {
-    const brandsToExport: Brand[] = scope === 'all' ? ['Hyundai', 'Mahindra'] : [brand];
-    
-    let csvContent = "";
-    let fileName = "sparezy_invoices_";
-    
-    if (type === 'summary') {
-      fileName += `summaries_${scope === 'all' ? 'all_brands' : brand.toLowerCase()}_${new Date().toISOString().split('T')[0]}.csv`;
-      
-      const headers = [
-        "Brand Channel",
-        "Invoice Number",
-        "Invoice Date",
-        "Dealer Name",
-        "Source Type",
-        "Line Items Count",
-        "Subtotal (INR)",
-        "Discount (%)",
-        "Discount Amount (INR)",
-        "Final Amount (INR)",
-        "Created By",
-        "Created At"
-      ];
-      csvContent += headers.map(h => `"${h.replace(/"/g, '""')}"`).join(",") + "\n";
-      
-      brandsToExport.forEach(b => {
-        const purchases = db.getPurchases(b);
-        const purchaseItems = db.getPurchaseItems(b);
-        
-        purchases.forEach(p => {
-          const itemsCount = purchaseItems.filter(item => item.purchase_id === p.id).length;
-          const row = [
-            b,
-            p.invoice_no,
-            p.invoice_date,
-            p.dealer_name,
-            p.scan_source,
-            itemsCount,
-            p.subtotal.toFixed(2),
-            p.dealer_discount_percentage,
-            p.discount_amount.toFixed(2),
-            p.total_after_discount.toFixed(2),
-            p.created_by || "System",
-            new Date(p.created_at).toLocaleString()
-          ];
-          csvContent += row.map(val => {
-            const str = String(val === null || val === undefined ? '' : val);
-            return `"${str.replace(/"/g, '""')}"`;
-          }).join(",") + "\n";
-        });
-      });
-      
-    } else {
-      fileName += `detailed_${scope === 'all' ? 'all_brands' : brand.toLowerCase()}_${new Date().toISOString().split('T')[0]}.csv`;
-      
-      const headers = [
-        "Brand Channel",
-        "Invoice Number",
-        "Invoice Date",
-        "Dealer Name",
-        "Part Number",
-        "Spare Part Name",
-        "HSN Code",
-        "Quantity",
-        "MRP (INR)",
-        "Base Row Subtotal (INR)",
-        "Dealer Discount (%)",
-        "Net Row Cost (INR)",
-        "Created By",
-        "Scan Source"
-      ];
-      csvContent += headers.map(h => `"${h.replace(/"/g, '""')}"`).join(",") + "\n";
-      
-      brandsToExport.forEach(b => {
-        const purchases = db.getPurchases(b);
-        const purchaseItems = db.getPurchaseItems(b);
-        
-        purchases.forEach(p => {
-          const associatedItems = purchaseItems.filter(item => item.purchase_id === p.id);
-          
-          associatedItems.forEach(item => {
-            const baseSubtotal = item.quantity * item.mrp;
-            const discountPct = p.dealer_discount_percentage || 0;
-            const netRowCost = baseSubtotal - (baseSubtotal * (discountPct / 100));
-            
-            const row = [
-              b,
-              p.invoice_no,
-              p.invoice_date,
-              p.dealer_name,
-              item.part_no,
-              item.part_name,
-              item.hsn || "87089900",
-              item.quantity,
-              item.mrp.toFixed(2),
-              baseSubtotal.toFixed(2),
-              discountPct,
-              netRowCost.toFixed(2),
-              p.created_by || "System",
-              p.scan_source
-            ];
-            
-            csvContent += row.map(val => {
-              const str = String(val === null || val === undefined ? '' : val);
-              return `"${str.replace(/"/g, '""')}"`;
-            }).join(",") + "\n";
-          });
-        });
-      });
-    }
-    
-    try {
-      const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8;" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.setAttribute("href", url);
-      link.setAttribute("download", fileName);
-      link.style.visibility = "hidden";
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      
-      triggerToast(`Exported ${scope === 'all' ? 'Hyundai & Mahindra' : brand} invoice data successfully!`);
-      setShowExportModal(false);
-    } catch (err) {
-      console.error("Export to CSV error:", err);
-      alert("Failed to export invoice data. Please try again.");
-    }
-  };
 
   // --- HISTORY VIEW MODE ---
   const [viewingPurchase, setViewingPurchase] = useState<Purchase | null>(null);
@@ -1176,19 +1041,8 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
 
           {/* History table list */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden lg:col-span-2">
-            <div className="p-4 bg-slate-50 border-b border-slate-200 font-bold text-xs flex justify-between items-center gap-2">
-              <span>Registered procurement Invoices List</span>
-              <button
-                type="button"
-                onClick={() => {
-                  setExportScope('current');
-                  setShowExportModal(true);
-                }}
-                className="inline-flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold px-3 py-1.5 rounded-xl cursor-pointer transition text-[10px] uppercase tracking-wider"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5" />
-                <span>Download Report (Excel)</span>
-              </button>
+            <div className="p-4 bg-slate-50 border-b border-slate-200 font-bold text-xs">
+              Registered procurement Invoices List
             </div>
 
             <div className="overflow-x-auto text-xs font-semibold text-slate-600">
@@ -1343,117 +1197,6 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
             )}
           </div>
 
-        </div>
-      )}
-
-      {/* Export Report to Excel/CSV Modal */}
-      {showExportModal && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-3xl border border-slate-200 shadow-2xl w-full max-w-md overflow-hidden relative animate-fade-in">
-            {/* Modal Header */}
-            <div className="p-5 border-b border-slate-100 flex items-center justify-between bg-slate-50">
-              <div className="flex items-center gap-2 text-indigo-950 font-extrabold text-xs">
-                <FileSpreadsheet className="w-4.5 h-4.5 text-indigo-650" />
-                <span className="uppercase tracking-wider">Export Procurement Invoices</span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowExportModal(false)}
-                className="p-1 hover:bg-slate-200 rounded-full text-slate-400 transition cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Modal Body */}
-            <div className="p-6 space-y-6 text-xs font-semibold text-slate-705">
-              {/* Report Scope Selector */}
-              <div className="space-y-2">
-                <label className="block text-[11px] font-black uppercase tracking-wider text-slate-400">Report Scope</label>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setExportScope('current')}
-                    className={`p-3.5 border text-left rounded-2xl transition cursor-pointer flex flex-col justify-between h-20 ${
-                      exportScope === 'current'
-                        ? 'border-indigo-600 bg-indigo-50/40 text-indigo-950'
-                        : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-600'
-                    }`}
-                  >
-                    <span className="font-bold text-[11px] block">Current Brand ({brand})</span>
-                    <span className="text-[10px] font-normal text-slate-405 block mt-1">Export only {brand} spares.</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setExportScope('all')}
-                    className={`p-3.5 border text-left rounded-2xl transition cursor-pointer flex flex-col justify-between h-20 ${
-                      exportScope === 'all'
-                        ? 'border-indigo-600 bg-indigo-50/40 text-indigo-950'
-                        : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-600'
-                    }`}
-                  >
-                    <span className="font-bold text-[11px] block">Consolidated</span>
-                    <span className="text-[10px] font-normal text-slate-405 block mt-1">Combine Hyundai &amp; Mahindra.</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Report Type Selector */}
-              <div className="space-y-2">
-                <label className="block text-[11px] font-black uppercase tracking-wider text-slate-400">Export Detail Type</label>
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setExportType('detailed')}
-                    className={`p-3.5 border text-left rounded-2xl transition cursor-pointer flex flex-col justify-between h-24 ${
-                      exportType === 'detailed'
-                        ? 'border-indigo-600 bg-indigo-50/40 text-indigo-950'
-                        : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-600'
-                    }`}
-                  >
-                    <span className="font-bold text-[11px] block">Detailed Part Lines</span>
-                    <span className="text-[10px] font-normal text-slate-405 block mt-1 leading-normal">
-                      Itemized list of part numbers, part names, quantities, HSN codes, and MRP. Perfect for audits.
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setExportType('summary')}
-                    className={`p-3.5 border text-left rounded-2xl transition cursor-pointer flex flex-col justify-between h-24 ${
-                      exportType === 'summary'
-                        ? 'border-indigo-600 bg-indigo-50/40 text-indigo-950'
-                        : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-600'
-                    }`}
-                  >
-                    <span className="font-bold text-[11px] block">Invoice Summaries</span>
-                    <span className="text-[10px] font-normal text-slate-405 block mt-1 leading-normal">
-                      Single header row per invoice showing Dealer, Date, Subtotal, Discount, and Final Net Cost.
-                    </span>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Modal Footer */}
-            <div className="p-5 border-t border-slate-100 bg-slate-50 flex gap-3">
-              <button
-                type="button"
-                onClick={() => setShowExportModal(false)}
-                className="flex-1 border border-slate-200 hover:bg-slate-100 text-slate-700 py-2.5 rounded-xl font-bold cursor-pointer text-center"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => generateAndDownloadExcel(exportScope, exportType)}
-                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl font-bold cursor-pointer text-center"
-              >
-                Download Report
-              </button>
-            </div>
-          </div>
         </div>
       )}
 
