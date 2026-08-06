@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Brand, User, UserRole } from '../types';
 import { db } from '../dbStore';
-import { Shield, ShieldAlert, Plus, CheckCircle, ShieldCheck, Mail, LogIn, Sparkles, X, Database, Activity, RefreshCw } from 'lucide-react';
+import { Shield, ShieldAlert, Plus, CheckCircle, ShieldCheck, Mail, LogIn, Sparkles, X, Database, Activity, RefreshCw, Eye, EyeOff, Key, Pencil } from 'lucide-react';
 
 interface SettingsModuleProps {
   brand: Brand;
@@ -10,6 +10,11 @@ interface SettingsModuleProps {
 
 export default function SettingsModule({ brand, user }: SettingsModuleProps) {
   const [usersList, setUsersList] = useState<User[]>(() => db.getUsers());
+  
+  // Password edit and view states
+  const [editingUserForPassword, setEditingUserForPassword] = useState<User | null>(null);
+  const [newPasswordValue, setNewPasswordValue] = useState('');
+  const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({});
   
   // Create state
   const [isNewUserModalOpen, setIsNewUserModalOpen] = useState(false);
@@ -121,6 +126,35 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
     }
   };
 
+  const handleUpdatePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUserForPassword) return;
+    if (!newPasswordValue.trim()) {
+      alert("Password cannot be blank.");
+      return;
+    }
+    if (newPasswordValue.length < 6) {
+      alert("Password must be at least 6 characters.");
+      return;
+    }
+    try {
+      await db.updateUserPassword(editingUserForPassword.id, newPasswordValue, user);
+      setEditingUserForPassword(null);
+      setNewPasswordValue('');
+      await refreshComponentData();
+      triggerToast(`Successfully updated password for ${editingUserForPassword.name}.`);
+    } catch (err: any) {
+      alert(err.message || "Failed to update password.");
+    }
+  };
+
+  const togglePasswordVisibility = (userId: string) => {
+    setVisiblePasswords(prev => ({
+      ...prev,
+      [userId]: !prev[userId]
+    }));
+  };
+
   return (
     <div className="space-y-6">
 
@@ -185,6 +219,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                   <th className="p-3">Email Address</th>
                   <th className="p-3">System Role</th>
                   <th className="p-3">Login status</th>
+                  {user.role === 'Owner' && <th className="p-3">Sign-In Password</th>}
                   {user.role === 'Owner' && <th className="p-3 text-right">Actions</th>}
                 </tr>
               </thead>
@@ -229,6 +264,35 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                         {usr.status}
                       </span>
                     </td>
+                    
+                    {user.role === 'Owner' && (
+                      <td className="p-3">
+                        <div className="flex items-center gap-1.5 font-mono">
+                          <span className="bg-slate-50 border border-slate-200 px-2 py-1 rounded-lg text-[11px] font-bold text-slate-850">
+                            {visiblePasswords[usr.id] ? (usr.password || '••••••••') : '••••••••'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => togglePasswordVisibility(usr.id)}
+                            className="p-1 hover:bg-slate-100 rounded text-slate-500 cursor-pointer flex items-center justify-center"
+                            title={visiblePasswords[usr.id] ? "Hide Password" : "Show Password"}
+                          >
+                            {visiblePasswords[usr.id] ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingUserForPassword(usr);
+                              setNewPasswordValue(usr.password || '');
+                            }}
+                            className="p-1 hover:bg-indigo-50 rounded text-indigo-600 cursor-pointer flex items-center justify-center"
+                            title="Change Password"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    )}
                     
                     {user.role === 'Owner' && (
                       <td className="p-3 text-right">
@@ -714,6 +778,65 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                   className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl shadow cursor-pointer text-center"
                 >
                   Create login
+                </button>
+              </div>
+
+            </form>
+
+          </div>
+        </div>
+      )}
+
+      {/* Password Edit Modal */}
+      {editingUserForPassword && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm border border-slate-200 overflow-hidden text-xs">
+            
+            <div className="bg-slate-50 px-5 py-3 border-b border-slate-200 flex justify-between items-center">
+              <h3 className="font-bold text-slate-800 flex items-center gap-1.5">
+                <Key className="w-4 h-4 text-indigo-600" />
+                <span>Change Operator Password</span>
+              </h3>
+              <button 
+                onClick={() => setEditingUserForPassword(null)}
+                className="p-1 hover:bg-slate-200 rounded text-slate-500 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdatePasswordSubmit} className="p-5 space-y-4 font-semibold text-slate-700">
+              <div>
+                <p className="text-slate-500 mb-1">Operator Name:</p>
+                <p className="text-slate-900 font-bold mb-3">{editingUserForPassword.name} ({editingUserForPassword.role})</p>
+                <p className="text-[10px] text-slate-400 font-normal">System ID: {editingUserForPassword.id}</p>
+              </div>
+
+              <div>
+                <label className="block text-slate-500 mb-1">Enter New Password</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="At least 6 characters"
+                  className="w-full p-2.5 border border-slate-200 rounded-xl font-mono text-xs focus:ring-1 focus:ring-indigo-600 focus:outline-none"
+                  value={newPasswordValue}
+                  onChange={(e) => setNewPasswordValue(e.target.value)}
+                />
+              </div>
+
+              <div className="flex gap-2 justify-end pt-4 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setEditingUserForPassword(null)}
+                  className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-xl cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl shadow cursor-pointer text-center font-bold"
+                >
+                  Update Password
                 </button>
               </div>
 
