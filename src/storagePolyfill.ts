@@ -28,53 +28,66 @@ function createMemoryStorage(): Storage {
   } as Storage;
 }
 
-// Check and polyfill localStorage
+// 1. Establish fully safe storage references
+export let safeLocalStorage: Storage;
+export let safeSessionStorage: Storage;
+
 try {
   if (typeof window !== 'undefined') {
     const testKey = '__storage_test__';
     window.localStorage.setItem(testKey, testKey);
     window.localStorage.removeItem(testKey);
+    safeLocalStorage = window.localStorage;
+  } else {
+    safeLocalStorage = createMemoryStorage();
   }
 } catch (e) {
   console.warn("⚠️ LocalStorage is blocked or unsupported in this context. Using in-memory fallback.", e);
-  const fallback = createMemoryStorage();
-  try {
-    Object.defineProperty(window, 'localStorage', {
-      value: fallback,
-      writable: true,
-      configurable: true
-    });
-  } catch (err) {
-    try {
-      (window as any).localStorage = fallback;
-    } catch (_) {}
-  }
+  safeLocalStorage = createMemoryStorage();
 }
 
-// Check and polyfill sessionStorage
 try {
   if (typeof window !== 'undefined') {
     const testKey = '__storage_test__';
     window.sessionStorage.setItem(testKey, testKey);
     window.sessionStorage.removeItem(testKey);
+    safeSessionStorage = window.sessionStorage;
+  } else {
+    safeSessionStorage = createMemoryStorage();
   }
 } catch (e) {
   console.warn("⚠️ SessionStorage is blocked or unsupported in this context. Using in-memory fallback.", e);
-  const fallback = createMemoryStorage();
+  safeSessionStorage = createMemoryStorage();
+}
+
+// 2. Also try to polyfill the window objects globally for maximum compatibility
+if (typeof window !== 'undefined') {
   try {
-    Object.defineProperty(window, 'sessionStorage', {
-      value: fallback,
+    Object.defineProperty(window, 'localStorage', {
+      value: safeLocalStorage,
       writable: true,
       configurable: true
     });
   } catch (err) {
     try {
-      (window as any).sessionStorage = fallback;
+      (window as any).localStorage = safeLocalStorage;
+    } catch (_) {}
+  }
+
+  try {
+    Object.defineProperty(window, 'sessionStorage', {
+      value: safeSessionStorage,
+      writable: true,
+      configurable: true
+    });
+  } catch (err) {
+    try {
+      (window as any).sessionStorage = safeSessionStorage;
     } catch (_) {}
   }
 }
 
-// Check and polyfill BroadcastChannel for older browsers or restricted sandboxes
+// 3. Check and polyfill BroadcastChannel for older browsers or restricted sandboxes
 if (typeof window !== 'undefined' && !('BroadcastChannel' in window)) {
   try {
     (window as any).BroadcastChannel = class BroadcastChannelMock {

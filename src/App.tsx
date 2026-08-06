@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { User, Brand } from './types';
 import { db } from './dbStore';
 import { supabase } from './lib/supabaseClient';
+import { safeLocalStorage, safeSessionStorage } from './storagePolyfill';
 
 // Modules components
 import BrandSelector from './components/BrandSelector';
@@ -86,7 +87,7 @@ export default function App() {
   useEffect(() => {
     const checkSessionAndInitialize = async () => {
       // If there is no active tab-bound session, clear the previous login to enforce logout-on-close
-      const isNewSession = !sessionStorage.getItem('sparezy_session_active');
+      const isNewSession = !safeSessionStorage.getItem('sparezy_session_active');
       let otherTabExists = false;
 
       if (isNewSession) {
@@ -125,7 +126,7 @@ export default function App() {
             }
           }
         }
-        sessionStorage.setItem('sparezy_session_active', 'true');
+        safeSessionStorage.setItem('sparezy_session_active', 'true');
       }
       
       // Bootstrap db keys and active brand on load
@@ -249,12 +250,12 @@ export default function App() {
     const KEY_LAST_ACTIVITY = 'sparezy_last_activity';
 
     // Seed the initial activity key if not set
-    if (!localStorage.getItem(KEY_LAST_ACTIVITY)) {
-      localStorage.setItem(KEY_LAST_ACTIVITY, Date.now().toString());
+    if (!safeLocalStorage.getItem(KEY_LAST_ACTIVITY)) {
+      safeLocalStorage.setItem(KEY_LAST_ACTIVITY, Date.now().toString());
     }
 
     const resetTimer = () => {
-      localStorage.setItem(KEY_LAST_ACTIVITY, Date.now().toString());
+      safeLocalStorage.setItem(KEY_LAST_ACTIVITY, Date.now().toString());
     };
 
     // Interaction events to monitor for main user activity
@@ -268,7 +269,7 @@ export default function App() {
 
     // Check every 5 seconds if the last logged activity across ALL system tabs is > 20 minutes
     const checkInterval = setInterval(() => {
-      const lastActivity = Number(localStorage.getItem(KEY_LAST_ACTIVITY) || Date.now());
+      const lastActivity = Number(safeLocalStorage.getItem(KEY_LAST_ACTIVITY) || Date.now());
       const idleTime = Date.now() - lastActivity;
       if (idleTime > 20 * 60 * 1000) {
         console.log("Inactivity logout triggered after 20 minutes of idle time.");
@@ -279,7 +280,7 @@ export default function App() {
     // Also check immediately when the user focuses/moves back to this window (since background tabs get suspended)
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        const lastActivity = Number(localStorage.getItem(KEY_LAST_ACTIVITY) || Date.now());
+        const lastActivity = Number(safeLocalStorage.getItem(KEY_LAST_ACTIVITY) || Date.now());
         const idleTime = Date.now() - lastActivity;
         if (idleTime > 20 * 60 * 1000) {
           console.log("Inactivity logout triggered on tab focus.");

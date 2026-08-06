@@ -65,7 +65,7 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
         // Query users catalog in public schema for role attributes
         const { data: profile, error: profileErr } = await supabase
           .from('users')
-          .select('*')
+          .select('id, name, email, role, status, created_at')
           .eq('email', email.trim().toLowerCase())
           .maybeSingle();
 

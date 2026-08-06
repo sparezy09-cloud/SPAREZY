@@ -1,9 +1,13 @@
 import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
+import { safeLocalStorage, safeSessionStorage } from './storagePolyfill';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
   ScanSource
 } from './types';
+
+const localStorage = safeLocalStorage;
+const sessionStorage = safeSessionStorage;
 
 // Storage keys for active preferences and local storage fallback
 const KEY_USERS = 'sparezy_public_users_fb';
@@ -438,7 +442,7 @@ export const db = {
           if (!profile && userEmail) {
             const { data: directProfile } = await supabase
               .from('users')
-              .select('*')
+              .select('id, name, email, role, status, created_at')
               .eq('email', userEmail.toLowerCase())
               .maybeSingle();
             if (directProfile) {
