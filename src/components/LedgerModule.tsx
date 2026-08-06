@@ -29,6 +29,11 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
   const [returnsList, setReturnsList] = useState<ReturnRecord[]>(() => db.getReturns(brand));
   const [purchasesList, setPurchasesList] = useState<Purchase[]>(() => db.getPurchases(brand));
 
+  // Pagination states
+  const [customerPage, setCustomerPage] = useState(1);
+  const [dealerPage, setDealerPage] = useState(1);
+  const ledgersPerPage = 15;
+
   const refreshComponentData = () => {
     setCustomersList(db.getCustomers());
     setSalesList(db.getSales(brand));
@@ -124,6 +129,24 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
 
     return Object.values(mapOfDealers);
   }, [purchasesList, startDate, endDate]);
+
+  const totalCustomerPages = Math.ceil(customerLedgers.length / ledgersPerPage) || 1;
+  const paginatedCustomerLedgers = useMemo(() => {
+    const startIndex = (customerPage - 1) * ledgersPerPage;
+    return customerLedgers.slice(startIndex, startIndex + ledgersPerPage);
+  }, [customerLedgers, customerPage]);
+
+  const totalDealerPages = Math.ceil(dealerLedgers.length / ledgersPerPage) || 1;
+  const paginatedDealerLedgers = useMemo(() => {
+    const startIndex = (dealerPage - 1) * ledgersPerPage;
+    return dealerLedgers.slice(startIndex, startIndex + ledgersPerPage);
+  }, [dealerLedgers, dealerPage]);
+
+  // Reset pagination on brand/tab/filters change
+  useEffect(() => {
+    setCustomerPage(1);
+    setDealerPage(1);
+  }, [brand, ledgerType, startDate, endDate]);
 
 
   // --- EXPORTERS & PRINTERS SIMULATION ---
@@ -367,8 +390,8 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
                     <th className="p-3 text-right">Outstanding balance</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 text-slate-705">
-                  {customerLedgers.map((row) => (
+                 <tbody className="divide-y divide-slate-100 text-slate-705">
+                  {paginatedCustomerLedgers.map((row) => (
                     <tr key={row.id} className="hover:bg-slate-50/50">
                       <td className="p-3 font-bold text-slate-900">{row.name}</td>
                       <td className="p-3">{row.category}</td>
@@ -385,7 +408,7 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
                       </td>
                     </tr>
                   ))}
-                  {customerLedgers.length === 0 && (
+                  {paginatedCustomerLedgers.length === 0 && (
                     <tr>
                       <td colSpan={7} className="p-12 text-center text-slate-400 font-normal">
                         No customer logs stored in the portal database.
@@ -395,6 +418,31 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Controls */}
+            {totalCustomerPages > 1 && (
+              <div className="bg-slate-50 border-t border-slate-100 px-4 py-3 flex items-center justify-between">
+                <span className="text-slate-500 text-[11px] font-semibold">
+                  Page <strong className="text-slate-800">{customerPage}</strong> of <strong className="text-slate-800">{totalCustomerPages}</strong> ({customerLedgers.length} total customers)
+                </span>
+                <div className="inline-flex gap-1.5 text-[11px] font-bold">
+                  <button
+                    onClick={() => setCustomerPage(prev => Math.max(1, prev - 1))}
+                    disabled={customerPage === 1}
+                    className="px-2.5 py-1 border border-slate-200 rounded-lg bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none cursor-pointer shadow-xs transition"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    onClick={() => setCustomerPage(prev => Math.min(totalCustomerPages, prev + 1))}
+                    disabled={customerPage === totalCustomerPages}
+                    className="px-2.5 py-1 border border-slate-200 rounded-lg bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none cursor-pointer shadow-xs transition"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
 
           </div>
 
@@ -434,7 +482,7 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-slate-705">
-                  {dealerLedgers.map((row) => (
+                  {paginatedDealerLedgers.map((row) => (
                     <tr key={row.dealer_name} className="hover:bg-slate-50/50">
                       <td className="p-3 font-bold text-slate-900">{row.dealer_name}</td>
                       <td className="p-3 text-center font-mono">{row.invoiceCount} invoices</td>
@@ -469,7 +517,7 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
                       </td>
                     </tr>
                   ))}
-                  {dealerLedgers.length === 0 && (
+                  {paginatedDealerLedgers.length === 0 && (
                     <tr>
                       <td colSpan={5} className="p-12 text-center text-slate-400 font-normal">
                         No purchases/dealer logs found under active query states.
@@ -479,6 +527,31 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Controls */}
+            {totalDealerPages > 1 && (
+              <div className="bg-slate-50 border-t border-slate-100 px-4 py-3 flex items-center justify-between">
+                <span className="text-slate-500 text-[11px] font-semibold">
+                  Page <strong className="text-slate-800">{dealerPage}</strong> of <strong className="text-slate-800">{totalDealerPages}</strong> ({dealerLedgers.length} total dealers)
+                </span>
+                <div className="inline-flex gap-1.5 text-[11px] font-bold">
+                  <button
+                    onClick={() => setDealerPage(prev => Math.max(1, prev - 1))}
+                    disabled={dealerPage === 1}
+                    className="px-2.5 py-1 border border-slate-200 rounded-lg bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none cursor-pointer shadow-xs transition"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    onClick={() => setDealerPage(prev => Math.min(totalDealerPages, prev + 1))}
+                    disabled={dealerPage === totalDealerPages}
+                    className="px-2.5 py-1 border border-slate-200 rounded-lg bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none cursor-pointer shadow-xs transition"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Side invoice log details */}

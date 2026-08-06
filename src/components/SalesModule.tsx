@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Brand, User, CustomerCategory, PaymentStatus, InventoryItem, Customer, Sale, SaleItem } from '../types';
 import { db } from '../dbStore';
 import { 
@@ -32,17 +32,42 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   
   // Selected Parts for Checkout
   const [checkoutParts, setCheckoutParts] = useState<SelectedCheckoutPart[]>([]);
+  const [partSearchInput, setPartSearchInput] = useState('');
   const [partSearch, setPartSearch] = useState('');
   const [globalDiscount, setGlobalDiscount] = useState<number>(0);
   const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('Paid');
   const [customPaidAmount, setCustomPaidAmount] = useState<number>(0);
 
   // History states
+  const [historySearchInput, setHistorySearchInput] = useState('');
   const [historySearch, setHistorySearch] = useState('');
   const [historyCategory, setHistoryCategory] = useState<string>('All');
   const [historyPayment, setHistoryPayment] = useState<string>('All');
   const [selectedInvoiceForSlip, setSelectedInvoiceForSlip] = useState<Sale | null>(null);
   const [targetWhatsAppPhone, setTargetWhatsAppPhone] = useState('');
+
+  // Pagination state for Sales History Table
+  const [salesPage, setSalesPage] = useState(1);
+  const salesPerPage = 15;
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setPartSearch(partSearchInput);
+    }, 300);
+    return () => clearTimeout(handler);
+  }, [partSearchInput]);
+
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setHistorySearch(historySearchInput);
+    }, 300);
+    return () => clearTimeout(handler);
+  }, [historySearchInput]);
+
+  // Reset pagination on filter or brand change
+  useEffect(() => {
+    setSalesPage(1);
+  }, [historySearch, historyCategory, historyPayment, brand]);
 
   // Pending payment recording states
   const [paymentRecordingSale, setPaymentRecordingSale] = useState<Sale | null>(null);
@@ -188,6 +213,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     // If already in checkout
     if (checkoutParts.some(p => p.part_no === inv.part_no)) {
       triggerToast(`${inv.part_no} already added to card. Update quantity below.`);
+      setPartSearchInput('');
       setPartSearch('');
       return;
     }
@@ -207,6 +233,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     };
 
     setCheckoutParts([...checkoutParts, newItem]);
+    setPartSearchInput('');
     setPartSearch('');
   };
 
@@ -339,6 +366,13 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       return matchesSearch && matchesCategory && matchesPayment;
     });
   }, [salesList, historySearch, historyCategory, historyPayment]);
+
+  const totalSalesPages = Math.ceil(filteredSalesHistory.length / salesPerPage) || 1;
+
+  const paginatedSalesHistory = useMemo(() => {
+    const startIndex = (salesPage - 1) * salesPerPage;
+    return filteredSalesHistory.slice(startIndex, startIndex + salesPerPage);
+  }, [filteredSalesHistory, salesPage, salesPerPage]);
 
   const handlePrintSlipAction = () => {
     window.print();
@@ -547,8 +581,8 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                     type="text"
                     className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-xl font-medium focus:outline-none focus:ring-1 focus:ring-indigo-600/30"
                     placeholder="Search e.g. brake pads, Air Filters..."
-                    value={partSearch}
-                    onChange={(e) => setPartSearch(e.target.value)}
+                    value={partSearchInput}
+                    onChange={(e) => setPartSearchInput(e.target.value)}
                   />
                 </div>
 
@@ -783,8 +817,8 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                 type="text"
                 className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-xl text-xs font-medium focus:ring-1 focus:ring-indigo-600/20"
                 placeholder="Search history by Customer Name or Sale ID..."
-                value={historySearch}
-                onChange={(e) => setHistorySearch(e.target.value)}
+                value={historySearchInput}
+                onChange={(e) => setHistorySearchInput(e.target.value)}
               />
             </div>
 
@@ -841,7 +875,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-slate-700">
-                  {filteredSalesHistory.map((sale) => (
+                  {paginatedSalesHistory.map((sale) => (
                     <tr key={sale.id} className="hover:bg-slate-50/50">
                       <td className="p-4 font-mono font-bold text-slate-900 animate-fade-in" title={sale.id}>
                         {sale.id.length > 10 ? `#${sale.id.substring(0, 8).toUpperCase()}` : sale.id}
@@ -901,7 +935,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                       </td>
                     </tr>
                   ))}
-                  {filteredSalesHistory.length === 0 && (
+                  {paginatedSalesHistory.length === 0 && (
                     <tr>
                       <td colSpan={9} className="p-12 text-center text-slate-400 font-normal">
                         No invoices returned for active query filters.
@@ -911,6 +945,31 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Controls */}
+            {totalSalesPages > 1 && (
+              <div className="bg-slate-50 border-t border-slate-100 px-4 py-3 flex items-center justify-between">
+                <span className="text-slate-500 text-[11px] font-semibold">
+                  Page <strong className="text-slate-800">{salesPage}</strong> of <strong className="text-slate-800">{totalSalesPages}</strong> ({filteredSalesHistory.length} total sales)
+                </span>
+                <div className="inline-flex gap-1.5 text-[11px] font-bold">
+                  <button
+                    onClick={() => setSalesPage(prev => Math.max(1, prev - 1))}
+                    disabled={salesPage === 1}
+                    className="px-2.5 py-1 border border-slate-200 rounded-lg bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none cursor-pointer shadow-xs transition"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    onClick={() => setSalesPage(prev => Math.min(totalSalesPages, prev + 1))}
+                    disabled={salesPage === totalSalesPages}
+                    className="px-2.5 py-1 border border-slate-200 rounded-lg bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none cursor-pointer shadow-xs transition"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
         </div>

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Brand, User, ScanSource, Purchase, PurchaseItem, InventoryItem } from '../types';
 import { db } from '../dbStore';
 import { 
@@ -426,6 +426,19 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
 
   // --- HISTORY VIEW MODE ---
   const [viewingPurchase, setViewingPurchase] = useState<Purchase | null>(null);
+  const [historyPage, setHistoryPage] = useState(1);
+  const historyPerPage = 15;
+
+  const totalHistoryPages = Math.ceil(purchasesList.length / historyPerPage) || 1;
+
+  const paginatedPurchasesList = useMemo(() => {
+    const startIndex = (historyPage - 1) * historyPerPage;
+    return purchasesList.slice(startIndex, startIndex + historyPerPage);
+  }, [purchasesList, historyPage, historyPerPage]);
+
+  useEffect(() => {
+    setHistoryPage(1);
+  }, [brand]);
 
   const purchaseItemsAssociated = useMemo(() => {
     if (!viewingPurchase) return [];
@@ -1045,7 +1058,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-slate-705">
-                  {purchasesList.map((p) => (
+                  {paginatedPurchasesList.map((p) => (
                     <tr key={p.id} className="hover:bg-slate-50/50">
                       <td className="p-3 font-mono font-bold text-slate-900">{p.invoice_no}</td>
                       <td className="p-3 font-semibold text-slate-800">{p.dealer_name}</td>
@@ -1072,7 +1085,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                       </td>
                     </tr>
                   ))}
-                  {purchasesList.length === 0 && (
+                  {paginatedPurchasesList.length === 0 && (
                     <tr>
                       <td colSpan={6} className="p-8 text-center text-slate-400 font-normal">
                         No purchases recorded in {brand} schema yet.
@@ -1082,6 +1095,31 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                 </tbody>
               </table>
             </div>
+
+            {/* Pagination Controls */}
+            {totalHistoryPages > 1 && (
+              <div className="bg-slate-50 border-t border-slate-100 px-4 py-3 flex items-center justify-between">
+                <span className="text-slate-500 text-[11px] font-semibold">
+                  Page <strong className="text-slate-800">{historyPage}</strong> of <strong className="text-slate-800">{totalHistoryPages}</strong> ({purchasesList.length} total purchases)
+                </span>
+                <div className="inline-flex gap-1.5 text-[11px] font-bold">
+                  <button
+                    onClick={() => setHistoryPage(prev => Math.max(1, prev - 1))}
+                    disabled={historyPage === 1}
+                    className="px-2.5 py-1 border border-slate-200 rounded-lg bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none cursor-pointer shadow-xs transition"
+                  >
+                    Previous
+                  </button>
+                  <button
+                    onClick={() => setHistoryPage(prev => Math.min(totalHistoryPages, prev + 1))}
+                    disabled={historyPage === totalHistoryPages}
+                    className="px-2.5 py-1 border border-slate-200 rounded-lg bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-50 disabled:pointer-events-none cursor-pointer shadow-xs transition"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Dynamic Side Viewer */}

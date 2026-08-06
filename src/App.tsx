@@ -185,12 +185,13 @@ export default function App() {
     if (!activeUser || !activeBrand) return;
 
     let isSyncingInBackground = false;
+    let lastFocusSyncTime = 0;
 
-    const silentSync = async () => {
+    const silentSync = async (force: boolean = false) => {
       if (isSyncingInBackground) return;
       isSyncingInBackground = true;
       try {
-        await db.refreshAllData(activeBrand);
+        await db.refreshAllData(activeBrand, force);
       } catch (err) {
         console.warn("[Background Sync] Silent database refresh notice:", err);
       } finally {
@@ -198,17 +199,18 @@ export default function App() {
       }
     };
 
-    // 1. Periodic silent background sync every 8 seconds
+    // 1. Periodic silent background sync every 60 seconds (optimized from 8 seconds)
     const intervalId = setInterval(() => {
       // Only sync if tab is currently visible and device is online
       if (document.visibilityState === 'visible' && navigator.onLine) {
         silentSync();
       }
-    }, 8000);
+    }, 60000);
 
-    // 2. Tab Visibility Focus Sync: Sync immediately on tab focus or visibility change
+    // 2. Tab Visibility Focus Sync: Sync immediately on tab focus with a 30-second throttle
     const handleVisibilityOrFocus = () => {
-      if (document.visibilityState === 'visible') {
+      if (document.visibilityState === 'visible' && Date.now() - lastFocusSyncTime > 30000) {
+        lastFocusSyncTime = Date.now();
         silentSync();
       }
     };
@@ -223,7 +225,7 @@ export default function App() {
       syncChannel.onmessage = (event) => {
         if (event.data === 'sync_trigger') {
           console.log("⚡ [Data Sync Channel] Mutation signal received from other tab. Syncing silently...");
-          silentSync();
+          silentSync(true); // Force sync if triggered by another tab's mutation
         }
       };
     } catch (e) {

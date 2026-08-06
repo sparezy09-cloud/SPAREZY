@@ -83,6 +83,13 @@ let isRealtimeSubscribed = false;
 let isSilentUpdating = false;
 const subscribedSchemas = new Set<string>();
 const loadedBrands = new Set<'hyundai' | 'mahindra'>();
+let activeBrandChannel: any = null;
+let activeBrandName: 'hyundai' | 'mahindra' | null = null;
+
+// Caching meta-states to prevent excessive network bandwidth consumption
+let lastPublicFetchTime = 0;
+const lastBrandFetchTime: Record<string, number> = { hyundai: 0, mahindra: 0 };
+const CACHE_STALE_MS = 60 * 1000; // 1 minute in-memory stale cache duration
 
 // Global connection state
 let connectionStatus: 'checking' | 'connected' | 'failed' = 'checking';
@@ -304,37 +311,49 @@ export const db = {
     return b === 'hyundai' ? !!diagnosticStats.hyundaiInventoryOk : !!diagnosticStats.mahindraInventoryOk;
   },
 
-  refreshAllData: async (brand: Brand | null): Promise<void> => {
+  refreshAllData: async (brand: Brand | null, force: boolean = false): Promise<void> => {
     isSilentUpdating = true;
     try {
       if (!isSupabaseConfigured || !supabase) {
         db.notify();
         return;
       }
-      try {
-        console.log("[Refresh Engine] Purging stale metadata & reloading public tables...");
-        const [usersRes, customersRes, logsRes] = await Promise.all([
-          supabase.from('users').select('*'),
-          supabase.from('customers').select('*'),
-          supabase.from('transaction_logs').select('*').order('created_at', { ascending: false }),
-        ]);
-        if (usersRes.data) {
-          cache.users = usersRes.data.map(scrubRow) as User[];
+      
+      const now = Date.now();
+      const shouldRefreshPublic = force || (now - lastPublicFetchTime >= CACHE_STALE_MS);
+
+      if (shouldRefreshPublic) {
+        try {
+          console.log("[Refresh Engine] Purging stale metadata & reloading public tables...");
+          const [usersRes, customersRes, logsRes] = await Promise.all([
+            supabase.from('users').select('id, name, email, role, status, created_at'),
+            supabase.from('customers').select('id, customer_name, customer_category, phone, created_at'),
+            supabase.from('transaction_logs')
+              .select('id, user_id, user_name, action_type, module_name, description, created_at, old_data, new_data')
+              .order('created_at', { ascending: false })
+              .limit(100),
+          ]);
+          if (usersRes.data) {
+            cache.users = usersRes.data.map(scrubRow) as User[];
+          }
+          if (customersRes.data) {
+            cache.customers = customersRes.data.map(scrubRow) as Customer[];
+          }
+          if (logsRes.data) {
+            cache.transaction_logs = logsRes.data.map(scrubRow) as TransactionLog[];
+          }
+          lastPublicFetchTime = now;
+        } catch (err) {
+          console.error("[Refresh Engine] Error refreshing public tables:", err);
         }
-        if (customersRes.data) {
-          cache.customers = customersRes.data.map(scrubRow) as Customer[];
-        }
-        if (logsRes.data) {
-          cache.transaction_logs = logsRes.data.map(scrubRow) as TransactionLog[];
-        }
-      } catch (err) {
-        console.error("[Refresh Engine] Error refreshing public tables:", err);
+      } else {
+        console.log("[Refresh Engine] Using cached public tables (active within 1m)");
       }
 
       if (brand) {
         try {
           console.log(`[Refresh Engine] Re-fetching active brand partitions for: ${brand}`);
-          await db.loadBrandData(brand);
+          await db.loadBrandData(brand, force);
         } catch (err) {
           console.error(`[Refresh Engine] Error refreshing brand data for ${brand}:`, err);
         }
@@ -375,9 +394,9 @@ export const db = {
           hInvRes,
           mInvRes
         ] = await Promise.all([
-          supabase.from('users').select('*'),
-          supabase.from('customers').select('*'),
-          supabase.from('transaction_logs').select('*').order('created_at', { ascending: false }),
+          supabase.from('users').select('id, name, email, role, status, created_at'),
+          supabase.from('customers').select('id, customer_name, customer_category, phone, created_at'),
+          supabase.from('transaction_logs').select('id, user_id, user_name, action_type, module_name, description, created_at, old_data, new_data').order('created_at', { ascending: false }).limit(100),
           supabase.auth.getSession(),
           supabase.rpc('current_schema'),
           supabase.schema('hyundai').from('inventory').select('id').limit(1),
@@ -491,6 +510,7 @@ export const db = {
         console.log("Supabase public schema initialization success.");
         connectionStatus = 'connected';
         connectionError = null;
+        lastPublicFetchTime = Date.now();
 
         // Subscribe strictly to public schema channel initially
         try {
@@ -542,7 +562,7 @@ export const db = {
   },
 
   // Lazy-load a selective brand dynamic data schema partition
-  loadBrandData: async (brand: Brand) => {
+  loadBrandData: async (brand: Brand, force: boolean = false) => {
     isSilentUpdating = true;
     try {
       const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
@@ -552,8 +572,61 @@ export const db = {
       console.log(`[User Active Diagnostic] User email requested access: ${activeUser?.email || "No session email"}`);
       diagnosticStats.activeUserEmail = activeUser?.email || null;
 
+      const now = Date.now();
+      const shouldFetchBrand = force || (now - lastBrandFetchTime[b] >= CACHE_STALE_MS);
+
+      if (!shouldFetchBrand) {
+        console.log(`[Cache Engine] Using cached brand data for ${brand} (active within 1m)`);
+        
+        // Ensure realtime subscription is active for the current brand even if cached
+        if (isSupabaseConfigured && supabase) {
+          // Unsubscribe from other brand's channel if it exists
+          if (activeBrandName && activeBrandName !== b && activeBrandChannel) {
+            console.log(`[Realtime Cleanup] Unsubscribing from ${activeBrandName}-realtime channel...`);
+            supabase.removeChannel(activeBrandChannel);
+            subscribedSchemas.delete(activeBrandName);
+            activeBrandChannel = null;
+          }
+          try {
+            if (!subscribedSchemas.has(b)) {
+              subscribedSchemas.add(b);
+              activeBrandName = b;
+              const brandChannel = supabase.channel(`${b}-realtime`);
+              activeBrandChannel = brandChannel;
+              brandChannel
+                .on('postgres_changes', { event: '*', schema: b }, (payload) => {
+                  handleRealtimePayload(b, payload);
+                })
+                .subscribe((status) => {
+                  console.log(`[Supabase Realtime Status] Schema ${b} channel update: ${status}`);
+                  if (status === 'SUBSCRIBED') {
+                    diagnosticStats.realtimeStatus = 'Connected';
+                  } else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+                    if (diagnosticStats.realtimeStatus !== 'Connected') {
+                      diagnosticStats.realtimeStatus = 'Failed';
+                    }
+                  }
+                  db.notify();
+                });
+            }
+          } catch (subErr) {
+            console.warn(`[Realtime Optional Setup] Failed to subscribe to brand ${b} schema channel:`, subErr);
+          }
+        }
+        db.notify();
+        return;
+      }
+
       if (isSupabaseConfigured && supabase) {
         try {
+          // Unsubscribe from other brand's channel if it exists
+          if (activeBrandName && activeBrandName !== b && activeBrandChannel) {
+            console.log(`[Realtime Cleanup] Unsubscribing from ${activeBrandName}-realtime channel...`);
+            supabase.removeChannel(activeBrandChannel);
+            subscribedSchemas.delete(activeBrandName);
+            activeBrandChannel = null;
+          }
+
           // 1. INVENTORY ACCESS CHECK - OPTIMIZED PARALLEL RANGE FETCH TO BYPASS POSTGREST 1000 ROW LIMIT
           console.log(`[Query Diagnostic] Running inventory select for schema: ${b}`);
           
@@ -564,7 +637,7 @@ export const db = {
             const { count, error: countErr } = await supabase
               .schema(b)
               .from('inventory')
-              .select('*', { count: 'exact', head: true });
+              .select('id', { count: 'exact', head: true });
               
             if (countErr) {
               errInv = countErr;
@@ -583,7 +656,9 @@ export const db = {
                   const from = i * pageSize;
                   const to = (i + 1) * pageSize - 1;
                   rangePromises.push(
-                    supabase.schema(b).from('inventory').select('*').range(from, to)
+                    supabase.schema(b).from('inventory')
+                      .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at')
+                      .range(from, to)
                   );
                 }
                 
@@ -635,7 +710,9 @@ export const db = {
 
           // 2. SALES ACCESS CHECK
           console.log(`[Query Diagnostic] Running sales select for schema: ${b}`);
-          const { data: bSales, error: errSales } = await supabase.schema(b).from('sales').select('*').order('created_at', { ascending: false });
+          const { data: bSales, error: errSales } = await supabase.schema(b).from('sales')
+            .select('id, customer_id, customer_name, customer_category, sale_date, subtotal, discount_percentage, discount_amount, total_amount, payment_status, paid_amount, pending_amount, created_by, created_at')
+            .order('created_at', { ascending: false });
           if (errSales) {
             const category = getErrorCategory(errSales.code, errSales.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: sales, Error: ${errSales.message}`, errSales);
@@ -651,7 +728,8 @@ export const db = {
 
           // 3. SALE ITEMS ACCESS CHECK
           console.log(`[Query Diagnostic] Running sale_items select for schema: ${b}`);
-          const { data: bSaleItems, error: errSalesItems } = await supabase.schema(b).from('sale_items').select('*');
+          const { data: bSaleItems, error: errSalesItems } = await supabase.schema(b).from('sale_items')
+            .select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, final_amount, returned_quantity, created_at');
           if (errSalesItems) {
             const category = getErrorCategory(errSalesItems.code, errSalesItems.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: sale_items, Error: ${errSalesItems.message}`, errSalesItems);
@@ -665,7 +743,9 @@ export const db = {
 
           // 4. RETURNS ACCESS CHECK
           console.log(`[Query Diagnostic] Running returns select for schema: ${b}`);
-          const { data: bReturns, error: errReturns } = await supabase.schema(b).from('returns').select('*').order('return_date', { ascending: false });
+          const { data: bReturns, error: errReturns } = await supabase.schema(b).from('returns')
+            .select('id, sale_id, sale_item_id, customer_id, part_no, part_name, returned_quantity, refund_amount, return_date, created_by')
+            .order('return_date', { ascending: false });
           if (errReturns) {
             const category = getErrorCategory(errReturns.code, errReturns.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: returns, Error: ${errReturns.message}`, errReturns);
@@ -693,7 +773,9 @@ export const db = {
 
           // 5. PURCHASES ACCESS CHECK
           console.log(`[Query Diagnostic] Running purchases select for schema: ${b}`);
-          const { data: bPurchases, error: errPurchases } = await supabase.schema(b).from('purchases').select('*').order('created_at', { ascending: false });
+          const { data: bPurchases, error: errPurchases } = await supabase.schema(b).from('purchases')
+            .select('id, dealer_name, invoice_no, invoice_date, subtotal, dealer_discount_percentage, discount_amount, total_after_discount, scan_source, created_by, created_at')
+            .order('created_at', { ascending: false });
           if (errPurchases) {
             const category = getErrorCategory(errPurchases.code, errPurchases.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: purchases, Error: ${errPurchases.message}`, errPurchases);
@@ -709,7 +791,8 @@ export const db = {
 
           // 6. PURCHASE ITEMS ACCESS CHECK
           console.log(`[Query Diagnostic] Running purchase_items select for schema: ${b}`);
-          const { data: bPItems, error: errPItems } = await supabase.schema(b).from('purchase_items').select('*');
+          const { data: bPItems, error: errPItems } = await supabase.schema(b).from('purchase_items')
+            .select('id, purchase_id, part_no, part_name, hsn, quantity, mrp, is_new_part, matched_inventory, created_at');
           if (errPItems) {
             const category = getErrorCategory(errPItems.code, errPItems.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: purchase_items, Error: ${errPItems.message}`, errPItems);
@@ -723,7 +806,9 @@ export const db = {
 
           // 7. BULK UPDATE HISTORY ACCESS CHECK
           console.log(`[Query Diagnostic] Running bulk_update_history select for schema: ${b}`);
-          const { data: bBulk, error: errBulk } = await supabase.schema(b).from('bulk_update_history').select('*').order('created_at', { ascending: false });
+          const { data: bBulk, error: errBulk } = await supabase.schema(b).from('bulk_update_history')
+            .select('id, update_type, file_name, total_rows, success_rows, failed_rows, created_by, created_at, can_undo')
+            .order('created_at', { ascending: false });
           if (errBulk) {
             const category = getErrorCategory(errBulk.code, errBulk.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: bulk_update_history, Error: ${errBulk.message}`, errBulk);
@@ -739,7 +824,9 @@ export const db = {
 
           // 8. MRP HISTORY ACCESS CHECK
           console.log(`[Query Diagnostic] Running mrp_history select for schema: ${b}`);
-          const { data: bMrp, error: errMrp } = await supabase.schema(b).from('mrp_history').select('*').order('changed_at', { ascending: false });
+          const { data: bMrp, error: errMrp } = await supabase.schema(b).from('mrp_history')
+            .select('id, part_no, old_mrp, new_mrp, changed_by, changed_at')
+            .order('changed_at', { ascending: false });
           if (errMrp) {
             const category = getErrorCategory(errMrp.code, errMrp.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: mrp_history, Error: ${errMrp.message}`, errMrp);
@@ -757,7 +844,9 @@ export const db = {
           try {
             if (!subscribedSchemas.has(b)) {
               subscribedSchemas.add(b);
+              activeBrandName = b;
               const brandChannel = supabase.channel(`${b}-realtime`);
+              activeBrandChannel = brandChannel;
               brandChannel
                 .on('postgres_changes', { event: '*', schema: b }, (payload) => {
                   handleRealtimePayload(b, payload);
@@ -779,6 +868,7 @@ export const db = {
           }
 
           console.log(`Lazy-loaded brand schema for ${brand} successfully.`);
+          lastBrandFetchTime[b] = now;
           loadedBrands.add(b);
           db.notify();
         } catch (err: any) {
@@ -821,7 +911,7 @@ export const db = {
 
   fetchUsers: async (): Promise<User[]> => {
     if (isSupabaseConfigured && supabase) {
-      const { data, error } = await supabase.from('users').select('*');
+      const { data, error } = await supabase.from('users').select('id, name, email, role, status, created_at');
       if (error) {
         console.error("Failed to fetch users from public.users:", error.message);
         throw error;
@@ -1017,7 +1107,7 @@ export const db = {
       }
 
       // Re-query users to ensure we have the absolute latest committed entries globally
-      const { data: latestUsers, error: fetchErr } = await supabase.from('users').select('*');
+      const { data: latestUsers, error: fetchErr } = await supabase.from('users').select('id, name, email, role, status, created_at');
       if (!fetchErr && latestUsers) {
         cache.users = latestUsers.map(scrubRow) as User[];
       } else {
@@ -1549,6 +1639,7 @@ export const db = {
     }
     
     db.logTransaction(user.id, user.name, 'Create Sale', 'Sales', `Created invoice ${saleId} for ${customerName} (₹${totalAmount.toFixed(2)})`, null, sale);
+    lastBrandFetchTime[b] = 0;
     db.notify();
     return sale;
   },
@@ -2350,9 +2441,25 @@ export const db = {
   undoBulkUpdate: async (brand: Brand, bulkId: string, user: User): Promise<void> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const bulkHistory = cache[b].bulk_update_history;
-    const record = bulkHistory.find(h => h.id === bulkId);
+    let record = bulkHistory.find(h => h.id === bulkId);
     
     if (!record) throw new Error("Bulk change history not found");
+    
+    // Fetch backup_data_json on-demand if it isn't loaded in cache yet
+    if (!record.backup_data_json && isSupabaseConfigured && supabase) {
+      console.log(`[Undo Diagnostic] Fetching backup_data_json on-demand for bulk history ID: ${bulkId}...`);
+      const { data, error } = await supabase
+        .schema(b)
+        .from('bulk_update_history')
+        .select('backup_data_json')
+        .eq('id', bulkId)
+        .single();
+      if (error) {
+        throw new Error("Failed to load revert metadata: " + error.message);
+      }
+      record.backup_data_json = data?.backup_data_json || null;
+    }
+    
     if (!record.can_undo || !record.backup_data_json) {
       throw new Error("This bulk action cannot be reverted or has already been undone.");
     }
