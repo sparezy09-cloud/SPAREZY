@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Brand, User, ScanSource, Purchase, PurchaseItem, InventoryItem } from '../types';
 import { db } from '../dbStore';
+import * as XLSX from 'xlsx';
 import { 
   FileText, UploadCloud, Search, Calendar, CheckSquare, Sparkles, 
   Trash2, Plus, X, Eye, FileSpreadsheet, ShieldAlert, BadgeInfo 
@@ -424,6 +425,116 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   };
 
 
+  // --- DOWNLOAD EXCEL FOR SCANNED INVOICES ---
+  const handleDownloadCurrentScanDraft = () => {
+    try {
+      if (scanRows.length === 0) {
+        alert("No scanned items to export.");
+        return;
+      }
+      
+      const invoiceRows = [
+        { A: "INVOICE DETAILS (DRAFT / STAGING)", B: "", C: "", D: "", E: "", F: "" },
+        { A: "Detected Dealer Name", B: scanDealer, C: "", D: "", E: "", F: "" },
+        { A: "Detected Invoice Number", B: scanInvoiceNo, C: "", D: "", E: "", F: "" },
+        { A: "Detected Invoice Date", B: scanInvoiceDate ? new Date(scanInvoiceDate).toLocaleDateString() : "", C: "", D: "", E: "", F: "" },
+        { A: "Detected Discount Percentage", B: `${scanDiscount}%`, C: "", D: "", E: "", F: "" },
+        { A: "Pre-Discount Subtotal", B: `₹${scanSubtotal.toFixed(2)}`, C: "", D: "", E: "", F: "" },
+        { A: "Calculated Discount Amount", B: `₹${(scanSubtotal * (scanDiscount / 100)).toFixed(2)}`, C: "", D: "", E: "", F: "" },
+        { A: "Adjusted Pay Total", B: `₹${actualScanFinalAmount.toFixed(2)}`, C: "", D: "", E: "", F: "" },
+        { A: "", B: "", C: "", D: "", E: "", F: "" },
+        { A: "LINE ITEMS", B: "", C: "", D: "", E: "", F: "" },
+        { A: "Part No", B: "Spare Part Name", C: "HSN Code", D: "Quantity", E: "MRP (INR)", F: "Total Amount (INR)" },
+      ];
+
+      scanRows.forEach(row => {
+        invoiceRows.push({
+          A: row.part_no,
+          B: row.part_name,
+          C: row.hsn,
+          D: String(row.quantity),
+          E: `₹${row.mrp.toFixed(2)}`,
+          F: `₹${(row.quantity * row.mrp).toFixed(2)}`
+        });
+      });
+
+      const worksheet = XLSX.utils.json_to_sheet(invoiceRows, { skipHeader: true });
+      
+      worksheet['!cols'] = [
+        { wch: 25 }, // Col A
+        { wch: 40 }, // Col B
+        { wch: 15 }, // Col C
+        { wch: 12 }, // Col D
+        { wch: 15 }, // Col E
+        { wch: 18 }  // Col F
+      ];
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Scan Draft");
+
+      const cleanDealerName = scanDealer.replace(/[^a-zA-Z0-9]/g, '_');
+      const fileName = `Scan_Draft_${scanInvoiceNo}_${cleanDealerName}`;
+      XLSX.writeFile(workbook, `${fileName}.xlsx`);
+      triggerToast(`Downloaded scan draft ${scanInvoiceNo} as Excel!`);
+    } catch (err: any) {
+      alert("Failed to export scan draft to Excel: " + err.message);
+    }
+  };
+
+  const handleDownloadExcel = (p: Purchase) => {
+    try {
+      const items = db.getPurchaseItems(brand).filter(pi => pi.purchase_id === p.id);
+      
+      const invoiceRows = [
+        { A: "INVOICE DETAILS", B: "", C: "", D: "", E: "", F: "" },
+        { A: "Dealer Name", B: p.dealer_name, C: "", D: "", E: "", F: "" },
+        { A: "Invoice Number", B: p.invoice_no, C: "", D: "", E: "", F: "" },
+        { A: "Invoice Date", B: new Date(p.invoice_date).toLocaleDateString(), C: "", D: "", E: "", F: "" },
+        { A: "Source Type", B: p.scan_source.toUpperCase(), C: "", D: "", E: "", F: "" },
+        { A: "Pre-Discount Subtotal", B: `₹${p.subtotal.toFixed(2)}`, C: "", D: "", E: "", F: "" },
+        { A: "Discount Percentage", B: `${p.dealer_discount_percentage}%`, C: "", D: "", E: "", F: "" },
+        { A: "Discount Amount", B: `₹${p.discount_amount.toFixed(2)}`, C: "", D: "", E: "", F: "" },
+        { A: "Total After Discount", B: `₹${p.total_after_discount.toFixed(2)}`, C: "", D: "", E: "", F: "" },
+        { A: "", B: "", C: "", D: "", E: "", F: "" },
+        { A: "LINE ITEMS", B: "", C: "", D: "", E: "", F: "" },
+        { A: "Part No", B: "Spare Part Name", C: "HSN Code", D: "Quantity", E: "MRP (INR)", F: "Total Amount (INR)" },
+      ];
+
+      items.forEach(item => {
+        invoiceRows.push({
+          A: item.part_no,
+          B: item.part_name,
+          C: item.hsn,
+          D: String(item.quantity),
+          E: `₹${item.mrp.toFixed(2)}`,
+          F: `₹${(item.quantity * item.mrp).toFixed(2)}`
+        });
+      });
+
+      const worksheet = XLSX.utils.json_to_sheet(invoiceRows, { skipHeader: true });
+      
+      worksheet['!cols'] = [
+        { wch: 25 }, // Col A
+        { wch: 40 }, // Col B
+        { wch: 15 }, // Col C
+        { wch: 12 }, // Col D
+        { wch: 15 }, // Col E
+        { wch: 18 }  // Col F
+      ];
+
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Scanned Invoice");
+
+      const cleanDealerName = p.dealer_name.replace(/[^a-zA-Z0-9]/g, '_');
+      const fileName = `Scanned_Invoice_${p.invoice_no}_${cleanDealerName}`;
+      XLSX.writeFile(workbook, `${fileName}.xlsx`);
+      triggerToast(`Downloaded invoice ${p.invoice_no} as Excel!`);
+    } catch (err: any) {
+      alert("Failed to export to Excel: " + err.message);
+    }
+  };
+
+
   // --- HISTORY VIEW MODE ---
   const [viewingPurchase, setViewingPurchase] = useState<Purchase | null>(null);
   const [historyPage, setHistoryPage] = useState(1);
@@ -692,6 +803,14 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                     Editable AI Recognition Invoice Metadata
                   </h3>
                   <p className="text-xs text-slate-400">Review, amend, and check price-matches before syncing to inventory</p>
+                  <button
+                    type="button"
+                    onClick={handleDownloadCurrentScanDraft}
+                    className="mt-2 inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-850 border border-emerald-200 rounded-xl text-[10.5px] font-bold transition cursor-pointer"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                    Download Scanned Invoice Draft (Excel)
+                  </button>
                 </div>
 
                 {/* 12% discount alert */}
@@ -1072,13 +1191,22 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                       <td className="p-3 text-right flex justify-end gap-1">
                         <button
                           onClick={() => setViewingPurchase(p)}
-                          className="p-1 text-indigo-650 hover:bg-indigo-50 rounded"
+                          className="p-1 text-indigo-650 hover:bg-indigo-50 rounded cursor-pointer"
+                          title="View Invoice Details"
                         >
                           <Eye className="w-4 h-4" />
                         </button>
                         <button
+                          onClick={() => handleDownloadExcel(p)}
+                          className="p-1 text-emerald-600 hover:bg-emerald-50 rounded cursor-pointer"
+                          title="Download Invoice as Excel"
+                        >
+                          <FileSpreadsheet className="w-4 h-4" />
+                        </button>
+                        <button
                           onClick={() => handleDeleteSyncedInvoice(p.id)}
-                          className="p-1 text-red-500 hover:bg-red-50 rounded"
+                          className="p-1 text-red-500 hover:bg-red-50 rounded cursor-pointer"
+                          title="Delete Invoice"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -1179,6 +1307,15 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                     )}
                   </div>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => handleDownloadExcel(viewingPurchase)}
+                  className="w-full bg-emerald-100 hover:bg-emerald-600 hover:text-white text-emerald-800 py-2 rounded-xl text-xs font-bold font-semibold flex items-center justify-center gap-1 transition cursor-pointer"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  Download Invoice (Excel)
+                </button>
 
                 <button
                   type="button"
