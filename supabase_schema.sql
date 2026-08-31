@@ -736,3 +736,56 @@ BEGIN
 END;
 $$;
 
+
+-- ====================================================================
+-- KHATA BOOK MODULE TABLES
+-- ====================================================================
+
+-- Customer Khata metadata table
+CREATE TABLE IF NOT EXISTS public.khata_customers_meta (
+    customer_id UUID PRIMARY KEY REFERENCES public.customers(id) ON DELETE CASCADE,
+    vehicle_no TEXT DEFAULT '',
+    credit_limit NUMERIC(12,2) DEFAULT 0.00,
+    opening_balance NUMERIC(12,2) DEFAULT 0.00,
+    payment_due_date DATE DEFAULT NULL,
+    status TEXT DEFAULT 'Active'
+);
+
+-- Supplier/Dealer Khata metadata table
+CREATE TABLE IF NOT EXISTS public.khata_suppliers_meta (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    supplier_name TEXT UNIQUE NOT NULL,
+    phone TEXT DEFAULT '',
+    opening_balance NUMERIC(12,2) DEFAULT 0.00,
+    payment_due_date DATE DEFAULT NULL,
+    status TEXT DEFAULT 'Active',
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- General Ledger / Khata Book entries table
+CREATE TABLE IF NOT EXISTS public.khata_entries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_type TEXT NOT NULL CHECK (account_type IN ('customer', 'supplier')),
+    party_id UUID NOT NULL, -- references customers(id) or khata_suppliers_meta(id) depending on account_type
+    entry_date TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    description TEXT NOT NULL,
+    debit NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    credit NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    payment_method TEXT CHECK (payment_method IN ('Cash', 'UPI', 'Bank Transfer', 'Cheque', 'Other')),
+    reference_no TEXT,
+    notes TEXT,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    brand TEXT NOT NULL CHECK (brand IN ('Hyundai', 'Mahindra')),
+    source_type TEXT NOT NULL CHECK (source_type IN ('sale', 'purchase', 'return', 'payment_received', 'payment_made', 'manual', 'opening_balance')),
+    source_id UUID,
+    is_reversed BOOLEAN DEFAULT false,
+    reversed_by TEXT DEFAULT NULL,
+    reversed_at TIMESTAMPTZ DEFAULT NULL
+);
+
+-- Khata Book Indexes
+CREATE INDEX IF NOT EXISTS idx_khata_entries_party_id ON public.khata_entries (party_id);
+CREATE INDEX IF NOT EXISTS idx_khata_entries_account_type ON public.khata_entries (account_type);
+CREATE INDEX IF NOT EXISTS idx_khata_entries_entry_date ON public.khata_entries (entry_date);
+

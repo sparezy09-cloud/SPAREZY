@@ -145,3 +145,43 @@ export interface TransactionLog {
   new_data: string | null; // JSON String or description
   created_at: string;
 }
+
+export interface CustomerKhataMeta {
+  customer_id: string;
+  vehicle_no: string;
+  credit_limit: number;
+  opening_balance: number;
+  payment_due_date: string | null;
+  status: string;
+}
+
+export interface SupplierKhataMeta {
+  id: string;
+  supplier_name: string;
+  phone: string;
+  opening_balance: number;
+  payment_due_date: string | null;
+  status: string;
+  created_at: string;
+}
+
+export interface KhataEntry {
+  id: string;
+  account_type: 'customer' | 'supplier';
+  party_id: string;
+  entry_date: string;
+  description: string;
+  debit: number;
+  credit: number;
+  payment_method: 'Cash' | 'UPI' | 'Bank Transfer' | 'Cheque' | 'Other' | null;
+  reference_no: string | null;
+  notes: string | null;
+  created_by: string;
+  created_at: string;
+  brand: Brand;
+  source_type: 'sale' | 'purchase' | 'return' | 'payment_received' | 'payment_made' | 'manual' | 'opening_balance';
+  source_id: string | null;
+  is_reversed?: boolean;
+  reversed_by?: string | null;
+  reversed_at?: string | null;
+}
