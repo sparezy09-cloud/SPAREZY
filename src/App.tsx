@@ -350,7 +350,7 @@ export default function App() {
     { name: 'Bulk Updates', icon: FileSpreadsheet, ownerOnly: true },
     { name: 'Customer & Dealer Ledgers', icon: Users },
     { name: 'Transaction Records', icon: Terminal, ownerOnly: true },
-    { name: 'Settings / User Management', icon: Shield },
+    { name: 'Settings / User Management', icon: Shield, ownerOnly: true },
   ];
 
   const renderModuleContent = () => {
@@ -386,6 +386,9 @@ export default function App() {
       case 'Transaction Records':
         return <TransactionsModule brand={activeBrand} user={activeUser} />;
       case 'Settings / User Management':
+        if (activeUser.role !== 'Owner') {
+          return <DashboardModule brand={activeBrand} user={activeUser} onNavigateToModule={setActiveModule} />;
+        }
         return <SettingsModule brand={activeBrand} user={activeUser} />;
       default:
         return <DashboardModule brand={activeBrand} user={activeUser} onNavigateToModule={setActiveModule} />;
@@ -671,14 +674,18 @@ export default function App() {
                   <strong>Configuration Error [{key}]:</strong> {errMsg}
                 </span>
               </div>
-              <button
-                onClick={() => {
-                  setActiveModule('Settings / User Management');
-                }}
-                className="text-indigo-600 hover:text-indigo-800 font-bold hover:underline cursor-pointer"
-              >
-                Inspect Diagnostics &amp; Solution
-              </button>
+              {activeUser.role === 'Owner' ? (
+                <button
+                  onClick={() => {
+                    setActiveModule('Settings / User Management');
+                  }}
+                  className="text-indigo-600 hover:text-indigo-800 font-bold hover:underline cursor-pointer"
+                >
+                  Inspect Diagnostics &amp; Solution
+                </button>
+              ) : (
+                <span className="text-slate-400 italic">Please contact your Owner to configure credentials.</span>
+              )}
             </div>
           ))}
           <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-6">
