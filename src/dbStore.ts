@@ -3,7 +3,7 @@ import { safeLocalStorage, safeSessionStorage } from './storagePolyfill';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
-  ScanSource, CustomerKhataMeta, SupplierKhataMeta, KhataEntry
+  ScanSource
 } from './types';
 
 const localStorage = safeLocalStorage;
@@ -16,9 +16,6 @@ const KEY_LOGS = 'sparezy_public_logs_fb';
 const KEY_ACTIVE_USER = 'sparezy_active_user_fb';
 const KEY_ACTIVE_BRAND = 'sparezy_active_brand_fb';
 const KEY_LOCAL_PASSWORDS = 'sparezy_local_user_passwords_fb';
-const KEY_KHATA_CUSTOMERS = 'sparezy_khata_customers_fb';
-const KEY_KHATA_SUPPLIERS = 'sparezy_khata_suppliers_fb';
-const KEY_KHATA_ENTRIES = 'sparezy_khata_entries_fb';
 
 // Safe LocalStorage wrapper to prevent quota/limit errors when database partitions grow large
 try {
@@ -62,9 +59,6 @@ let cache = {
   users: [] as User[],
   customers: [] as Customer[],
   transaction_logs: [] as TransactionLog[],
-  khata_customers_meta: [] as CustomerKhataMeta[],
-  khata_suppliers_meta: [] as SupplierKhataMeta[],
-  khata_entries: [] as KhataEntry[],
   hyundai: {
     inventory: [] as InventoryItem[],
     sales: [] as Sale[],
@@ -195,12 +189,6 @@ export function clearSchemaError(schema: string, table: string) {
 // Initialize fallback structures in localStorage to protect against missing credentials
 function initLocalFallback() {
   if (typeof window === 'undefined') return;
-  
-  // Pre-load Khata storage datasets
-  cache.khata_customers_meta = safeParseJSON(localStorage.getItem(KEY_KHATA_CUSTOMERS)) || [];
-  cache.khata_suppliers_meta = safeParseJSON(localStorage.getItem(KEY_KHATA_SUPPLIERS)) || [];
-  cache.khata_entries = safeParseJSON(localStorage.getItem(KEY_KHATA_ENTRIES)) || [];
-
   // If no env variables are configured, set failed state immediately
   if (!isSupabaseConfigured) {
     connectionStatus = 'failed';
@@ -225,10 +213,6 @@ const scrubRow = (row: any) => {
   if (r.refund_amount !== undefined) r.refund_amount = Number(r.refund_amount);
   if (r.old_mrp !== undefined) r.old_mrp = Number(r.old_mrp);
   if (r.new_mrp !== undefined) r.new_mrp = Number(r.new_mrp);
-  if (r.credit_limit !== undefined) r.credit_limit = Number(r.credit_limit);
-  if (r.opening_balance !== undefined) r.opening_balance = Number(r.opening_balance);
-  if (r.debit !== undefined) r.debit = Number(r.debit);
-  if (r.credit !== undefined) r.credit = Number(r.credit);
   
   if (r.old_data !== undefined) {
     r.old_data = r.old_data ? (typeof r.old_data === 'string' ? r.old_data : JSON.stringify(r.old_data)) : null;
@@ -448,43 +432,6 @@ export const db = {
         cache.users = (usersData || []).map(scrubRow) as User[];
         cache.customers = (customersData || []).map(scrubRow) as Customer[];
         cache.transaction_logs = (logsData || []).map(scrubRow) as TransactionLog[];
-
-        // Load Khata tables with robust error handling and offline/storage fallback
-        let khataCustData = [];
-        let khataSuppData = [];
-        let khataEntryData = [];
-
-        try {
-          const [custMetaRes, suppMetaRes, entriesRes] = await Promise.all([
-            supabase.from('khata_customers_meta').select('*'),
-            supabase.from('khata_suppliers_meta').select('*').order('created_at', { ascending: false }),
-            supabase.from('khata_entries').select('*').order('entry_date', { ascending: false })
-          ]);
-          if (custMetaRes && !custMetaRes.error && custMetaRes.data) {
-            khataCustData = custMetaRes.data;
-          } else {
-            khataCustData = safeParseJSON(localStorage.getItem(KEY_KHATA_CUSTOMERS)) || [];
-          }
-          if (suppMetaRes && !suppMetaRes.error && suppMetaRes.data) {
-            khataSuppData = suppMetaRes.data;
-          } else {
-            khataSuppData = safeParseJSON(localStorage.getItem(KEY_KHATA_SUPPLIERS)) || [];
-          }
-          if (entriesRes && !entriesRes.error && entriesRes.data) {
-            khataEntryData = entriesRes.data;
-          } else {
-            khataEntryData = safeParseJSON(localStorage.getItem(KEY_KHATA_ENTRIES)) || [];
-          }
-        } catch (khataErr) {
-          console.warn("Exception loading Khata from Supabase, loading fallback:", khataErr);
-          khataCustData = safeParseJSON(localStorage.getItem(KEY_KHATA_CUSTOMERS)) || [];
-          khataSuppData = safeParseJSON(localStorage.getItem(KEY_KHATA_SUPPLIERS)) || [];
-          khataEntryData = safeParseJSON(localStorage.getItem(KEY_KHATA_ENTRIES)) || [];
-        }
-
-        cache.khata_customers_meta = khataCustData.map(scrubRow) as CustomerKhataMeta[];
-        cache.khata_suppliers_meta = khataSuppData.map(scrubRow) as SupplierKhataMeta[];
-        cache.khata_entries = khataEntryData.map(scrubRow) as KhataEntry[];
 
         // Check live Supabase Auth session from the parallel auth result
         const session = (sessionRes as any).data?.session;
@@ -1263,256 +1210,6 @@ export const db = {
     return newUser;
   },
 
-  // --- KHATA BOOK MODULE METHODS ---
-  getKhataCustomersMeta: (): CustomerKhataMeta[] => {
-    return cache.khata_customers_meta;
-  },
-
-  getKhataCustomerMeta: (customerId: string): CustomerKhataMeta => {
-    const existing = cache.khata_customers_meta.find(m => m.customer_id === customerId);
-    if (existing) return existing;
-    return {
-      customer_id: customerId,
-      vehicle_no: '',
-      credit_limit: 0,
-      opening_balance: 0,
-      payment_due_date: null,
-      status: 'Active'
-    };
-  },
-
-  updateKhataCustomerMeta: async (meta: CustomerKhataMeta, user: User): Promise<CustomerKhataMeta> => {
-    const idx = cache.khata_customers_meta.findIndex(m => m.customer_id === meta.customer_id);
-    const updated = { ...meta };
-    const isNew = idx === -1;
-    
-    if (isNew) {
-      cache.khata_customers_meta.push(updated);
-    } else {
-      cache.khata_customers_meta[idx] = updated;
-    }
-    
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase.from('khata_customers_meta').upsert(updated);
-      if (error) {
-        console.error("❌ Error upserting customer khata meta:", error);
-        throw new Error(`Failed to save customer Khata settings: ${error.message}`);
-      }
-    } else {
-      localStorage.setItem(KEY_KHATA_CUSTOMERS, JSON.stringify(cache.khata_customers_meta));
-    }
-
-    db.logTransaction(
-      user.id, 
-      user.name, 
-      isNew ? 'Create Khata Profile' : 'Update Khata Profile', 
-      'Khata Book', 
-      `Configured Khata for Customer ID ${meta.customer_id}: Limit ₹${meta.credit_limit}, Vehicle: ${meta.vehicle_no}`, 
-      null, 
-      updated
-    );
-    
-    db.notify();
-    return updated;
-  },
-
-  getKhataSuppliers: (): SupplierKhataMeta[] => {
-    return cache.khata_suppliers_meta;
-  },
-
-  addKhataSupplier: async (name: string, phone: string, openingBalance: number, user: User): Promise<SupplierKhataMeta> => {
-    const newSupp: SupplierKhataMeta = {
-      id: uuid(),
-      supplier_name: name,
-      phone: phone || '',
-      opening_balance: openingBalance,
-      payment_due_date: null,
-      status: 'Active',
-      created_at: new Date().toISOString()
-    };
-    
-    cache.khata_suppliers_meta.unshift(newSupp);
-    
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase.from('khata_suppliers_meta').insert(newSupp);
-      if (error) {
-        console.error("❌ Error inserting supplier khata:", error);
-        cache.khata_suppliers_meta.shift();
-        throw new Error(`Failed to create supplier: ${error.message}`);
-      }
-    } else {
-      localStorage.setItem(KEY_KHATA_SUPPLIERS, JSON.stringify(cache.khata_suppliers_meta));
-    }
-
-    db.logTransaction(user.id, user.name, 'Create Supplier Khata', 'Khata Book', `Created supplier ${name} with opening balance ₹${openingBalance}`, null, newSupp);
-
-    if (openingBalance !== 0) {
-      await db.addKhataEntry({
-        account_type: 'supplier',
-        party_id: newSupp.id,
-        entry_date: new Date().toISOString(),
-        description: 'Opening Balance',
-        debit: 0,
-        credit: Math.abs(openingBalance),
-        payment_method: null,
-        reference_no: null,
-        notes: 'Initial opening balance',
-        brand: 'Hyundai',
-        source_type: 'opening_balance',
-        source_id: newSupp.id
-      }, user);
-    }
-
-    db.notify();
-    return newSupp;
-  },
-
-  updateKhataSupplier: async (meta: SupplierKhataMeta, user: User): Promise<SupplierKhataMeta> => {
-    const idx = cache.khata_suppliers_meta.findIndex(m => m.id === meta.id);
-    if (idx === -1) throw new Error("Supplier Khata profile not found");
-    
-    const oldMeta = { ...cache.khata_suppliers_meta[idx] };
-    const updated = { ...meta };
-    cache.khata_suppliers_meta[idx] = updated;
-    
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase.from('khata_suppliers_meta').update(updated).eq('id', meta.id);
-      if (error) {
-        console.error("❌ Error updating supplier meta:", error);
-        cache.khata_suppliers_meta[idx] = oldMeta;
-        throw new Error(`Failed to update supplier Khata settings: ${error.message}`);
-      }
-    } else {
-      localStorage.setItem(KEY_KHATA_SUPPLIERS, JSON.stringify(cache.khata_suppliers_meta));
-    }
-
-    db.logTransaction(user.id, user.name, 'Update Supplier Khata', 'Khata Book', `Updated supplier ${meta.supplier_name}`, oldMeta, updated);
-    db.notify();
-    return updated;
-  },
-
-  getKhataEntries: (accountType?: 'customer' | 'supplier', partyId?: string): KhataEntry[] => {
-    let entries = [...cache.khata_entries];
-    if (accountType) {
-      entries = entries.filter(e => e.account_type === accountType);
-    }
-    if (partyId) {
-      entries = entries.filter(e => e.party_id === partyId);
-    }
-    return entries.sort((a, b) => new Date(b.entry_date).getTime() - new Date(a.entry_date).getTime());
-  },
-
-  addKhataEntry: async (entry: Omit<KhataEntry, 'id' | 'created_at' | 'created_by'>, user: User): Promise<KhataEntry> => {
-    const newEntry: KhataEntry = {
-      ...entry,
-      id: uuid(),
-      created_by: user.name,
-      created_at: new Date().toISOString()
-    };
-    
-    cache.khata_entries.unshift(newEntry);
-    
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase.from('khata_entries').insert(newEntry);
-      if (error) {
-        console.error("❌ Error inserting khata entry:", error);
-        cache.khata_entries.shift();
-        throw new Error(`Failed to save Khata ledger entry: ${error.message}`);
-      }
-    } else {
-      localStorage.setItem(KEY_KHATA_ENTRIES, JSON.stringify(cache.khata_entries));
-    }
-
-    db.logTransaction(
-      user.id, 
-      user.name, 
-      'Create Khata Entry', 
-      'Khata Book', 
-      `Added ${entry.account_type} entry for ${entry.party_id}: Debit ₹${entry.debit}, Credit ₹${entry.credit} (${entry.description})`, 
-      null, 
-      newEntry
-    );
-    
-    db.notify();
-    return newEntry;
-  },
-
-  reverseKhataEntry: async (entryId: string, reason: string, user: User): Promise<KhataEntry> => {
-    const idx = cache.khata_entries.findIndex(e => e.id === entryId);
-    if (idx === -1) throw new Error("Khata entry not found");
-    
-    const orig = cache.khata_entries[idx];
-    if (orig.is_reversed) throw new Error("Entry is already reversed");
-
-    orig.is_reversed = true;
-    orig.reversed_by = user.name;
-    orig.reversed_at = new Date().toISOString();
-    orig.notes = orig.notes ? `${orig.notes} | REVERSED: ${reason}` : `REVERSED: ${reason}`;
-
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase.from('khata_entries').update({
-        is_reversed: true,
-        reversed_by: user.name,
-        reversed_at: orig.reversed_at,
-        notes: orig.notes
-      }).eq('id', entryId);
-      if (error) {
-        console.error("❌ Error marking original khata entry reversed:", error);
-        orig.is_reversed = false;
-        orig.reversed_by = null;
-        orig.reversed_at = null;
-        throw new Error(`Failed to reverse entry: ${error.message}`);
-      }
-    } else {
-      localStorage.setItem(KEY_KHATA_ENTRIES, JSON.stringify(cache.khata_entries));
-    }
-
-    const compEntry: KhataEntry = {
-      id: uuid(),
-      account_type: orig.account_type,
-      party_id: orig.party_id,
-      entry_date: new Date().toISOString(),
-      description: `Reversal of [${orig.description}] - Reason: ${reason}`,
-      debit: orig.credit,
-      credit: orig.debit,
-      payment_method: orig.payment_method,
-      reference_no: orig.reference_no,
-      notes: `Compensating entry for reversal of transaction ID ${orig.id}`,
-      created_by: user.name,
-      created_at: new Date().toISOString(),
-      brand: orig.brand,
-      source_type: 'manual',
-      source_id: orig.id,
-      is_reversed: false
-    };
-
-    cache.khata_entries.unshift(compEntry);
-
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase.from('khata_entries').insert(compEntry);
-      if (error) {
-        console.error("❌ Error inserting reversal compensating entry:", error);
-        cache.khata_entries.shift();
-        throw new Error(`Original transaction was marked reversed, but compensating ledger entry failed to save: ${error.message}`);
-      }
-    } else {
-      localStorage.setItem(KEY_KHATA_ENTRIES, JSON.stringify(cache.khata_entries));
-    }
-
-    db.logTransaction(
-      user.id, 
-      user.name, 
-      'Reverse Khata Entry', 
-      'Khata Book', 
-      `Reversed transaction ${entryId}: created compensating entry ${compEntry.id}`, 
-      orig, 
-      compEntry
-    );
-
-    db.notify();
-    return orig;
-  },
-
   // Customer Ledger
   getCustomers: (): Customer[] => {
     return cache.customers;
@@ -2022,48 +1719,6 @@ export const db = {
     }
     
     db.logTransaction(user.id, user.name, 'Create Sale', 'Sales', `Created invoice ${saleId} for ${customerName} (₹${totalAmount.toFixed(2)})`, null, sale);
-    
-    // Auto-integrate with Khata Book for registered customers
-    if (customerId && customerId !== 'walkthrough') {
-      try {
-        // 1. Create a Debit entry for the sale
-        await db.addKhataEntry({
-          account_type: 'customer',
-          party_id: customerId,
-          entry_date: sale.sale_date,
-          description: `Sale Invoice #${sale.id.slice(0, 8).toUpperCase()}`,
-          debit: totalAmount,
-          credit: 0,
-          payment_method: null,
-          reference_no: null,
-          notes: `Linked to Invoice #${sale.id}`,
-          brand,
-          source_type: 'sale',
-          source_id: sale.id
-        }, user);
-
-        // 2. Create a Credit entry for any payment made on the spot
-        if (calculatedPaid > 0) {
-          await db.addKhataEntry({
-            account_type: 'customer',
-            party_id: customerId,
-            entry_date: sale.sale_date,
-            description: `Down Payment on Invoice #${sale.id.slice(0, 8).toUpperCase()}`,
-            debit: 0,
-            credit: calculatedPaid,
-            payment_method: 'Cash', // Default to Cash on spot
-            reference_no: null,
-            notes: `On-spot payment for Invoice #${sale.id}`,
-            brand,
-            source_type: 'payment_received',
-            source_id: sale.id
-          }, user);
-        }
-      } catch (khataErr) {
-        console.error("⚠️ Failed to automatically post sale to Khata Book:", khataErr);
-      }
-    }
-
     lastBrandFetchTime[b] = 0;
     db.notify();
     return sale;
@@ -2100,26 +1755,6 @@ export const db = {
     }
 
     db.logTransaction(user.id, user.name, 'Receive Payment', 'Sales', `Received payment for invoice ${saleId} (Total: ₹${sale.total_amount}, Paid: ₹${paidAmount}, Pending: ₹${sale.pending_amount})`, oldSale, sale);
-    
-    // Auto-integrate with Khata Book for registered customers
-    const additionalPayment = paidAmount - oldSale.paid_amount;
-    if (additionalPayment > 0 && sale.customer_id && sale.customer_id !== 'walkthrough') {
-      db.addKhataEntry({
-        account_type: 'customer',
-        party_id: sale.customer_id,
-        entry_date: new Date().toISOString(),
-        description: `Payment Received on Invoice #${sale.id.slice(0, 8).toUpperCase()}`,
-        debit: 0,
-        credit: additionalPayment,
-        payment_method: 'Cash',
-        reference_no: null,
-        notes: `Additional payment received towards invoice.`,
-        brand,
-        source_type: 'payment_received',
-        source_id: sale.id
-      }, user).catch(err => console.error("⚠️ Failed to post payment update to Khata Book:", err));
-    }
-
     db.notify();
     return sale;
   },
@@ -2311,25 +1946,6 @@ export const db = {
     }
     
     db.logTransaction(user.id, user.name, 'Sale Return', 'Returns', `Processed return for billing ${saleId}: Quantity ${returnedQty} of ${sItem.part_no}`, oldSale, sale);
-    
-    // Auto-integrate with Khata Book for registered customers
-    if (sale.customer_id && sale.customer_id !== 'walkthrough') {
-      db.addKhataEntry({
-        account_type: 'customer',
-        party_id: sale.customer_id,
-        entry_date: new Date().toISOString(),
-        description: `Sales Return: ${returnedQty}x ${sItem.part_no}`,
-        debit: 0,
-        credit: refundAmount,
-        payment_method: null,
-        reference_no: null,
-        notes: `Returned item from invoice #${sale.id.slice(0, 8).toUpperCase()}`,
-        brand,
-        source_type: 'return',
-        source_id: returnRec.id
-      }, user).catch(err => console.error("⚠️ Failed to post sales return to Khata Book:", err));
-    }
-
     db.notify();
     return returnRec;
   },
@@ -2510,35 +2126,6 @@ export const db = {
     }
     
     db.logTransaction(user.id, user.name, 'Create Purchase', 'Purchases', `Added brand purchase invoice ${invoiceNo} for dealer ${dealerName}`, null, purchase);
-    
-    // Auto-integrate with Khata Book for suppliers
-    if (dealerName) {
-      try {
-        let supplier = cache.khata_suppliers_meta.find(s => s.supplier_name.trim().toLowerCase() === dealerName.trim().toLowerCase());
-        if (!supplier) {
-          // Auto-create supplier profile if it doesn't exist
-          supplier = await db.addKhataSupplier(dealerName, '', 0, user);
-        }
-        
-        await db.addKhataEntry({
-          account_type: 'supplier',
-          party_id: supplier.id,
-          entry_date: purchase.invoice_date,
-          description: `Purchase Invoice #${purchase.invoice_no}`,
-          debit: 0,
-          credit: totalAfterDiscount,
-          payment_method: null,
-          reference_no: purchase.invoice_no,
-          notes: `Linked to Purchase Invoice ID ${purchase.id}`,
-          brand,
-          source_type: 'purchase',
-          source_id: purchase.id
-        }, user);
-      } catch (khataErr) {
-        console.error("⚠️ Failed to automatically post purchase to supplier Khata Book:", khataErr);
-      }
-    }
-
     db.notify();
     return purchase;
   },

@@ -422,34 +422,3 @@ BEGIN
 END;
 $$;
 
-
--- ====================================================================
--- RLS POLICIES FOR KHATA BOOK MODULE
--- ====================================================================
-
--- Enable RLS for Khata Book tables
-ALTER TABLE public.khata_customers_meta ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.khata_suppliers_meta ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.khata_entries ENABLE ROW LEVEL SECURITY;
-
--- khata_customers_meta policies
-DROP POLICY IF EXISTS owner_full_control_khata_cust ON public.khata_customers_meta;
-CREATE POLICY owner_full_control_khata_cust ON public.khata_customers_meta FOR ALL USING (public.is_owner());
-
-DROP POLICY IF EXISTS manager_full_control_khata_cust ON public.khata_customers_meta;
-CREATE POLICY manager_full_control_khata_cust ON public.khata_customers_meta FOR ALL USING (public.is_manager());
-
--- khata_suppliers_meta policies
-DROP POLICY IF EXISTS owner_full_control_khata_supp ON public.khata_suppliers_meta;
-CREATE POLICY owner_full_control_khata_supp ON public.khata_suppliers_meta FOR ALL USING (public.is_owner());
-
-DROP POLICY IF EXISTS manager_full_control_khata_supp ON public.khata_suppliers_meta;
-CREATE POLICY manager_full_control_khata_supp ON public.khata_suppliers_meta FOR ALL USING (public.is_manager());
-
--- khata_entries policies
-DROP POLICY IF EXISTS owner_full_control_khata_entries ON public.khata_entries;
-CREATE POLICY owner_full_control_khata_entries ON public.khata_entries FOR ALL USING (public.is_owner());
-
-DROP POLICY IF EXISTS manager_full_control_khata_entries ON public.khata_entries;
-CREATE POLICY manager_full_control_khata_entries ON public.khata_entries FOR ALL USING (public.is_manager());
-
