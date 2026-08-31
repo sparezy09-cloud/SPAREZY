@@ -15,12 +15,13 @@ import BulkUpdateModule from './components/BulkUpdateModule';
 import LedgerModule from './components/LedgerModule';
 import TransactionsModule from './components/TransactionsModule';
 import SettingsModule from './components/SettingsModule';
+import OwnerReportsModule from './components/OwnerReportsModule';
 
 // Menu icons
 import { 
   CarFront, LayoutDashboard, Layers, ShoppingBag, RotateCcw, 
   FileText, FileSpreadsheet, Users, Terminal, Shield, LogOut, Menu, X, CheckCircle,
-  AlertTriangle, RefreshCw, Download
+  AlertTriangle, RefreshCw, Download, TrendingUp
 } from 'lucide-react';
 
 export default function App() {
@@ -347,6 +348,7 @@ export default function App() {
     { name: 'Sales', icon: ShoppingBag },
     { name: 'Returns', icon: RotateCcw },
     { name: 'Purchases', icon: FileText },
+    { name: 'Owner Reports', icon: TrendingUp, ownerOnly: true },
     { name: 'Bulk Updates', icon: FileSpreadsheet, ownerOnly: true },
     { name: 'Customer & Dealer Ledgers', icon: Users },
     { name: 'Transaction Records', icon: Terminal, ownerOnly: true },
@@ -379,6 +381,11 @@ export default function App() {
         return <ReturnModule brand={activeBrand} user={activeUser} />;
       case 'Purchases':
         return <PurchaseModule brand={activeBrand} user={activeUser} />;
+      case 'Owner Reports':
+        if (activeUser.role !== 'Owner') {
+          return <DashboardModule brand={activeBrand} user={activeUser} onNavigateToModule={setActiveModule} />;
+        }
+        return <OwnerReportsModule brand={activeBrand} user={activeUser} />;
       case 'Bulk Updates':
         return <BulkUpdateModule brand={activeBrand} user={activeUser} />;
       case 'Customer & Dealer Ledgers':
