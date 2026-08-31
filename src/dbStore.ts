@@ -2,7 +2,7 @@ import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
 import { safeLocalStorage, safeSessionStorage } from './storagePolyfill';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
-  Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole, BillType,
+  Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
   ScanSource
 } from './types';
 
@@ -209,11 +209,6 @@ const scrubRow = (row: any) => {
   if (r.total_after_discount !== undefined) r.total_after_discount = Number(r.total_after_discount);
   if (r.paid_amount !== undefined) r.paid_amount = Number(r.paid_amount);
   if (r.pending_amount !== undefined) r.pending_amount = Number(r.pending_amount);
-  if (r.taxable_amount !== undefined) r.taxable_amount = Number(r.taxable_amount);
-  if (r.cgst_amount !== undefined) r.cgst_amount = Number(r.cgst_amount);
-  if (r.sgst_amount !== undefined) r.sgst_amount = Number(r.sgst_amount);
-  if (r.igst_amount !== undefined) r.igst_amount = Number(r.igst_amount);
-  if (r.gst_rate !== undefined) r.gst_rate = Number(r.gst_rate);
   if (r.returned_quantity !== undefined) r.returned_quantity = Number(r.returned_quantity);
   if (r.refund_amount !== undefined) r.refund_amount = Number(r.refund_amount);
   if (r.old_mrp !== undefined) r.old_mrp = Number(r.old_mrp);
@@ -721,7 +716,7 @@ export const db = {
           // 2. SALES ACCESS CHECK
           console.log(`[Query Diagnostic] Running sales select for schema: ${b}`);
           const { data: bSales, error: errSales } = await supabase.schema(b).from('sales')
-            .select('id, invoice_no, bill_type, customer_id, customer_name, customer_category, customer_gstin, customer_address, place_of_supply, sale_date, subtotal, discount_percentage, discount_amount, total_amount, taxable_amount, cgst_amount, sgst_amount, igst_amount, payment_status, paid_amount, pending_amount, created_by, created_at')
+            .select('id, customer_id, customer_name, customer_category, sale_date, subtotal, discount_percentage, discount_amount, total_amount, payment_status, paid_amount, pending_amount, created_by, created_at')
             .order('created_at', { ascending: false });
           if (errSales) {
             const category = getErrorCategory(errSales.code, errSales.message);
@@ -739,7 +734,7 @@ export const db = {
           // 3. SALE ITEMS ACCESS CHECK
           console.log(`[Query Diagnostic] Running sale_items select for schema: ${b}`);
           const { data: bSaleItems, error: errSalesItems } = await supabase.schema(b).from('sale_items')
-            .select('id, sale_id, part_no, part_name, hsn, quantity, mrp, discount_percentage, gst_rate, taxable_amount, cgst_amount, sgst_amount, igst_amount, final_amount, returned_quantity, created_at');
+            .select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, final_amount, returned_quantity, created_at');
           if (errSalesItems) {
             const category = getErrorCategory(errSalesItems.code, errSalesItems.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: sale_items, Error: ${errSalesItems.message}`, errSalesItems);
@@ -1589,20 +1584,15 @@ export const db = {
   },
 
   createSale: async (
-    brand: Brand,
-    customerId: string,
-    customerName: string,
+    brand: Brand, 
+    customerId: string, 
+    customerName: string, 
     customerCategory: CustomerCategory,
-    items: { part_no: string; quantity: number; discount_percentage: number; mrp?: number; gst_rate?: number }[],
+    items: { part_no: string; quantity: number; discount_percentage: number; mrp?: number }[],
     discountPercentage: number,
     paymentStatus: PaymentStatus,
     paidAmount: number,
-    user: User,
-    billType: BillType = 'KACHA',
-    customerGstin: string = '',
-    customerAddress: string = '',
-    placeOfSupply: string = '',
-    isInterState: boolean = false
+    user: User
   ): Promise<Sale> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const inventory = cache[b].inventory;
@@ -1656,15 +1646,9 @@ export const db = {
         sale_id: saleId,
         part_no: invItem.part_no,
         part_name: invItem.part_name,
-        hsn: invItem.hsn || '',
         quantity: shopItem.quantity,
         mrp: partMrp,
         discount_percentage: shopItem.discount_percentage,
-        gst_rate: billType === 'GST' ? Number(shopItem.gst_rate || 0) : 0,
-        taxable_amount: finalAmount,
-        cgst_amount: 0,
-        sgst_amount: 0,
-        igst_amount: 0,
         final_amount: finalAmount,
         returned_quantity: 0,
         created_at: new Date().toISOString()
@@ -1679,63 +1663,28 @@ export const db = {
     
     const discountAmount = subtotal * (discountPercentage / 100);
     const totalAmount = subtotal - discountAmount;
-
-    const taxableAmount = billType === 'GST' ? totalAmount : 0;
-    let cgstAmount = 0;
-    let sgstAmount = 0;
-    let igstAmount = 0;
-    if (billType === 'GST') {
-      // Taxes are calculated per line below and summed on the invoice.
-      for (const line of itemsToSave) {
-        const lineTaxable = line.taxable_amount || line.final_amount;
-        const lineTax = lineTaxable * ((line.gst_rate || 0) / 100);
-        if (isInterState) igstAmount += lineTax;
-        else {
-          cgstAmount += lineTax / 2;
-          sgstAmount += lineTax / 2;
-        }
-      }
-    }
-    const invoiceTotalAmount = billType === 'GST' ? taxableAmount + cgstAmount + sgstAmount + igstAmount : totalAmount;
-
-    let calculatedPaid = invoiceTotalAmount;
+    
+    let calculatedPaid = totalAmount;
     let calculatedPending = 0;
     
     if (paymentStatus === 'Pending') {
       calculatedPaid = 0;
-      calculatedPending = invoiceTotalAmount;
+      calculatedPending = totalAmount;
     } else if (paymentStatus === 'Custom Amount') {
       calculatedPaid = paidAmount;
-      calculatedPending = Math.max(0, invoiceTotalAmount - paidAmount);
+      calculatedPending = Math.max(0, totalAmount - paidAmount);
     }
     
-    const billPrefix = billType === 'GST' ? 'GST' : 'K';
-    const existingNumbers = cache[b].sales
-      .filter(s => s.bill_type === billType && s.invoice_no?.startsWith(`${billPrefix}-`))
-      .map(s => Number(s.invoice_no.split('-').pop()))
-      .filter(n => Number.isFinite(n));
-    const nextNumber = (existingNumbers.length ? Math.max(...existingNumbers) : 0) + 1;
-    const invoiceNo = `${billPrefix}-${String(nextNumber).padStart(6, '0')}`;
-
     const sale: Sale = {
       id: saleId,
-      invoice_no: invoiceNo,
-      bill_type: billType,
       customer_id: customerId,
       customer_name: customerName,
       customer_category: customerCategory,
-      customer_gstin: billType === 'GST' ? customerGstin.trim() : '',
-      customer_address: billType === 'GST' ? customerAddress.trim() : '',
-      place_of_supply: billType === 'GST' ? placeOfSupply.trim() : '',
       sale_date: new Date().toISOString(),
       subtotal,
       discount_percentage: discountPercentage,
       discount_amount: discountAmount,
-      total_amount: invoiceTotalAmount,
-      taxable_amount: taxableAmount,
-      cgst_amount: cgstAmount,
-      sgst_amount: sgstAmount,
-      igst_amount: igstAmount,
+      total_amount: totalAmount,
       payment_status: paymentStatus,
       paid_amount: calculatedPaid,
       pending_amount: calculatedPending,
@@ -1765,7 +1714,7 @@ export const db = {
       localStorage.setItem(`sparezy_schema_${b}_sale_items`, JSON.stringify(saleItemsList));
     }
     
-    db.logTransaction(user.id, user.name, 'Create Sale', 'Sales', `Created ${billType} invoice ${invoiceNo} for ${customerName} (₹${invoiceTotalAmount.toFixed(2)})`, null, sale);
+    db.logTransaction(user.id, user.name, 'Create Sale', 'Sales', `Created invoice ${saleId} for ${customerName} (₹${totalAmount.toFixed(2)})`, null, sale);
     lastBrandFetchTime[b] = 0;
     db.notify();
     return sale;

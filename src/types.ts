@@ -2,12 +2,11 @@
  * Sparezy MIS Dashboard - TypeScript Types and Schemas
  */
 
-export type UserRole = 'Admin' | 'Manager';
+export type UserRole = 'Owner' | 'Manager';
 export type UserStatus = 'Active' | 'Disabled';
 export type Brand = 'Hyundai' | 'Mahindra';
 export type CustomerCategory = 'Walk-in' | 'Mistri' | 'Retailer' | 'Garage';
 export type PaymentStatus = 'Paid' | 'Pending' | 'Custom Amount';
-export type BillType = 'KACHA' | 'GST';
 export type ScanSource = 'manual' | 'image' | 'pdf' | 'excel';
 export type BulkUpdateType = 'Stock Update' | 'MRP Update';
 
@@ -45,14 +44,9 @@ export interface Customer {
 
 export interface Sale {
   id: string;
-  invoice_no: string;
-  bill_type: BillType;
   customer_id: string;
   customer_name: string;
   customer_category: CustomerCategory;
-  customer_gstin?: string;
-  customer_address?: string;
-  place_of_supply?: string;
   sale_date: string;
   subtotal: number;
   discount_percentage: number;
@@ -61,10 +55,6 @@ export interface Sale {
   payment_status: PaymentStatus;
   paid_amount: number;
   pending_amount: number;
-  taxable_amount: number;
-  cgst_amount: number;
-  sgst_amount: number;
-  igst_amount: number;
   created_by: string; // User Name
   created_at: string;
 }
@@ -74,15 +64,9 @@ export interface SaleItem {
   sale_id: string;
   part_no: string;
   part_name: string;
-  hsn?: string;
   quantity: number;
   mrp: number;
   discount_percentage: number;
-  gst_rate: number;
-  taxable_amount: number;
-  cgst_amount: number;
-  sgst_amount: number;
-  igst_amount: number;
   final_amount: number;
   returned_quantity: number;
   created_at: string;

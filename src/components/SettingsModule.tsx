@@ -178,7 +178,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
           </p>
         </div>
 
-        {user.role === 'Admin' && (
+        {user.role === 'Owner' && (
           <button
             onClick={() => setIsNewUserModalOpen(true)}
             className="bg-indigo-650 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-md transition self-start cursor-pointer"
@@ -190,13 +190,13 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
       </div>
 
       {/* MANAGER VIEW RESTRICTION NOTE */}
-      {user.role !== 'Admin' && (
+      {user.role !== 'Owner' && (
         <div className="bg-amber-50 border border-amber-200 text-amber-900 p-4 rounded-xl flex items-start gap-2.5 max-w-3xl text-xs font-semibold">
           <ShieldAlert className="w-4.5 h-4.5 text-amber-650 shrink-0 mt-0.5" />
           <div>
             <p className="font-bold text-amber-950">Manager Limitations Dashboard Active</p>
             <p className="font-normal text-slate-700 mt-1">
-              As a **Manager**, your permissions are safety-capped under admin regulations. You have read access across general catalogs of active parts, customer/bill listings, and manual invoice imports under the brand schema, but you cannot delete logs, change other accounts, or see raw audit streams.
+              As a **Manager**, your permissions are safety-capped under owner regulations. You have read access across general catalogs of active parts, customer/bill listings, and manual invoice imports under the brand schema, but you cannot delete logs, change other accounts, or see raw audit streams.
             </p>
           </div>
         </div>
@@ -219,8 +219,8 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                   <th className="p-3">Email Address</th>
                   <th className="p-3">System Role</th>
                   <th className="p-3">Login status</th>
-                  {user.role === 'Admin' && <th className="p-3">Sign-In Password</th>}
-                  {user.role === 'Admin' && <th className="p-3 text-right">Actions</th>}
+                  {user.role === 'Owner' && <th className="p-3">Sign-In Password</th>}
+                  {user.role === 'Owner' && <th className="p-3 text-right">Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 text-slate-705">
@@ -237,18 +237,18 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                     </td>
                     <td className="p-3 text-slate-500 font-mono font-normal">{usr.email}</td>
                     <td className="p-3">
-                      {user.role === 'Admin' && usr.id !== user.id ? (
+                      {user.role === 'Owner' && usr.id !== user.id ? (
                         <select
                           className="bg-slate-50 p-1 rounded-lg border border-slate-200 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-indigo-650 cursor-pointer"
                           value={usr.role}
                           onChange={(e) => handleUpdateRole(usr.id, e.target.value as UserRole)}
                         >
-                          <option value="Admin">Admin</option>
+                          <option value="Owner">Owner</option>
                           <option value="Manager">Manager</option>
                         </select>
                       ) : (
                         <span className={`inline-flex items-center gap-1 font-bold ${
-                          usr.role === 'Admin' ? 'text-indigo-605' : 'text-slate-600'
+                          usr.role === 'Owner' ? 'text-indigo-605' : 'text-slate-600'
                         }`}>
                           <ShieldCheck className="w-3.5 h-3.5" />
                           {usr.role}
@@ -265,7 +265,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                       </span>
                     </td>
                     
-                    {user.role === 'Admin' && (
+                    {user.role === 'Owner' && (
                       <td className="p-3">
                         <div className="flex items-center gap-1.5 font-mono">
                           <span className="bg-slate-50 border border-slate-200 px-2 py-1 rounded-lg text-[11px] font-bold text-slate-850">
@@ -294,7 +294,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                       </td>
                     )}
                     
-                    {user.role === 'Admin' && (
+                    {user.role === 'Owner' && (
                       <td className="p-3 text-right">
                         {usr.id !== user.id ? (
                           <button
@@ -336,10 +336,10 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
             <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2">
               <div className="flex items-center gap-1 bg-white p-1 rounded border border-slate-200">
                 <span className="text-[10px] uppercase font-black text-indigo-700 shrink-0">Policy 1:</span>
-                <span className="font-mono text-[9px] text-slate-800 font-bold overflow-hidden">admin_full_control_users</span>
+                <span className="font-mono text-[9px] text-slate-800 font-bold overflow-hidden">owner_full_control_users</span>
               </div>
               <p className="text-[10px] text-slate-400 leading-snug">
-                Enables complete READ, INSERT, UPDATE, and DELETE power on users table with Admin credentials.
+                Enables complete READ, INSERT, UPDATE, and DELETE power on users table with Owner credentials.
               </p>
             </div>
 
@@ -748,7 +748,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
               <div>
                 <label className="block text-slate-500 mb-1">Select Access Permission Role</label>
                 <div className="grid grid-cols-2 gap-2">
-                  {(['Admin', 'Manager'] as UserRole[]).map((r) => (
+                  {(['Owner', 'Manager'] as UserRole[]).map((r) => (
                     <button
                       key={r}
                       type="button"

@@ -37,15 +37,15 @@ export default function TransactionsModule({ brand, user }: TransactionsModulePr
   };
 
   // Role Protection
-  if (user.role !== 'Admin') {
+  if (user.role !== 'Owner') {
     return (
       <div className="bg-red-50 border border-red-200 text-red-800 p-6 rounded-2xl max-w-2xl mx-auto space-y-3.5 mt-8 text-xs font-semibold">
         <h3 className="font-extrabold text-base flex items-center gap-2 text-red-950 leading-none">
           <ShieldAlert className="w-5.5 h-5.5" />
-          Access Denied &mdash; Admin Credentials Required
+          Access Denied &mdash; Owner Credentials Required
         </h3>
         <p className="font-normal text-slate-700 leading-relaxed">
-          The global Activity Audit Trails are highly confidential ledger registers. Under Sparezy security Row Level policies, only the supreme **Business Admin** role has access parameters to query these tables.
+          The global Activity Audit Trails are highly confidential ledger registers. Under Sparezy security Row Level policies, only the supreme **Business Owner** role has access parameters to query these tables.
         </p>
         <p className="text-[10px] text-red-650 uppercase font-black tracking-widest leading-none pt-2">
           Row Level Security: Enforced by public.transaction_logs policy

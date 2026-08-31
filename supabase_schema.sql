@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS public.users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     email TEXT UNIQUE NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('Admin', 'Manager')),
+    role TEXT NOT NULL CHECK (role IN ('Owner', 'Manager')),
     status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active', 'Disabled')),
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
 );
@@ -66,14 +66,9 @@ CREATE TABLE IF NOT EXISTS hyundai.inventory (
 -- Hyundai Customer Sales Table
 CREATE TABLE IF NOT EXISTS hyundai.sales (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    invoice_no TEXT UNIQUE,
-    bill_type TEXT NOT NULL DEFAULT 'KACHA' CHECK (bill_type IN ('KACHA','GST')),
     customer_id UUID REFERENCES public.customers(id),
     customer_name TEXT NOT NULL,
     customer_category TEXT NOT NULL,
-    customer_gstin TEXT,
-    customer_address TEXT,
-    place_of_supply TEXT,
     sale_date TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
     subtotal NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     discount_percentage NUMERIC(5,2) DEFAULT 0.00,
@@ -82,10 +77,6 @@ CREATE TABLE IF NOT EXISTS hyundai.sales (
     payment_status TEXT NOT NULL CHECK (payment_status IN ('Paid', 'Pending', 'Custom Amount')),
     paid_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     pending_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    taxable_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    cgst_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    sgst_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    igst_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     created_by TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
 );
@@ -96,15 +87,9 @@ CREATE TABLE IF NOT EXISTS hyundai.sale_items (
     sale_id UUID REFERENCES hyundai.sales(id) ON DELETE CASCADE,
     part_no TEXT NOT NULL,
     part_name TEXT NOT NULL,
-    hsn TEXT,
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     mrp NUMERIC(12,2) NOT NULL,
     discount_percentage NUMERIC(5,2) DEFAULT 0.00,
-    gst_rate NUMERIC(5,2) NOT NULL DEFAULT 0.00,
-    taxable_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    cgst_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    sgst_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    igst_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     final_amount NUMERIC(12,2) NOT NULL,
     returned_quantity INTEGER DEFAULT 0 CHECK (returned_quantity >= 0),
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
@@ -200,14 +185,9 @@ CREATE TABLE IF NOT EXISTS mahindra.inventory (
 -- Mahindra Customer Sales Table
 CREATE TABLE IF NOT EXISTS mahindra.sales (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    invoice_no TEXT UNIQUE,
-    bill_type TEXT NOT NULL DEFAULT 'KACHA' CHECK (bill_type IN ('KACHA','GST')),
     customer_id UUID REFERENCES public.customers(id),
     customer_name TEXT NOT NULL,
     customer_category TEXT NOT NULL,
-    customer_gstin TEXT,
-    customer_address TEXT,
-    place_of_supply TEXT,
     sale_date TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
     subtotal NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     discount_percentage NUMERIC(5,2) DEFAULT 0.00,
@@ -216,10 +196,6 @@ CREATE TABLE IF NOT EXISTS mahindra.sales (
     payment_status TEXT NOT NULL CHECK (payment_status IN ('Paid', 'Pending', 'Custom Amount')),
     paid_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     pending_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    taxable_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    cgst_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    sgst_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    igst_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     created_by TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
 );
@@ -230,15 +206,9 @@ CREATE TABLE IF NOT EXISTS mahindra.sale_items (
     sale_id UUID REFERENCES mahindra.sales(id) ON DELETE CASCADE,
     part_no TEXT NOT NULL,
     part_name TEXT NOT NULL,
-    hsn TEXT,
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     mrp NUMERIC(12,2) NOT NULL,
     discount_percentage NUMERIC(5,2) DEFAULT 0.00,
-    gst_rate NUMERIC(5,2) NOT NULL DEFAULT 0.00,
-    taxable_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    cgst_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    sgst_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
-    igst_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     final_amount NUMERIC(12,2) NOT NULL,
     returned_quantity INTEGER DEFAULT 0 CHECK (returned_quantity >= 0),
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
@@ -363,18 +333,18 @@ ALTER TABLE mahindra.bulk_update_history ENABLE ROW LEVEL SECURITY;
 ALTER TABLE mahindra.mrp_history ENABLE ROW LEVEL SECURITY;
 
 -- ====================================================================
--- RLS POLICIES FOR ADMIN AND MANAGER ROLES
+-- RLS POLICIES FOR OWNER AND MANAGER ROLES
 -- ====================================================================
 
 -- --------------------------------------------------------------------
 -- Security Definer Helpers to completely avoid stack overflow recursion on public.users
 -- --------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.is_admin()
+CREATE OR REPLACE FUNCTION public.is_owner()
 RETURNS BOOLEAN AS $$
 BEGIN
     RETURN EXISTS (
         SELECT 1 FROM public.users
-        WHERE email = auth.jwt()->>'email' AND role = 'Admin' AND status = 'Active'
+        WHERE email = auth.jwt()->>'email' AND role = 'Owner' AND status = 'Active'
     );
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
@@ -409,10 +379,10 @@ CREATE POLICY user_self_read_write ON public.users
     FOR ALL
     USING (email = auth.jwt()->>'email');
 
-DROP POLICY IF EXISTS admin_full_control_users ON public.users;
-CREATE POLICY admin_full_control_users ON public.users 
+DROP POLICY IF EXISTS owner_full_control_users ON public.users;
+CREATE POLICY owner_full_control_users ON public.users 
     FOR ALL 
-    USING (public.is_admin());
+    USING (public.is_owner());
 
 DROP POLICY IF EXISTS manager_select_users ON public.users;
 CREATE POLICY manager_select_users ON public.users 
@@ -420,10 +390,10 @@ CREATE POLICY manager_select_users ON public.users
     USING (public.is_active_operator());
 
 -- public.customers Policies
-DROP POLICY IF EXISTS admin_full_control_customers ON public.customers;
-CREATE POLICY admin_full_control_customers ON public.customers 
+DROP POLICY IF EXISTS owner_full_control_customers ON public.customers;
+CREATE POLICY owner_full_control_customers ON public.customers 
     FOR ALL 
-    USING (public.is_admin());
+    USING (public.is_owner());
 
 DROP POLICY IF EXISTS manager_full_control_customers ON public.customers;
 CREATE POLICY manager_full_control_customers ON public.customers 
@@ -431,10 +401,10 @@ CREATE POLICY manager_full_control_customers ON public.customers
     USING (public.is_manager());
 
 -- public.transaction_logs Policies
-DROP POLICY IF EXISTS admin_full_control_logs ON public.transaction_logs;
-CREATE POLICY admin_full_control_logs ON public.transaction_logs 
+DROP POLICY IF EXISTS owner_full_control_logs ON public.transaction_logs;
+CREATE POLICY owner_full_control_logs ON public.transaction_logs 
     FOR ALL 
-    USING (public.is_admin());
+    USING (public.is_owner());
 
 DROP POLICY IF EXISTS manager_insert_logs ON public.transaction_logs;
 CREATE POLICY manager_insert_logs ON public.transaction_logs 
@@ -446,71 +416,72 @@ CREATE POLICY manager_insert_logs ON public.transaction_logs
 -- --------------------------------------------------
 
 -- hyundai.inventory Policies
-DROP POLICY IF EXISTS hyundai_inventory_admin_policy ON hyundai.inventory;
-CREATE POLICY hyundai_inventory_admin_policy ON hyundai.inventory 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS hyundai_inventory_owner_policy ON hyundai.inventory;
+CREATE POLICY hyundai_inventory_owner_policy ON hyundai.inventory 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS hyundai_inventory_manager_policy ON hyundai.inventory;
-CREATE POLICY hyundai_inventory_manager_policy ON hyundai.inventory FOR SELECT USING (public.is_active_operator());
+CREATE POLICY hyundai_inventory_manager_policy ON hyundai.inventory 
+    FOR ALL USING (public.is_manager());
 
 -- hyundai.sales Policies
-DROP POLICY IF EXISTS hyundai_sales_admin_policy ON hyundai.sales;
-CREATE POLICY hyundai_sales_admin_policy ON hyundai.sales 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS hyundai_sales_owner_policy ON hyundai.sales;
+CREATE POLICY hyundai_sales_owner_policy ON hyundai.sales 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS hyundai_sales_manager_policy ON hyundai.sales;
-CREATE POLICY hyundai_sales_manager_select_policy ON hyundai.sales FOR SELECT USING (public.is_active_operator());
-CREATE POLICY hyundai_sales_manager_insert_policy ON hyundai.sales FOR INSERT WITH CHECK (public.is_active_operator());
+CREATE POLICY hyundai_sales_manager_policy ON hyundai.sales 
+    FOR ALL USING (public.is_manager());
 
 -- hyundai.sale_items Policies
-DROP POLICY IF EXISTS hyundai_sale_items_admin_policy ON hyundai.sale_items;
-CREATE POLICY hyundai_sale_items_admin_policy ON hyundai.sale_items 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS hyundai_sale_items_owner_policy ON hyundai.sale_items;
+CREATE POLICY hyundai_sale_items_owner_policy ON hyundai.sale_items 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS hyundai_sale_items_manager_policy ON hyundai.sale_items;
-CREATE POLICY hyundai_sale_items_manager_select_policy ON hyundai.sale_items FOR SELECT USING (public.is_active_operator());
-CREATE POLICY hyundai_sale_items_manager_insert_policy ON hyundai.sale_items FOR INSERT WITH CHECK (public.is_active_operator());
+CREATE POLICY hyundai_sale_items_manager_policy ON hyundai.sale_items 
+    FOR ALL USING (public.is_manager());
 
 -- hyundai.returns Policies
-DROP POLICY IF EXISTS hyundai_returns_admin_policy ON hyundai.returns;
-CREATE POLICY hyundai_returns_admin_policy ON hyundai.returns 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS hyundai_returns_owner_policy ON hyundai.returns;
+CREATE POLICY hyundai_returns_owner_policy ON hyundai.returns 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS hyundai_returns_manager_policy ON hyundai.returns;
-CREATE POLICY hyundai_returns_manager_select_policy ON hyundai.returns FOR SELECT USING (public.is_active_operator());
-CREATE POLICY hyundai_returns_manager_insert_policy ON hyundai.returns FOR INSERT WITH CHECK (public.is_active_operator());
+CREATE POLICY hyundai_returns_manager_policy ON hyundai.returns 
+    FOR ALL USING (public.is_manager());
 
 -- hyundai.purchases Policies
-DROP POLICY IF EXISTS hyundai_purchases_admin_policy ON hyundai.purchases;
-CREATE POLICY hyundai_purchases_admin_policy ON hyundai.purchases 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS hyundai_purchases_owner_policy ON hyundai.purchases;
+CREATE POLICY hyundai_purchases_owner_policy ON hyundai.purchases 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS hyundai_purchases_manager_policy ON hyundai.purchases;
-CREATE POLICY hyundai_purchases_manager_select_policy ON hyundai.purchases FOR SELECT USING (public.is_active_operator());
-CREATE POLICY hyundai_purchases_manager_insert_policy ON hyundai.purchases FOR INSERT WITH CHECK (public.is_active_operator());
+CREATE POLICY hyundai_purchases_manager_policy ON hyundai.purchases 
+    FOR ALL USING (public.is_manager());
 
 -- hyundai.purchase_items Policies
-DROP POLICY IF EXISTS hyundai_purchase_items_admin_policy ON hyundai.purchase_items;
-CREATE POLICY hyundai_purchase_items_admin_policy ON hyundai.purchase_items 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS hyundai_purchase_items_owner_policy ON hyundai.purchase_items;
+CREATE POLICY hyundai_purchase_items_owner_policy ON hyundai.purchase_items 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS hyundai_purchase_items_manager_policy ON hyundai.purchase_items;
-CREATE POLICY hyundai_purchase_items_manager_select_policy ON hyundai.purchase_items FOR SELECT USING (public.is_active_operator());
-CREATE POLICY hyundai_purchase_items_manager_insert_policy ON hyundai.purchase_items FOR INSERT WITH CHECK (public.is_active_operator());
+CREATE POLICY hyundai_purchase_items_manager_policy ON hyundai.purchase_items 
+    FOR ALL USING (public.is_manager());
 
 -- hyundai.bulk_update_history Policies
-DROP POLICY IF EXISTS hyundai_bulk_admin_policy ON hyundai.bulk_update_history;
-CREATE POLICY hyundai_bulk_admin_policy ON hyundai.bulk_update_history 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS hyundai_bulk_owner_policy ON hyundai.bulk_update_history;
+CREATE POLICY hyundai_bulk_owner_policy ON hyundai.bulk_update_history 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS hyundai_bulk_manager_policy ON hyundai.bulk_update_history;
 CREATE POLICY hyundai_bulk_manager_policy ON hyundai.bulk_update_history 
     FOR ALL USING (public.is_manager());
 
 -- hyundai.mrp_history Policies
-DROP POLICY IF EXISTS hyundai_mrp_admin_policy ON hyundai.mrp_history;
-CREATE POLICY hyundai_mrp_admin_policy ON hyundai.mrp_history 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS hyundai_mrp_owner_policy ON hyundai.mrp_history;
+CREATE POLICY hyundai_mrp_owner_policy ON hyundai.mrp_history 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS hyundai_mrp_manager_policy ON hyundai.mrp_history;
 CREATE POLICY hyundai_mrp_manager_policy ON hyundai.mrp_history 
@@ -522,71 +493,72 @@ CREATE POLICY hyundai_mrp_manager_policy ON hyundai.mrp_history
 -- --------------------------------------------------
 
 -- mahindra.inventory Policies
-DROP POLICY IF EXISTS mahindra_inventory_admin_policy ON mahindra.inventory;
-CREATE POLICY mahindra_inventory_admin_policy ON mahindra.inventory 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS mahindra_inventory_owner_policy ON mahindra.inventory;
+CREATE POLICY mahindra_inventory_owner_policy ON mahindra.inventory 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS mahindra_inventory_manager_policy ON mahindra.inventory;
-CREATE POLICY mahindra_inventory_manager_policy ON mahindra.inventory FOR SELECT USING (public.is_active_operator());
+CREATE POLICY mahindra_inventory_manager_policy ON mahindra.inventory 
+    FOR ALL USING (public.is_manager());
 
 -- mahindra.sales Policies
-DROP POLICY IF EXISTS mahindra_sales_admin_policy ON mahindra.sales;
-CREATE POLICY mahindra_sales_admin_policy ON mahindra.sales 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS mahindra_sales_owner_policy ON mahindra.sales;
+CREATE POLICY mahindra_sales_owner_policy ON mahindra.sales 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS mahindra_sales_manager_policy ON mahindra.sales;
-CREATE POLICY mahindra_sales_manager_select_policy ON mahindra.sales FOR SELECT USING (public.is_active_operator());
-CREATE POLICY mahindra_sales_manager_insert_policy ON mahindra.sales FOR INSERT WITH CHECK (public.is_active_operator());
+CREATE POLICY mahindra_sales_manager_policy ON mahindra.sales 
+    FOR ALL USING (public.is_manager());
 
 -- mahindra.sale_items Policies
-DROP POLICY IF EXISTS mahindra_sale_items_admin_policy ON mahindra.sale_items;
-CREATE POLICY mahindra_sale_items_admin_policy ON mahindra.sale_items 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS mahindra_sale_items_owner_policy ON mahindra.sale_items;
+CREATE POLICY mahindra_sale_items_owner_policy ON mahindra.sale_items 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS mahindra_sale_items_manager_policy ON mahindra.sale_items;
-CREATE POLICY mahindra_sale_items_manager_select_policy ON mahindra.sale_items FOR SELECT USING (public.is_active_operator());
-CREATE POLICY mahindra_sale_items_manager_insert_policy ON mahindra.sale_items FOR INSERT WITH CHECK (public.is_active_operator());
+CREATE POLICY mahindra_sale_items_manager_policy ON mahindra.sale_items 
+    FOR ALL USING (public.is_manager());
 
 -- mahindra.returns Policies
-DROP POLICY IF EXISTS mahindra_returns_admin_policy ON mahindra.returns;
-CREATE POLICY mahindra_returns_admin_policy ON mahindra.returns 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS mahindra_returns_owner_policy ON mahindra.returns;
+CREATE POLICY mahindra_returns_owner_policy ON mahindra.returns 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS mahindra_returns_manager_policy ON mahindra.returns;
-CREATE POLICY mahindra_returns_manager_select_policy ON mahindra.returns FOR SELECT USING (public.is_active_operator());
-CREATE POLICY mahindra_returns_manager_insert_policy ON mahindra.returns FOR INSERT WITH CHECK (public.is_active_operator());
+CREATE POLICY mahindra_returns_manager_policy ON mahindra.returns 
+    FOR ALL USING (public.is_manager());
 
 -- mahindra.purchases Policies
-DROP POLICY IF EXISTS mahindra_purchases_admin_policy ON mahindra.purchases;
-CREATE POLICY mahindra_purchases_admin_policy ON mahindra.purchases 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS mahindra_purchases_owner_policy ON mahindra.purchases;
+CREATE POLICY mahindra_purchases_owner_policy ON mahindra.purchases 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS mahindra_purchases_manager_policy ON mahindra.purchases;
-CREATE POLICY mahindra_purchases_manager_select_policy ON mahindra.purchases FOR SELECT USING (public.is_active_operator());
-CREATE POLICY mahindra_purchases_manager_insert_policy ON mahindra.purchases FOR INSERT WITH CHECK (public.is_active_operator());
+CREATE POLICY mahindra_purchases_manager_policy ON mahindra.purchases 
+    FOR ALL USING (public.is_manager());
 
 -- mahindra.purchase_items Policies
-DROP POLICY IF EXISTS mahindra_purchase_items_admin_policy ON mahindra.purchase_items;
-CREATE POLICY mahindra_purchase_items_admin_policy ON mahindra.purchase_items 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS mahindra_purchase_items_owner_policy ON mahindra.purchase_items;
+CREATE POLICY mahindra_purchase_items_owner_policy ON mahindra.purchase_items 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS mahindra_purchase_items_manager_policy ON mahindra.purchase_items;
-CREATE POLICY mahindra_purchase_items_manager_select_policy ON mahindra.purchase_items FOR SELECT USING (public.is_active_operator());
-CREATE POLICY mahindra_purchase_items_manager_insert_policy ON mahindra.purchase_items FOR INSERT WITH CHECK (public.is_active_operator());
+CREATE POLICY mahindra_purchase_items_manager_policy ON mahindra.purchase_items 
+    FOR ALL USING (public.is_manager());
 
 -- mahindra.bulk_update_history Policies
-DROP POLICY IF EXISTS mahindra_bulk_admin_policy ON mahindra.bulk_update_history;
-CREATE POLICY mahindra_bulk_admin_policy ON mahindra.bulk_update_history 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS mahindra_bulk_owner_policy ON mahindra.bulk_update_history;
+CREATE POLICY mahindra_bulk_owner_policy ON mahindra.bulk_update_history 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS mahindra_bulk_manager_policy ON mahindra.bulk_update_history;
 CREATE POLICY mahindra_bulk_manager_policy ON mahindra.bulk_update_history 
     FOR ALL USING (public.is_manager());
 
 -- mahindra.mrp_history Policies
-DROP POLICY IF EXISTS mahindra_mrp_admin_policy ON mahindra.mrp_history;
-CREATE POLICY mahindra_mrp_admin_policy ON mahindra.mrp_history 
-    FOR ALL USING (public.is_admin());
+DROP POLICY IF EXISTS mahindra_mrp_owner_policy ON mahindra.mrp_history;
+CREATE POLICY mahindra_mrp_owner_policy ON mahindra.mrp_history 
+    FOR ALL USING (public.is_owner());
 
 DROP POLICY IF EXISTS mahindra_mrp_manager_policy ON mahindra.mrp_history;
 CREATE POLICY mahindra_mrp_manager_policy ON mahindra.mrp_history 
