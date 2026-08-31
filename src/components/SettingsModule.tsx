@@ -14,6 +14,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
   // Password edit and view states
   const [editingUserForPassword, setEditingUserForPassword] = useState<User | null>(null);
   const [newPasswordValue, setNewPasswordValue] = useState('');
+  const [passwordError, setPasswordError] = useState<string | null>(null);
   const [visiblePasswords, setVisiblePasswords] = useState<Record<string, boolean>>({});
   
   // Create state
@@ -129,12 +130,13 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
   const handleUpdatePasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingUserForPassword) return;
+    setPasswordError(null);
     if (!newPasswordValue.trim()) {
-      alert("Password cannot be blank.");
+      setPasswordError("Password cannot be blank.");
       return;
     }
     if (newPasswordValue.length < 6) {
-      alert("Password must be at least 6 characters.");
+      setPasswordError("Password must be at least 6 characters.");
       return;
     }
     try {
@@ -144,7 +146,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
       await refreshComponentData();
       triggerToast(`Successfully updated password for ${editingUserForPassword.name}.`);
     } catch (err: any) {
-      alert(err.message || "Failed to update password.");
+      setPasswordError(err.message || "Failed to update password.");
     }
   };
 
@@ -284,6 +286,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                             onClick={() => {
                               setEditingUserForPassword(usr);
                               setNewPasswordValue(usr.password || '');
+                              setPasswordError(null);
                             }}
                             className="p-1 hover:bg-indigo-50 rounded text-indigo-600 cursor-pointer flex items-center justify-center"
                             title="Change Password"
@@ -811,6 +814,12 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                 <p className="text-slate-900 font-bold mb-3">{editingUserForPassword.name} ({editingUserForPassword.role})</p>
                 <p className="text-[10px] text-slate-400 font-normal">System ID: {editingUserForPassword.id}</p>
               </div>
+
+              {passwordError && (
+                <div className="p-3 bg-red-50 border border-red-250 text-red-700 rounded-xl text-[11px] font-semibold leading-relaxed">
+                  {passwordError}
+                </div>
+              )}
 
               <div>
                 <label className="block text-slate-500 mb-1">Enter New Password</label>

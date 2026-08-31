@@ -1050,21 +1050,25 @@ export const db = {
 
       // If Supabase is configured and the user matches the active session (i.e., changing their own password via auth)
       if (isSupabaseConfigured && supabase) {
-        const sessionRes = await supabase.auth.getSession();
-        const session = sessionRes.data?.session;
-        if (session && session.user && session.user.id === id) {
-          try {
+        try {
+          const sessionRes = await supabase.auth.getSession();
+          const session = sessionRes.data?.session;
+          if (session && session.user && session.user.id === id) {
             const { error } = await supabase.auth.updateUser({ password: newPassword.trim() });
             if (error) {
               console.warn("Failed to update Supabase Auth password:", error.message);
+              throw new Error("Supabase Auth password update failed: " + error.message);
             }
-          } catch (err) {
-            console.warn("Supabase Auth password update exception:", err);
+          } else {
+            console.log("Client-side user is changing another operator's credentials. Password saved locally in local-sync ledger directory.");
           }
+        } catch (err: any) {
+          console.warn("Supabase Auth password update failed/skipped:", err.message || err);
         }
-      } else {
-        localStorage.setItem(KEY_USERS, JSON.stringify(cache.users));
       }
+
+      // Always save updated cache list locally so that state is persisted 
+      localStorage.setItem(KEY_USERS, JSON.stringify(cache.users));
 
       db.logTransaction(
         currentEditor.id, 
