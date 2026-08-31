@@ -26,8 +26,8 @@ Sparezy isolates operational brand data into **separate schemas** in order to av
 - **AI Procurement Scanner**: Scans PDF/Image invoices, matches against active spares, displays "Matched" vs "New" parts, and flags if the dealer discount deviates from **12%**.
 - **Undo Stack Log**: Reverts bulk stock or price adjustments with a single click.
 - **Date-Filtered Customer Ledger & Dealer Records**: Downloads exact CSV balances that open natively in Microsoft Excel and Google Sheets.
-- **Activity Audit Trail**: Expansion viewer showing detailed `old_data` vs `new_data` JSON diffs (Owner only).
-- **Settings & User Credentials Block**: Creates Manager and Owner accounts and toggles login permissions.
+- **Activity Audit Trail**: Expansion viewer showing detailed `old_data` vs `new_data` JSON diffs (Admin only).
+- **Settings & User Credentials Block**: Creates Manager and Admin accounts and toggles login permissions.
 
 ---
 

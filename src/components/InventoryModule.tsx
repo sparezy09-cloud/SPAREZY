@@ -215,8 +215,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   };
 
   const handleBulkArchive = async (archive: boolean) => {
-    if (user.role !== 'Owner') {
-      alert("Permission denied. Only Owner can modify parts.");
+    if (user.role !== 'Admin') {
+      alert("Permission denied. Only Admin can modify parts.");
       return;
     }
     setBulkError(null);
@@ -260,8 +260,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
 
   // Edit / Add Actions
   const handleOpenEdit = (item: InventoryItem) => {
-    if (user.role !== 'Owner') {
-      alert("Permission denied. Only Owner can edit parts.");
+    if (user.role !== 'Admin') {
+      alert("Permission denied. Only Admin can edit parts.");
       return;
     }
     setEditingItem(item);
@@ -283,8 +283,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
 
   const handleSaveEdit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (user.role !== 'Owner') {
-      alert("Permission denied. Only Owner can edit parts.");
+    if (user.role !== 'Admin') {
+      alert("Permission denied. Only Admin can edit parts.");
       return;
     }
     if (!formPartNo || !formPartName) {
@@ -353,8 +353,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   };
 
   const handleInlineSave = (item: InventoryItem) => {
-    if (user.role !== 'Owner') {
-      alert("Permission denied. Only Owner can edit parts.");
+    if (user.role !== 'Admin') {
+      alert("Permission denied. Only Admin can edit parts.");
       return;
     }
     const edit = inlineEdits[item.id];
@@ -385,8 +385,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   };
 
   const handleInlineDeleteConfirmed = (item: InventoryItem) => {
-    if (user.role !== 'Owner') {
-      alert("Permission denied. Only Owner can delete parts.");
+    if (user.role !== 'Admin') {
+      alert("Permission denied. Only Admin can delete parts.");
       return;
     }
     db.deleteInventoryPart(brand, item.id, user);
@@ -489,7 +489,7 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
         </div>
 
         <div className="flex gap-2 self-start flex-wrap">
-          {user.role === 'Owner' && (
+          {user.role === 'Admin' && (
             <button
               onClick={() => {
                 setIsInlineEditMode(prev => !prev);
@@ -636,7 +636,7 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
                   </>
                 )}
                 
-                {user.role === 'Owner' && (
+                {user.role === 'Admin' && (
                   <>
                     {selectionMode === 'all_filtered' ? (
                       <button
@@ -840,7 +840,7 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
                         </button>
                       </div>
                     ) : (
-                      user.role === 'Owner' ? (
+                      user.role === 'Admin' ? (
                         <button
                           onClick={() => handleOpenEdit(item)}
                           className="p-1 px-2 hover:bg-indigo-50 rounded text-indigo-600 font-bold hover:underline inline-flex items-center gap-1"

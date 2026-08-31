@@ -347,9 +347,9 @@ export default function App() {
     { name: 'Sales', icon: ShoppingBag },
     { name: 'Returns', icon: RotateCcw },
     { name: 'Purchases', icon: FileText },
-    { name: 'Bulk Updates', icon: FileSpreadsheet, ownerOnly: true },
+    { name: 'Bulk Updates', icon: FileSpreadsheet, adminOnly: true },
     { name: 'Customer & Dealer Ledgers', icon: Users },
-    { name: 'Transaction Records', icon: Terminal, ownerOnly: true },
+    { name: 'Transaction Records', icon: Terminal, adminOnly: true },
     { name: 'Settings / User Management', icon: Shield },
   ];
 
@@ -523,7 +523,7 @@ export default function App() {
         {/* Navigation list in slate-900 sidebar */}
         <nav className="flex-1 px-4 space-y-1 text-sm overflow-y-auto">
           {sidebarItems.map((item) => {
-            if (item.ownerOnly && activeUser.role !== 'Owner') return null;
+            if (item.adminOnly && activeUser.role !== 'Admin') return null;
             const Icon = item.icon;
             const isSelected = activeModule === item.name;
 
@@ -723,7 +723,7 @@ export default function App() {
             {/* Links list */}
             <nav className="flex-1 px-4 py-4 space-y-1 font-bold text-xs overflow-y-auto">
               {sidebarItems.map((item) => {
-                if (item.ownerOnly && activeUser.role !== 'Owner') return null;
+                if (item.adminOnly && activeUser.role !== 'Admin') return null;
                 const Icon = item.icon;
                 const isSelected = activeModule === item.name;
 

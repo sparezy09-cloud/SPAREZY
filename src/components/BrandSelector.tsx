@@ -16,7 +16,7 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
-  const [signUpRole, setSignUpRole] = useState<'Owner' | 'Manager'>('Manager');
+  const [signUpRole, setSignUpRole] = useState<'Admin' | 'Manager'>('Manager');
   
   const [loading, setLoading] = useState(false);
   const [errorLocal, setErrorLocal] = useState<string | null>(null);
@@ -76,14 +76,14 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
 
         if (!profile) {
           await supabase.auth.signOut();
-          throw new Error("User profile not found. Contact owner.");
+          throw new Error("User profile not found. Contact admin.");
         }
 
         const sessionUser: User = {
           id: profile.id,
           name: profile.name,
           email: profile.email,
-          role: profile.role as 'Owner' | 'Manager',
+          role: profile.role as 'Admin' | 'Manager',
           status: profile.status as 'Active' | 'Disabled',
           created_at: profile.created_at
         };
@@ -353,14 +353,14 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
                     </button>
                     <button
                       type="button"
-                      onClick={() => setSignUpRole('Owner')}
+                      onClick={() => setSignUpRole('Admin')}
                       className={`py-2 px-3 border text-xs font-bold rounded-xl transition cursor-pointer text-center ${
-                        signUpRole === 'Owner'
+                        signUpRole === 'Admin'
                           ? 'border-indigo-505 border-indigo-500 text-indigo-400 bg-indigo-500/10'
                           : 'border-slate-800 text-slate-400 bg-slate-950 hover:border-slate-700'
                       }`}
                     >
-                      General Owner
+                      General Admin
                     </button>
                   </div>
                 </div>

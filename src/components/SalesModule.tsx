@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Brand, User, CustomerCategory, PaymentStatus, InventoryItem, Customer, Sale, SaleItem } from '../types';
+import { Brand, User, CustomerCategory, PaymentStatus, InventoryItem, Customer, Sale, SaleItem, BillType } from '../types';
 import { db } from '../dbStore';
 import { 
   ShoppingBag, Search, PlusCircle, Check, Trash2, Printer, 
@@ -19,6 +19,8 @@ interface SelectedCheckoutPart {
   available_qty: number;
   qty_to_sell: number;
   discount_percentage: number;
+  gst_rate: number;
+  hsn: string;
 }
 
 export default function SalesModule({ brand, user }: SalesModuleProps) {
@@ -37,6 +39,11 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const [globalDiscount, setGlobalDiscount] = useState<number>(0);
   const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('Paid');
   const [customPaidAmount, setCustomPaidAmount] = useState<number>(0);
+  const [billType, setBillType] = useState<BillType>('KACHA');
+  const [customerGstin, setCustomerGstin] = useState('');
+  const [customerAddress, setCustomerAddress] = useState('');
+  const [placeOfSupply, setPlaceOfSupply] = useState('');
+  const [isInterState, setIsInterState] = useState(false);
 
   // History states
   const [historySearchInput, setHistorySearchInput] = useState('');
@@ -229,7 +236,9 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       mrp: inv.mrp,
       available_qty: inv.quantity,
       qty_to_sell: 1,
-      discount_percentage: 0
+      discount_percentage: 0,
+      gst_rate: 18,
+      hsn: inv.hsn || ''
     };
 
     setCheckoutParts([...checkoutParts, newItem]);
@@ -283,6 +292,20 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     return Math.max(0, checkoutSubtotal - dis);
   }, [checkoutSubtotal, globalDiscount]);
 
+  const checkoutTaxable = checkoutTotal;
+  const checkoutGst = useMemo(() => {
+    if (billType !== 'GST') return 0;
+    return checkoutParts.reduce((acc, p) => {
+      const line = p.mrp * p.qty_to_sell;
+      const lineDiscount = line * (p.discount_percentage / 100);
+      return acc + (line - lineDiscount) * (p.gst_rate / 100);
+    }, 0);
+  }, [checkoutParts, billType]);
+  const checkoutCgst = billType === 'GST' && !isInterState ? checkoutGst / 2 : 0;
+  const checkoutSgst = billType === 'GST' && !isInterState ? checkoutGst / 2 : 0;
+  const checkoutIgst = billType === 'GST' && isInterState ? checkoutGst : 0;
+  const checkoutGrandTotal = checkoutTotal + checkoutGst;
+
   const actualCustomPaid = paymentStatus === 'Paid' 
     ? checkoutTotal 
     : paymentStatus === 'Pending' 
@@ -321,7 +344,8 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
         part_no: p.part_no,
         quantity: p.qty_to_sell,
         discount_percentage: p.discount_percentage,
-        mrp: p.mrp
+        mrp: p.mrp,
+        gst_rate: p.gst_rate
       }));
 
       const newSale = await db.createSale(
@@ -333,7 +357,12 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
         globalDiscount,
         paymentStatus,
         paymentStatus === 'Custom Amount' ? customPaidAmount : 0,
-        user
+        user,
+        billType,
+        customerGstin,
+        customerAddress,
+        placeOfSupply,
+        isInterState
       );
 
       // Clean checkout page
@@ -343,6 +372,11 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       setPhone('');
       setGlobalDiscount(0);
       setCustomPaidAmount(0);
+      setBillType('KACHA');
+      setCustomerGstin('');
+      setCustomerAddress('');
+      setPlaceOfSupply('');
+      setIsInterState(false);
 
       refreshComponentData();
       triggerToast(`Saved checkout successfully! Invoice: ${newSale.id}`);
@@ -486,6 +520,27 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
           {/* Checkout Steps Form */}
           <div className="lg:col-span-2 space-y-6">
             
+            {/* Step 0: Bill Type */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4">
+              <h3 className="text-sm font-bold text-slate-900">Choose Billing Type</h3>
+              <div className="grid grid-cols-2 gap-3">
+                <button type="button" onClick={() => setBillType('KACHA')} className={`p-4 rounded-xl border text-left ${billType === 'KACHA' ? 'border-amber-500 bg-amber-50 text-amber-900' : 'border-slate-200'}`}>
+                  <p className="font-extrabold">Kacha Bill</p><p className="text-[10px] mt-1 opacity-70">Non-GST sales receipt</p>
+                </button>
+                <button type="button" onClick={() => setBillType('GST')} className={`p-4 rounded-xl border text-left ${billType === 'GST' ? 'border-indigo-600 bg-indigo-50 text-indigo-900' : 'border-slate-200'}`}>
+                  <p className="font-extrabold">Pakka / GST Invoice</p><p className="text-[10px] mt-1 opacity-70">GST tax invoice with HSN & tax</p>
+                </button>
+              </div>
+              {billType === 'GST' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                  <input className="p-2.5 border border-slate-200 rounded-xl text-xs" placeholder="Customer GSTIN" value={customerGstin} onChange={e => setCustomerGstin(e.target.value.toUpperCase())} />
+                  <input className="p-2.5 border border-slate-200 rounded-xl text-xs" placeholder="Place of Supply" value={placeOfSupply} onChange={e => setPlaceOfSupply(e.target.value)} />
+                  <input className="p-2.5 border border-slate-200 rounded-xl text-xs sm:col-span-2" placeholder="Customer billing address" value={customerAddress} onChange={e => setCustomerAddress(e.target.value)} />
+                  <label className="sm:col-span-2 flex items-center gap-2 text-xs font-bold text-slate-600"><input type="checkbox" checked={isInterState} onChange={e => setIsInterState(e.target.checked)} /> Inter-state sale (IGST)</label>
+                </div>
+              )}
+            </div>
+
             {/* Step 1: Customer category & Registration */}
             <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4">
               <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
@@ -622,6 +677,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                         <th className="p-3 text-center">MRP (INR)</th>
                         <th className="p-3 text-center">Checkout Qty</th>
                         <th className="p-3 text-center">Dis %</th>
+                        {billType === 'GST' && <th className="p-3 text-center">GST %</th>}
                         <th className="p-3 text-right">Final Amount</th>
                         <TH_PRINT />
                       </tr>
@@ -668,15 +724,9 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                             </td>
 
                             <td className="p-3 text-center">
-                              <input
-                                type="number"
-                                min="0"
-                                max="100"
-                                className="w-12 p-1 border border-slate-200 rounded text-center text-xs"
-                                value={item.discount_percentage || ''}
-                                onChange={(e) => handleUpdateCheckoutDiscount(item.part_no, Number(e.target.value))}
-                              />
+                              <input type="number" min="0" max="100" className="w-12 p-1 border border-slate-200 rounded text-center text-xs" value={item.discount_percentage || ''} onChange={(e) => handleUpdateCheckoutDiscount(item.part_no, Number(e.target.value))} />
                             </td>
+                            {billType === 'GST' && <td className="p-3 text-center"><input type="number" min="0" max="40" className="w-12 p-1 border border-slate-200 rounded text-center text-xs" value={item.gst_rate} onChange={(e) => setCheckoutParts(parts => parts.map(p => p.part_no === item.part_no ? {...p, gst_rate: Math.max(0, Math.min(40, Number(e.target.value)))} : p))} /></td>}
 
                             <td className="p-3 text-right font-bold text-slate-900">₹{finalLineVal.toFixed(2)}</td>
                             
@@ -735,9 +785,19 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                   />
                 </div>
 
+                {billType === 'GST' && (
+                  <div className="space-y-1 text-[11px] border-t border-slate-800 pt-3">
+                    <div className="flex justify-between"><span className="text-slate-400">Taxable value</span><span>₹{checkoutTaxable.toFixed(2)}</span></div>
+                    {!isInterState ? <>
+                      <div className="flex justify-between"><span className="text-slate-400">CGST</span><span>₹{checkoutCgst.toFixed(2)}</span></div>
+                      <div className="flex justify-between"><span className="text-slate-400">SGST</span><span>₹{checkoutSgst.toFixed(2)}</span></div>
+                    </> : <div className="flex justify-between"><span className="text-slate-400">IGST</span><span>₹{checkoutIgst.toFixed(2)}</span></div>}
+                  </div>
+                )}
+
                 <div className="border-t border-slate-800 pt-3 flex justify-between items-baseline">
                   <span className="text-slate-400 font-extrabold text-sm">Final Payable Invoice Total</span>
-                  <span className="text-xl font-bold font-mono text-emerald-400">₹{checkoutTotal.toLocaleString('en-IN')}</span>
+                  <span className="text-xl font-bold font-mono text-emerald-400">₹{checkoutGrandTotal.toLocaleString('en-IN')}</span>
                 </div>
               </div>
 
@@ -768,14 +828,14 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                       type="number"
                       min="0.5"
                       step="0.5"
-                      max={checkoutTotal}
+                      max={checkoutGrandTotal}
                       className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-900 text-white font-mono font-bold"
                       value={customPaidAmount || ''}
                       onChange={(e) => setCustomPaidAmount(Number(e.target.value))}
                     />
                     <div className="flex justify-between text-[11px] font-normal text-slate-400 pt-1">
                       <span>Calculated Pending:</span>
-                      <span className="font-mono text-red-400 font-semibold">₹{(checkoutTotal - customPaidAmount).toFixed(2)}</span>
+                      <span className="font-mono text-red-400 font-semibold">₹{(checkoutGrandTotal - customPaidAmount).toFixed(2)}</span>
                     </div>
                   </div>
                 )}
@@ -863,7 +923,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
               <table className="min-w-full divide-y divide-slate-200 text-left text-xs font-semibold text-slate-600">
                 <thead className="bg-slate-50 text-slate-500 uppercase text-[10px] tracking-wider">
                   <tr>
-                    <th className="p-4">Invoice ID</th>
+                    <th className="p-4">Invoice</th>
                     <th className="p-4">Sale Date</th>
                     <th className="p-4">Customer</th>
                     <th className="p-4">Category</th>
@@ -878,7 +938,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                   {paginatedSalesHistory.map((sale) => (
                     <tr key={sale.id} className="hover:bg-slate-50/50">
                       <td className="p-4 font-mono font-bold text-slate-900 animate-fade-in" title={sale.id}>
-                        {sale.id.length > 10 ? `#${sale.id.substring(0, 8).toUpperCase()}` : sale.id}
+                        {sale.id.length > 10 ? `#${sale.invoice_no || sale.id.substring(0, 8).toUpperCase()}` : sale.id}
                       </td>
                       <td className="p-4 font-normal text-slate-450">{new Date(sale.sale_date).toLocaleDateString()}</td>
                       <td className="p-4 font-medium text-slate-800">{sale.customer_name}</td>
@@ -1003,6 +1063,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                   <p title={selectedInvoiceForSlip.id}>Invoice ID : {selectedInvoiceForSlip.id.length > 10 ? selectedInvoiceForSlip.id.substring(0, 8).toUpperCase() : selectedInvoiceForSlip.id}</p>
                   <p>Date       : {new Date(selectedInvoiceForSlip.sale_date).toLocaleString()}</p>
                   <p>Customer   : {selectedInvoiceForSlip.customer_name} ({selectedInvoiceForSlip.customer_category})</p>
+                  {selectedInvoiceForSlip.bill_type === 'GST' && <><p>GSTIN      : {selectedInvoiceForSlip.customer_gstin || '—'}</p><p>Place      : {selectedInvoiceForSlip.place_of_supply || '—'}</p></>}
                 </div>
               </div>
 
@@ -1049,6 +1110,14 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                     <span>Invoice Discount ({selectedInvoiceForSlip.discount_percentage}%):</span>
                     <span>-₹{selectedInvoiceForSlip.discount_amount.toFixed(2)}</span>
                   </div>
+                )}
+                {selectedInvoiceForSlip.bill_type === 'GST' && (
+                  <>
+                    <div className="flex justify-between"><span className="text-slate-500">Taxable Value:</span><span>₹{selectedInvoiceForSlip.taxable_amount.toFixed(2)}</span></div>
+                    {selectedInvoiceForSlip.cgst_amount > 0 && <div className="flex justify-between"><span className="text-slate-500">CGST:</span><span>₹{selectedInvoiceForSlip.cgst_amount.toFixed(2)}</span></div>}
+                    {selectedInvoiceForSlip.sgst_amount > 0 && <div className="flex justify-between"><span className="text-slate-500">SGST:</span><span>₹{selectedInvoiceForSlip.sgst_amount.toFixed(2)}</span></div>}
+                    {selectedInvoiceForSlip.igst_amount > 0 && <div className="flex justify-between"><span className="text-slate-500">IGST:</span><span>₹{selectedInvoiceForSlip.igst_amount.toFixed(2)}</span></div>}
+                  </>
                 )}
                 <div className="flex justify-between text-[#000] text-sm pt-2 border-t border-slate-300">
                   <span>Total Amount Paid:</span>
