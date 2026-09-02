@@ -736,3 +736,92 @@ BEGIN
 END;
 $$;
 
+
+-- ====================================================================
+-- 6. DYNAMIC DASHBOARD METRICS AGGREGATOR FUNCTION
+-- ====================================================================
+CREATE OR REPLACE FUNCTION public.get_dashboard_metrics(schema_name text)
+RETURNS json AS $$
+DECLARE
+  total_sku bigint;
+  total_qty bigint;
+  total_valuation numeric;
+  total_sales_revenue numeric;
+  total_paid_revenue numeric;
+  total_pending_revenue numeric;
+  category_sales json;
+  recent_sales json;
+  total_returns_valuation numeric;
+  returns_count bigint;
+  total_purchases_valuation numeric;
+  purchases_count bigint;
+  low_stock_items json;
+  sanitized_schema text;
+BEGIN
+  -- Sanitize the schema name to prevent SQL injection
+  sanitized_schema := LOWER(TRIM(schema_name));
+  IF sanitized_schema NOT IN ('hyundai', 'mahindra') THEN
+    RAISE EXCEPTION 'Invalid schema name: %', schema_name;
+  END IF;
+
+  -- Execute dynamic queries
+  EXECUTE format('SELECT COUNT(*) FROM %I.inventory WHERE is_active = true', sanitized_schema) INTO total_sku;
+
+  EXECUTE format('SELECT COALESCE(SUM(quantity), 0), COALESCE(SUM(quantity * mrp), 0) FROM %I.inventory WHERE is_active = true', sanitized_schema)
+  INTO total_qty, total_valuation;
+
+  EXECUTE format('SELECT COALESCE(SUM(total_amount), 0), COALESCE(SUM(paid_amount), 0), COALESCE(SUM(pending_amount), 0) FROM %I.sales', sanitized_schema)
+  INTO total_sales_revenue, total_paid_revenue, total_pending_revenue;
+
+  EXECUTE format('
+    SELECT json_object_agg(customer_category, total_cat)
+    FROM (
+      SELECT COALESCE(customer_category, ''Other'') as customer_category, SUM(total_amount) as total_cat
+      FROM %I.sales
+      GROUP BY customer_category
+    ) t', sanitized_schema) INTO category_sales;
+
+  EXECUTE format('
+    SELECT COALESCE(json_agg(r), ''[]''::json)
+    FROM (
+      SELECT id, customer_name, customer_category, sale_date, total_amount, payment_status
+      FROM %I.sales
+      ORDER BY sale_date DESC
+      LIMIT 5
+    ) r', sanitized_schema) INTO recent_sales;
+
+  EXECUTE format('SELECT COALESCE(SUM(refund_amount), 0), COUNT(*) FROM %I.returns', sanitized_schema)
+  INTO total_returns_valuation, returns_count;
+
+  EXECUTE format('SELECT COALESCE(SUM(total_after_discount), 0), COUNT(*) FROM %I.purchases', sanitized_schema)
+  INTO total_purchases_valuation, purchases_count;
+
+  EXECUTE format('
+    SELECT COALESCE(json_agg(l), ''[]''::json)
+    FROM (
+      SELECT id, part_no, part_name, quantity, hsn, mrp
+      FROM %I.inventory
+      WHERE is_active = true AND quantity < 15
+      ORDER BY quantity ASC
+      LIMIT 6
+    ) l', sanitized_schema) INTO low_stock_items;
+
+  RETURN json_build_object(
+    'totalSku', total_sku,
+    'totalQty', total_qty,
+    'totalValuation', total_valuation,
+    'totalSalesRevenue', total_sales_revenue,
+    'totalPaidRevenue', total_paid_revenue,
+    'totalPendingRevenue', total_pending_revenue,
+    'categorySales', COALESCE(category_sales, '{}'::json),
+    'recentSales', recent_sales,
+    'totalReturnsValuation', total_returns_valuation,
+    'returnsCount', returns_count,
+    'totalPurchasesValuation', total_purchases_valuation,
+    'purchasesCount', purchases_count,
+    'lowStockItems', low_stock_items
+  );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+

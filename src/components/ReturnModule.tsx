@@ -15,14 +15,24 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
   const [toastMessageLocal, setToastMessageLocal] = useState<string | null>(null);
 
   // Load state references
-  const [salesList, setSalesList] = useState<Sale[]>(() => db.getSales(brand));
-  const [saleItemsList, setSaleItemsList] = useState<SaleItem[]>(() => db.getSaleItems(brand));
-  const [returnsList, setReturnsList] = useState<ReturnRecord[]>(() => db.getReturns(brand));
+  const [saleLinesView, setSaleLinesView] = useState<any[]>([]);
+  const [returnsList, setReturnsList] = useState<ReturnRecord[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
 
-  const refreshComponentData = () => {
-    setSalesList(db.getSales(brand));
-    setSaleItemsList(db.getSaleItems(brand));
-    setReturnsList(db.getReturns(brand));
+  const refreshComponentData = async () => {
+    setIsLoading(true);
+    try {
+      const [lines, returnsRes] = await Promise.all([
+        db.fetchReturnableSaleLines(brand),
+        db.fetchReturnsPaginated(brand, '', 1, 100)
+      ]);
+      setSaleLinesView(lines);
+      setReturnsList(returnsRes.items);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -35,44 +45,6 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
     setToastMessageLocal(msg);
     setTimeout(() => setToastMessageLocal(null), 3000);
   };
-
-  // Compile individual lines of sales to make returns easy
-  const saleLinesView = useMemo(() => {
-    const lines: {
-      id: string;
-      sale_id: string;
-      customer_name: string;
-      part_no: string;
-      part_name: string;
-      quantity: number;
-      mrp: number;
-      discount_percentage: number;
-      final_amount: number;
-      returned_quantity: number;
-      sale_date: string;
-    }[] = [];
-
-    saleItemsList.forEach(item => {
-      const parent = salesList.find(s => s.id === item.sale_id);
-      if (parent) {
-        lines.push({
-          id: item.id,
-          sale_id: item.sale_id,
-          customer_name: parent.customer_name,
-          part_no: item.part_no,
-          part_name: item.part_name,
-          quantity: item.quantity,
-          mrp: item.mrp,
-          discount_percentage: item.discount_percentage,
-          final_amount: item.final_amount,
-          returned_quantity: item.returned_quantity,
-          sale_date: parent.sale_date
-        });
-      }
-    });
-
-    return lines;
-  }, [salesList, saleItemsList]);
 
   // Compile unique customer names for tab filtering
   const customerTabs = useMemo(() => {
@@ -101,7 +73,7 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
     });
   }, [saleLinesView, search, selectedCustomer]);
 
-  const handleReturnAmountOfLine = (lineId: string, item: typeof saleLinesView[0]) => {
+  const handleReturnAmountOfLine = async (lineId: string, item: typeof saleLinesView[0]) => {
     const qtyToReturn = returnQty[lineId] || 0;
     const maxReturnable = item.quantity - item.returned_quantity;
 
@@ -123,7 +95,7 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
     if (!confirmed) return;
 
     try {
-      db.processReturn(
+      await db.processReturn(
         brand,
         item.sale_id,
         item.id,

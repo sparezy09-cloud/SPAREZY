@@ -632,56 +632,19 @@ export const db = {
             activeBrandChannel = null;
           }
 
-          // 1. INVENTORY ACCESS CHECK - OPTIMIZED PARALLEL RANGE FETCH TO BYPASS POSTGREST 1000 ROW LIMIT
-          console.log(`[Query Diagnostic] Running inventory select for schema: ${b}`);
-          
-          let bInv: any[] = [];
-          let errInv: any = null;
-          
-          try {
-            const { count, error: countErr } = await supabase
-              .schema(b)
-              .from('inventory')
-              .select('id', { count: 'exact', head: true });
-              
-            if (countErr) {
-              errInv = countErr;
-            } else {
-              const totalRows = count || 0;
-              console.log(`[Optimized Sync] Found total ${totalRows} parts in '${b}.inventory'. Initiating parallel range downloads...`);
-              
-              if (totalRows === 0) {
-                bInv = [];
-              } else {
-                const pageSize = 1000;
-                const pages = Math.ceil(totalRows / pageSize);
-                const rangePromises = [];
-                
-                for (let i = 0; i < pages; i++) {
-                  const from = i * pageSize;
-                  const to = (i + 1) * pageSize - 1;
-                  rangePromises.push(
-                    supabase.schema(b).from('inventory')
-                      .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at')
-                      .range(from, to)
-                  );
-                }
-                
-                const rangeResults = await Promise.all(rangePromises);
-                for (const res of rangeResults) {
-                  if (res.error) {
-                    errInv = res.error;
-                    break;
-                  }
-                  if (res.data) {
-                    bInv = bInv.concat(res.data);
-                  }
-                }
-              }
-            }
-          } catch (fetchExc: any) {
-            errInv = fetchExc;
-          }
+          // Initialize local caches to empty arrays as we now load data on-demand
+          cache[b].inventory = [];
+          cache[b].sales = [];
+          cache[b].sale_items = [];
+          cache[b].returns = [];
+          cache[b].purchases = [];
+          cache[b].purchase_items = [];
+          cache[b].bulk_update_history = [];
+          cache[b].mrp_history = [];
+
+          // 1. INVENTORY ACCESS CHECK - OPTIMIZED SELECT 1 ROW
+          console.log(`[Query Diagnostic] Running optimized inventory connectivity select for schema: ${b}`);
+          const { error: errInv } = await supabase.schema(b).from('inventory').select('id').limit(1);
 
           if (errInv) {
             const category = getErrorCategory(errInv.code, errInv.message);
@@ -696,10 +659,8 @@ export const db = {
               diagnosticStats.mahindraInventoryOk = false;
               diagnosticStats.mahindraInventoryError = errInv.message;
             }
-            // Do not use local fallback data if query fails
-            cache[b].inventory = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: inventory, Count: ${bInv?.length || 0}`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: inventory diagnostics passed`);
             diagnosticStats.inventoryTest = { success: true, error: null };
             
             if (b === 'hyundai') {
@@ -710,139 +671,100 @@ export const db = {
               diagnosticStats.mahindraInventoryError = null;
             }
             clearSchemaError(b, 'inventory');
-            cache[b].inventory = (bInv || []).map(scrubRow);
           }
 
-          // 2. SALES ACCESS CHECK
-          console.log(`[Query Diagnostic] Running sales select for schema: ${b}`);
-          const { data: bSales, error: errSales } = await supabase.schema(b).from('sales')
-            .select('id, customer_id, customer_name, customer_category, sale_date, subtotal, discount_percentage, discount_amount, total_amount, payment_status, paid_amount, pending_amount, created_by, created_at')
-            .order('created_at', { ascending: false });
+          // 2. SALES ACCESS CHECK - OPTIMIZED SELECT 1 ROW
+          console.log(`[Query Diagnostic] Running optimized sales connectivity select for schema: ${b}`);
+          const { error: errSales } = await supabase.schema(b).from('sales').select('id').limit(1);
           if (errSales) {
             const category = getErrorCategory(errSales.code, errSales.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: sales, Error: ${errSales.message}`, errSales);
             reportSupabaseError(b, 'sales', 'select', errSales.message, errSales.code);
             diagnosticStats.salesTest = { success: false, error: errSales.message };
-            cache[b].sales = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: sales, Count: ${bSales?.length || 0}`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: sales diagnostics passed`);
             diagnosticStats.salesTest = { success: true, error: null };
             clearSchemaError(b, 'sales');
-            cache[b].sales = (bSales || []).map(scrubRow);
           }
 
-          // 3. SALE ITEMS ACCESS CHECK
-          console.log(`[Query Diagnostic] Running sale_items select for schema: ${b}`);
-          const { data: bSaleItems, error: errSalesItems } = await supabase.schema(b).from('sale_items')
-            .select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, final_amount, returned_quantity, created_at');
+          // 3. SALE ITEMS ACCESS CHECK - OPTIMIZED SELECT 1 ROW
+          console.log(`[Query Diagnostic] Running optimized sale_items connectivity select for schema: ${b}`);
+          const { error: errSalesItems } = await supabase.schema(b).from('sale_items').select('id').limit(1);
           if (errSalesItems) {
             const category = getErrorCategory(errSalesItems.code, errSalesItems.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: sale_items, Error: ${errSalesItems.message}`, errSalesItems);
             reportSupabaseError(b, 'sale_items', 'select', errSalesItems.message, errSalesItems.code);
-            cache[b].sale_items = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: sale_items, Count: ${bSaleItems?.length || 0}`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: sale_items diagnostics passed`);
             clearSchemaError(b, 'sale_items');
-            cache[b].sale_items = (bSaleItems || []).map(scrubRow);
           }
 
-          // 4. RETURNS ACCESS CHECK
-          console.log(`[Query Diagnostic] Running returns select for schema: ${b}`);
-          const { data: bReturns, error: errReturns } = await supabase.schema(b).from('returns')
-            .select('id, sale_id, sale_item_id, customer_id, part_no, part_name, returned_quantity, refund_amount, return_date, created_by')
-            .order('return_date', { ascending: false });
+          // 4. RETURNS ACCESS CHECK - OPTIMIZED SELECT 1 ROW
+          console.log(`[Query Diagnostic] Running optimized returns connectivity select for schema: ${b}`);
+          const { error: errReturns } = await supabase.schema(b).from('returns').select('id').limit(1);
           if (errReturns) {
             const category = getErrorCategory(errReturns.code, errReturns.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: returns, Error: ${errReturns.message}`, errReturns);
             reportSupabaseError(b, 'returns', 'select', errReturns.message, errReturns.code);
-            cache[b].returns = [];
+            diagnosticStats.returnsTest = { success: false, error: errReturns.message };
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: returns, Count: ${bReturns?.length || 0}`);
-            clearSchemaError(b, 'returns');
-            cache[b].returns = (bReturns || []).map(scrubRow);
-          }
-
-          // 4b. RETURNS DIAGNOCTICS ACCESS CHECK (Requirement 5)
-          console.log(`[Query Diagnostic] Running returns diagnostic select for schema: ${b}`);
-          const { error: errReturnsDiag } = await supabase
-            .schema(b)
-            .from('returns')
-            .select('id, return_date')
-            .order('return_date', { ascending: false })
-            .limit(1);
-          if (errReturnsDiag) {
-            diagnosticStats.returnsTest = { success: false, error: errReturnsDiag.message };
-          } else {
+            console.log(`✅ [Query Result] Schema: ${b}, Table: returns diagnostics passed`);
             diagnosticStats.returnsTest = { success: true, error: null };
+            clearSchemaError(b, 'returns');
           }
 
-          // 5. PURCHASES ACCESS CHECK
-          console.log(`[Query Diagnostic] Running purchases select for schema: ${b}`);
-          const { data: bPurchases, error: errPurchases } = await supabase.schema(b).from('purchases')
-            .select('id, dealer_name, invoice_no, invoice_date, subtotal, dealer_discount_percentage, discount_amount, total_after_discount, scan_source, created_by, created_at')
-            .order('created_at', { ascending: false });
+          // 5. PURCHASES ACCESS CHECK - OPTIMIZED SELECT 1 ROW
+          console.log(`[Query Diagnostic] Running optimized purchases connectivity select for schema: ${b}`);
+          const { error: errPurchases } = await supabase.schema(b).from('purchases').select('id').limit(1);
           if (errPurchases) {
             const category = getErrorCategory(errPurchases.code, errPurchases.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: purchases, Error: ${errPurchases.message}`, errPurchases);
             reportSupabaseError(b, 'purchases', 'select', errPurchases.message, errPurchases.code);
             diagnosticStats.purchaseTest = { success: false, error: errPurchases.message };
-            cache[b].purchases = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: purchases, Count: ${bPurchases?.length || 0}`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: purchases diagnostics passed`);
             diagnosticStats.purchaseTest = { success: true, error: null };
             clearSchemaError(b, 'purchases');
-            cache[b].purchases = (bPurchases || []).map(scrubRow);
           }
 
-          // 6. PURCHASE ITEMS ACCESS CHECK
-          console.log(`[Query Diagnostic] Running purchase_items select for schema: ${b}`);
-          const { data: bPItems, error: errPItems } = await supabase.schema(b).from('purchase_items')
-            .select('id, purchase_id, part_no, part_name, hsn, quantity, mrp, is_new_part, matched_inventory, created_at');
+          // 6. PURCHASE ITEMS ACCESS CHECK - OPTIMIZED SELECT 1 ROW
+          console.log(`[Query Diagnostic] Running optimized purchase_items connectivity select for schema: ${b}`);
+          const { error: errPItems } = await supabase.schema(b).from('purchase_items').select('id').limit(1);
           if (errPItems) {
             const category = getErrorCategory(errPItems.code, errPItems.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: purchase_items, Error: ${errPItems.message}`, errPItems);
             reportSupabaseError(b, 'purchase_items', 'select', errPItems.message, errPItems.code);
-            cache[b].purchase_items = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: purchase_items, Count: ${bPItems?.length || 0}`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: purchase_items diagnostics passed`);
             clearSchemaError(b, 'purchase_items');
-            cache[b].purchase_items = (bPItems || []).map(scrubRow);
           }
 
-          // 7. BULK UPDATE HISTORY ACCESS CHECK
-          console.log(`[Query Diagnostic] Running bulk_update_history select for schema: ${b}`);
-          const { data: bBulk, error: errBulk } = await supabase.schema(b).from('bulk_update_history')
-            .select('id, update_type, file_name, total_rows, success_rows, failed_rows, created_by, created_at, can_undo')
-            .order('created_at', { ascending: false });
+          // 7. BULK UPDATE HISTORY ACCESS CHECK - OPTIMIZED SELECT 1 ROW
+          console.log(`[Query Diagnostic] Running optimized bulk_update_history connectivity select for schema: ${b}`);
+          const { error: errBulk } = await supabase.schema(b).from('bulk_update_history').select('id').limit(1);
           if (errBulk) {
             const category = getErrorCategory(errBulk.code, errBulk.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: bulk_update_history, Error: ${errBulk.message}`, errBulk);
             reportSupabaseError(b, 'bulk_update_history', 'select', errBulk.message, errBulk.code);
             diagnosticStats.bulkUpdateHistoryTest = { success: false, error: errBulk.message };
-            cache[b].bulk_update_history = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: bulk_update_history, Count: ${bBulk?.length || 0}`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: bulk_update_history diagnostics passed`);
             diagnosticStats.bulkUpdateHistoryTest = { success: true, error: null };
             clearSchemaError(b, 'bulk_update_history');
-            cache[b].bulk_update_history = (bBulk || []).map(scrubRow);
           }
 
-          // 8. MRP HISTORY ACCESS CHECK
-          console.log(`[Query Diagnostic] Running mrp_history select for schema: ${b}`);
-          const { data: bMrp, error: errMrp } = await supabase.schema(b).from('mrp_history')
-            .select('id, part_no, old_mrp, new_mrp, changed_by, changed_at')
-            .order('changed_at', { ascending: false });
+          // 8. MRP HISTORY ACCESS CHECK - OPTIMIZED SELECT 1 ROW
+          console.log(`[Query Diagnostic] Running optimized mrp_history connectivity select for schema: ${b}`);
+          const { error: errMrp } = await supabase.schema(b).from('mrp_history').select('id').limit(1);
           if (errMrp) {
             const category = getErrorCategory(errMrp.code, errMrp.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: mrp_history, Error: ${errMrp.message}`, errMrp);
             reportSupabaseError(b, 'mrp_history', 'select', errMrp.message, errMrp.code);
             diagnosticStats.mrpHistoryTest = { success: false, error: errMrp.message };
-            cache[b].mrp_history = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: mrp_history, Count: ${bMrp?.length || 0}`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: mrp_history diagnostics passed`);
             diagnosticStats.mrpHistoryTest = { success: true, error: null };
             clearSchemaError(b, 'mrp_history');
-            cache[b].mrp_history = (bMrp || []).map(scrubRow);
           }
 
           // Subscribing specifically to this active brand's schema channels
@@ -1599,6 +1521,7 @@ export const db = {
     user: User
   ): Promise<Sale> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    await db.ensureLocalInventoryCacheForParts(brand, items.map(item => item.part_no));
     const inventory = cache[b].inventory;
     const saleId = uuid();
     const saleItemsList = cache[b].sale_items;
@@ -1765,17 +1688,33 @@ export const db = {
     user: User
   ): Promise<void> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    const sales = cache[b].sales;
-    const saleIdx = sales.findIndex(s => s.id === saleId);
-    if (saleIdx === -1) {
+    
+    // Lazy-load sale details if not present in cache
+    let sale = cache[b].sales.find(s => s.id === saleId);
+    if (!sale && isSupabaseConfigured && supabase) {
+      const { data: dbSale } = await supabase.schema(b).from('sales').select('id, brand, customer_id, customer_name, customer_category, phone, billing_address, total_amount, discount_amount, total_after_discount, paid_amount, pending_amount, payment_status, payment_method, sale_date, notes, created_by, created_at, updated_at').eq('id', saleId).single();
+      if (dbSale) {
+        sale = scrubRow(dbSale);
+        cache[b].sales.push(sale);
+      }
+    }
+    
+    if (!sale) {
       throw new Error(`Sale ID ${saleId} not found.`);
     }
-    const sale = sales[saleIdx];
 
-    // Find all sale items for this sale
-    const saleItems = cache[b].sale_items.filter(item => item.sale_id === saleId);
+    // Lazy-load sale items if not present in cache
+    let saleItems = cache[b].sale_items.filter(item => item.sale_id === saleId);
+    if (saleItems.length === 0 && isSupabaseConfigured && supabase) {
+      const { data: dbItems } = await supabase.schema(b).from('sale_items').select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, discount_amount, final_amount, returned_quantity, refund_amount, created_at, updated_at').eq('sale_id', saleId);
+      if (dbItems) {
+        saleItems = dbItems.map(scrubRow);
+        cache[b].sale_items.push(...saleItems);
+      }
+    }
 
     // Verify inventory items exist and update quantities
+    await db.ensureLocalInventoryCacheForParts(brand, saleItems.map(item => item.part_no));
     const inventory = cache[b].inventory;
     
     // Perform safety check first
@@ -1852,26 +1791,44 @@ export const db = {
     db.notify();
   },
 
-  processReturn: (
+  processReturn: async (
     brand: Brand, 
     saleId: string, 
     saleItemId: string, 
     returnedQty: number, 
     refundAmount: number, 
     user: User
-  ) => {
+  ): Promise<ReturnRecord> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    const saleItems = cache[b].sale_items;
-    const sales = cache[b].sales;
+    
+    // Lazy-load sale item if not present in cache
+    let sItem = cache[b].sale_items.find(si => si.id === saleItemId);
+    if (!sItem && isSupabaseConfigured && supabase) {
+      const { data: dbItem } = await supabase.schema(b).from('sale_items').select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, discount_amount, final_amount, returned_quantity, refund_amount, created_at, updated_at').eq('id', saleItemId).single();
+      if (dbItem) {
+        sItem = scrubRow(dbItem);
+        cache[b].sale_items.push(sItem);
+      }
+    }
+    if (!sItem) throw new Error("Sale item not found");
+    
+    // Lazy-load parent sale if not present in cache
+    let sale = cache[b].sales.find(s => s.id === saleId);
+    if (!sale && isSupabaseConfigured && supabase) {
+      const { data: dbSale } = await supabase.schema(b).from('sales').select('id, brand, customer_id, customer_name, customer_category, phone, billing_address, total_amount, discount_amount, total_after_discount, paid_amount, pending_amount, payment_status, payment_method, sale_date, notes, created_by, created_at, updated_at').eq('id', saleId).single();
+      if (dbSale) {
+        sale = scrubRow(dbSale);
+        cache[b].sales.push(sale);
+      }
+    }
+    if (!sale) throw new Error("Parent sale not found");
+
+    // Pre-load inventory part
+    await db.ensureLocalInventoryCacheForParts(brand, [sItem.part_no]);
     const inventory = cache[b].inventory;
     const returns = cache[b].returns;
     
-    const sItem = saleItems.find(si => si.id === saleItemId);
-    if (!sItem) throw new Error("Sale item not found");
-    
-    const sale = sales.find(s => s.id === saleId);
-    if (!sale) throw new Error("Parent sale not found");
-    
+    // Check returnable
     const maxReturnable = sItem.quantity - sItem.returned_quantity;
     if (returnedQty > maxReturnable) {
       throw new Error(`Cannot return ${returnedQty}. Maximim returnable left is ${maxReturnable}`);
@@ -1879,7 +1836,8 @@ export const db = {
     
     sItem.returned_quantity += returnedQty;
     if (isSupabaseConfigured && supabase) {
-      supabase.schema(b).from('sale_items').update({ returned_quantity: sItem.returned_quantity }).eq('id', sItem.id).then();
+      const { error: itemErr } = await supabase.schema(b).from('sale_items').update({ returned_quantity: sItem.returned_quantity }).eq('id', sItem.id);
+      if (itemErr) throw new Error(`Database error updating sale item: ${itemErr.message}`);
     }
     
     const invElement = inventory.find(i => i.part_no === sItem.part_no);
@@ -1891,12 +1849,13 @@ export const db = {
       }
       invElement.updated_at = new Date().toISOString();
       if (isSupabaseConfigured && supabase) {
-        supabase.schema(b).from('inventory').update({
+        const { error: invErr } = await supabase.schema(b).from('inventory').update({
           quantity: invElement.quantity,
           is_active: invElement.is_active,
           archived_at: invElement.archived_at,
           updated_at: invElement.updated_at
-        }).eq('id', invElement.id).then();
+        }).eq('id', invElement.id);
+        if (invErr) throw new Error(`Database error updating inventory item: ${invErr.message}`);
       }
     }
     
@@ -1914,11 +1873,12 @@ export const db = {
     }
     sale.total_amount = Math.max(0, sale.total_amount - refundAmount);
     if (isSupabaseConfigured && supabase) {
-      supabase.schema(b).from('sales').update({
+      const { error: saleErr } = await supabase.schema(b).from('sales').update({
         pending_amount: sale.pending_amount,
         paid_amount: sale.paid_amount,
         total_amount: sale.total_amount
-      }).eq('id', sale.id).then();
+      }).eq('id', sale.id);
+      if (saleErr) throw new Error(`Database error updating sale: ${saleErr.message}`);
     }
     
     const returnRec: ReturnRecord = {
@@ -1937,10 +1897,11 @@ export const db = {
     returns.unshift(returnRec);
     
     if (isSupabaseConfigured && supabase) {
-      supabase.schema(b).from('returns').insert(returnRec).then();
+      const { error: returnErr } = await supabase.schema(b).from('returns').insert(returnRec);
+      if (returnErr) throw new Error(`Database error inserting return record: ${returnErr.message}`);
     } else {
-      localStorage.setItem(`sparezy_schema_${b}_sale_items`, JSON.stringify(saleItems));
-      localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(sales));
+      localStorage.setItem(`sparezy_schema_${b}_sale_items`, JSON.stringify(cache[b].sale_items));
+      localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(cache[b].sales));
       localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
       localStorage.setItem(`sparezy_schema_${b}_returns`, JSON.stringify(returns));
     }
@@ -1991,6 +1952,7 @@ export const db = {
     user: User
   ): Promise<Purchase> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    await db.ensureLocalInventoryCacheForParts(brand, items.map(item => item.part_no));
     const listPurchases = cache[b].purchases;
     const purchaseItemsList = cache[b].purchase_items;
     const inventory = cache[b].inventory;
@@ -2130,16 +2092,33 @@ export const db = {
     return purchase;
   },
 
-  deletePurchase: (brand: Brand, purchaseId: string, user: User) => {
+  deletePurchase: async (brand: Brand, purchaseId: string, user: User) => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    const listPurchases = cache[b].purchases;
-    const purchaseItemsList = cache[b].purchase_items;
-    const inventory = cache[b].inventory;
     
-    const deletedPurchase = listPurchases.find(p => p.id === purchaseId);
+    // Lazy load purchase if not in cache
+    let deletedPurchase = cache[b].purchases.find(p => p.id === purchaseId);
+    if (!deletedPurchase && isSupabaseConfigured && supabase) {
+      const { data: dbPurchase } = await supabase.schema(b).from('purchases').select('id, brand, dealer_name, invoice_no, invoice_date, subtotal, dealer_discount_percentage, discount_amount, total_after_discount, payment_status, payment_method, notes, scan_source, created_by, created_at, updated_at').eq('id', purchaseId).single();
+      if (dbPurchase) {
+        deletedPurchase = scrubRow(dbPurchase);
+        cache[b].purchases.push(deletedPurchase);
+      }
+    }
     if (!deletedPurchase) throw new Error("Purchase not found");
     
-    const itemsRelated = purchaseItemsList.filter(pi => pi.purchase_id === purchaseId);
+    // Lazy load purchase items if not in cache
+    let itemsRelated = cache[b].purchase_items.filter(pi => pi.purchase_id === purchaseId);
+    if (itemsRelated.length === 0 && isSupabaseConfigured && supabase) {
+      const { data: dbItems } = await supabase.schema(b).from('purchase_items').select('id, purchase_id, part_no, part_name, quantity, mrp, created_at').eq('purchase_id', purchaseId);
+      if (dbItems) {
+        itemsRelated = dbItems.map(scrubRow);
+        cache[b].purchase_items.push(...itemsRelated);
+      }
+    }
+    
+    // Load relevant inventory items
+    await db.ensureLocalInventoryCacheForParts(brand, itemsRelated.map(ri => ri.part_no));
+    const inventory = cache[b].inventory;
     
     itemsRelated.forEach(ri => {
       const invElement = inventory.find(inv => inv.part_no.toLowerCase() === ri.part_no.toLowerCase());
@@ -2152,10 +2131,10 @@ export const db = {
       }
     });
     
-    const remainingPurchases = listPurchases.filter(p => p.id !== purchaseId);
+    const remainingPurchases = cache[b].purchases.filter(p => p.id !== purchaseId);
     cache[b].purchases = remainingPurchases;
     
-    const remainingItems = purchaseItemsList.filter(pi => pi.purchase_id !== purchaseId);
+    const remainingItems = cache[b].purchase_items.filter(pi => pi.purchase_id !== purchaseId);
     cache[b].purchase_items = remainingItems;
     
     if (isSupabaseConfigured && supabase) {
@@ -2617,6 +2596,724 @@ export const db = {
       }
     } else {
       throw new Error("Supabase is not configured. Live database transactions are required.");
+    }
+  },
+
+  // Helper to dynamically load inventory items into cache when mutations require them
+  ensureLocalInventoryCacheForParts: async (brand: Brand, partNos: string[]): Promise<void> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (!isSupabaseConfigured || !supabase) return;
+    const partNosToFetch = partNos.filter(partNo => !cache[b].inventory.some(item => item.part_no.toLowerCase() === partNo.toLowerCase()));
+    if (partNosToFetch.length > 0) {
+      const { data } = await supabase.schema(b).from('inventory').select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at').in('part_no', partNosToFetch);
+      if (data) {
+        data.forEach(row => {
+          const item = scrubRow(row);
+          cache[b].inventory.push(item);
+        });
+      }
+    }
+  },
+
+  ensureInventoryLoaded: async (brand: Brand, force: boolean = false): Promise<InventoryItem[]> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (cache[b].inventory.length > 0 && !force) {
+      return cache[b].inventory;
+    }
+    if (isSupabaseConfigured && supabase) {
+      console.log(`[Lazy Sync] Dynamically downloading full inventory for ${brand}...`);
+      let bInv: any[] = [];
+      const { count, error: countErr } = await supabase
+        .schema(b)
+        .from('inventory')
+        .select('id', { count: 'exact', head: true });
+        
+      if (!countErr) {
+        const totalRows = count || 0;
+        if (totalRows > 0) {
+          const pageSize = 1000;
+          const pages = Math.ceil(totalRows / pageSize);
+          const rangePromises = [];
+          for (let i = 0; i < pages; i++) {
+            const from = i * pageSize;
+            const to = (i + 1) * pageSize - 1;
+            rangePromises.push(
+              supabase.schema(b).from('inventory')
+                .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at')
+                .range(from, to)
+            );
+          }
+          const rangeResults = await Promise.all(rangePromises);
+          for (const res of rangeResults) {
+            if (res.data) {
+              bInv = bInv.concat(res.data);
+            }
+          }
+          cache[b].inventory = bInv.map(scrubRow);
+        }
+      }
+    }
+    return cache[b].inventory;
+  },
+
+  searchActiveParts: async (brand: Brand, query: string): Promise<InventoryItem[]> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      if (!query || query.trim().length < 2) return [];
+      const clean = query.trim();
+      const { data, error } = await supabase.schema(b).from('inventory')
+        .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at')
+        .eq('is_active', true)
+        .or(`part_no.ilike.%${clean}%,part_name.ilike.%${clean}%`)
+        .limit(20);
+      if (error) throw error;
+      return (data || []).map(scrubRow);
+    } else {
+      return cache[b].inventory.filter(item => 
+        item.is_active !== false && 
+        (item.part_no.toLowerCase().includes(query.toLowerCase()) || 
+         item.part_name.toLowerCase().includes(query.toLowerCase()))
+      );
+    }
+  },
+
+  fetchDashboardMetrics: async (brand: Brand): Promise<any> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      console.log(`[Dashboard Dynamic] Fetching aggregated RPC metrics for ${brand}...`);
+      
+      try {
+        const { data: rpcData, error: rpcErr } = await supabase.rpc('get_dashboard_metrics', { schema_name: b });
+        if (!rpcErr && rpcData) {
+          console.log(`[Dashboard Dynamic] Aggregated RPC metrics loaded successfully with 1 network trip.`);
+          return {
+            totalSku: Number(rpcData.totalSku) || 0,
+            totalQty: Number(rpcData.totalQty) || 0,
+            totalValuation: Number(rpcData.totalValuation) || 0,
+            totalSalesRevenue: Number(rpcData.totalSalesRevenue) || 0,
+            totalPaidRevenue: Number(rpcData.totalPaidRevenue) || 0,
+            totalPendingRevenue: Number(rpcData.totalPendingRevenue) || 0,
+            totalReturnsValuation: Number(rpcData.totalReturnsValuation) || 0,
+            returnsCount: Number(rpcData.returnsCount) || 0,
+            totalPurchasesValuation: Number(rpcData.totalPurchasesValuation) || 0,
+            purchasesCount: Number(rpcData.purchasesCount) || 0,
+            categorySales: rpcData.categorySales || {},
+            recentSales: (rpcData.recentSales || []).map(scrubRow),
+            lowStockItems: (rpcData.lowStockItems || []).map(scrubRow)
+          };
+        }
+        if (rpcErr) {
+          console.warn(`[Dashboard Dynamic] get_dashboard_metrics RPC failed: ${rpcErr.message}. Falling back to client-side aggregations...`);
+        }
+      } catch (e: any) {
+        console.warn(`[Dashboard Dynamic] RPC execution exception: ${e.message || e}. Falling back to client-side aggregations...`);
+      }
+
+      console.log(`[Dashboard Dynamic] Fetching lightweight fallback metrics for ${brand}...`);
+      
+      const [skuRes, qtyValRes, salesSummaryRes, recentSalesRes, returnsRes, purchasesRes, lowStockRes] = await Promise.all([
+        supabase.schema(b).from('inventory').select('id', { count: 'exact', head: true }).eq('is_active', true),
+        supabase.schema(b).from('inventory').select('quantity, mrp').eq('is_active', true),
+        supabase.schema(b).from('sales').select('total_amount, paid_amount, pending_amount, customer_category'),
+        supabase.schema(b).from('sales').select('id, customer_name, customer_category, sale_date, total_amount, payment_status').order('sale_date', { ascending: false }).limit(5),
+        supabase.schema(b).from('returns').select('refund_amount'),
+        supabase.schema(b).from('purchases').select('total_after_discount'),
+        supabase.schema(b).from('inventory').select('id, part_no, part_name, quantity, hsn, mrp').eq('is_active', true).lt('quantity', 15).order('quantity', { ascending: true }).limit(6)
+      ]);
+
+      const totalSku = skuRes.count || 0;
+      let totalQty = 0;
+      let totalValuation = 0;
+      if (qtyValRes.data) {
+        qtyValRes.data.forEach(it => {
+          totalQty += (it.quantity || 0);
+          totalValuation += ((it.quantity || 0) * (it.mrp || 0));
+        });
+      }
+
+      let totalSalesRevenue = 0;
+      let totalPaidRevenue = 0;
+      let totalPendingRevenue = 0;
+      const categorySales: Record<string, number> = {};
+      if (salesSummaryRes.data) {
+        salesSummaryRes.data.forEach(s => {
+          totalSalesRevenue += (s.total_amount || 0);
+          totalPaidRevenue += (s.paid_amount || 0);
+          totalPendingRevenue += (s.pending_amount || 0);
+          const cat = s.customer_category || 'Other';
+          categorySales[cat] = (categorySales[cat] || 0) + (s.total_amount || 0);
+        });
+      }
+
+      let totalReturnsValuation = 0;
+      const returnsCount = returnsRes.data?.length || 0;
+      if (returnsRes.data) {
+        returnsRes.data.forEach(r => {
+          totalReturnsValuation += (r.refund_amount || 0);
+        });
+      }
+
+      let totalPurchasesValuation = 0;
+      const purchasesCount = purchasesRes.data?.length || 0;
+      if (purchasesRes.data) {
+        purchasesRes.data.forEach(p => {
+          totalPurchasesValuation += (p.total_after_discount || 0);
+        });
+      }
+
+      return {
+        totalSku,
+        totalQty,
+        totalValuation,
+        totalSalesRevenue,
+        totalPaidRevenue,
+        totalPendingRevenue,
+        totalReturnsValuation,
+        returnsCount,
+        totalPurchasesValuation,
+        purchasesCount,
+        categorySales,
+        recentSales: (recentSalesRes.data || []).map(scrubRow),
+        lowStockItems: (lowStockRes.data || []).map(scrubRow)
+      };
+    } else {
+      // local fallback
+      const inv = cache[b].inventory.filter(item => item.is_active !== false);
+      const totalSku = inv.length;
+      const totalQty = inv.reduce((acc, curr) => acc + curr.quantity, 0);
+      const totalValuation = inv.reduce((acc, curr) => acc + (curr.quantity * curr.mrp), 0);
+      const sales = cache[b].sales;
+      const totalSalesRevenue = sales.reduce((acc, curr) => acc + curr.total_amount, 0);
+      const totalPaidRevenue = sales.reduce((acc, curr) => acc + curr.paid_amount, 0);
+      const totalPendingRevenue = sales.reduce((acc, curr) => acc + curr.pending_amount, 0);
+      const categorySales: Record<string, number> = {};
+      sales.forEach(s => {
+        categorySales[s.customer_category] = (categorySales[s.customer_category] || 0) + s.total_amount;
+      });
+      const returns = cache[b].returns;
+      const totalReturnsValuation = returns.reduce((acc, curr) => acc + curr.refund_amount, 0);
+      const purchases = cache[b].purchases;
+      const totalPurchasesValuation = purchases.reduce((acc, curr) => acc + curr.total_after_discount, 0);
+      const lowStockItems = inv.filter(item => item.quantity < 15).sort((a,b) => a.quantity - b.quantity);
+
+      return {
+        totalSku,
+        totalQty,
+        totalValuation,
+        totalSalesRevenue,
+        totalPaidRevenue,
+        totalPendingRevenue,
+        totalReturnsValuation,
+        returnsCount: returns.length,
+        totalPurchasesValuation,
+        purchasesCount: purchases.length,
+        categorySales,
+        recentSales: sales.slice(0, 5),
+        lowStockItems: lowStockItems.slice(0, 6)
+      };
+    }
+  },
+
+  fetchSalesPaginated: async (
+    brand: Brand,
+    search: string,
+    page: number,
+    limit: number,
+    category: string = 'All',
+    paymentStatus: string = 'All'
+  ): Promise<{ items: Sale[], totalCount: number }> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      let query = supabase.schema(b).from('sales')
+        .select('id, customer_id, customer_name, customer_category, sale_date, subtotal, discount_percentage, discount_amount, total_amount, payment_status, paid_amount, pending_amount, created_by, created_at', { count: 'exact' });
+      
+      if (category !== 'All') {
+        query = query.eq('customer_category', category);
+      }
+      if (paymentStatus !== 'All') {
+        query = query.eq('payment_status', paymentStatus);
+      }
+      if (search) {
+        query = query.or(`customer_name.ilike.%${search}%,id.ilike.%${search}%`);
+      }
+      
+      const from = (page - 1) * limit;
+      const to = page * limit - 1;
+      
+      const { data, count, error } = await query
+        .order('sale_date', { ascending: false })
+        .range(from, to);
+        
+      if (error) throw error;
+      
+      return {
+        items: (data || []).map(scrubRow),
+        totalCount: count || 0
+      };
+    } else {
+      let list = cache[b].sales;
+      if (category !== 'All') list = list.filter(s => s.customer_category === category);
+      if (paymentStatus !== 'All') list = list.filter(s => s.payment_status === paymentStatus);
+      if (search) {
+        list = list.filter(s => s.customer_name.toLowerCase().includes(search.toLowerCase()) || s.id.toLowerCase().includes(search.toLowerCase()));
+      }
+      const from = (page - 1) * limit;
+      return {
+        items: list.slice(from, from + limit),
+        totalCount: list.length
+      };
+    }
+  },
+
+  fetchSaleItemsForSale: async (brand: Brand, saleId: string): Promise<SaleItem[]> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.schema(b).from('sale_items')
+        .select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, discount_amount, final_amount, returned_quantity, refund_amount, created_at, updated_at')
+        .eq('sale_id', saleId);
+      if (error) throw error;
+      return (data || []).map(scrubRow);
+    } else {
+      return cache[b].sale_items.filter(item => item.sale_id === saleId);
+    }
+  },
+
+  fetchPurchasesPaginated: async (
+    brand: Brand,
+    search: string,
+    page: number,
+    limit: number
+  ): Promise<{ items: Purchase[], totalCount: number }> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      let query = supabase.schema(b).from('purchases')
+        .select('id, dealer_name, invoice_no, invoice_date, subtotal, dealer_discount_percentage, discount_amount, total_after_discount, scan_source, created_by, created_at', { count: 'exact' });
+      
+      if (search) {
+        query = query.or(`dealer_name.ilike.%${search}%,invoice_no.ilike.%${search}%`);
+      }
+      
+      const from = (page - 1) * limit;
+      const to = page * limit - 1;
+      
+      const { data, count, error } = await query
+        .order('created_at', { ascending: false })
+        .range(from, to);
+        
+      if (error) throw error;
+      
+      return {
+        items: (data || []).map(scrubRow),
+        totalCount: count || 0
+      };
+    } else {
+      let list = cache[b].purchases;
+      if (search) {
+        list = list.filter(p => p.dealer_name.toLowerCase().includes(search.toLowerCase()) || p.invoice_no.toLowerCase().includes(search.toLowerCase()));
+      }
+      const from = (page - 1) * limit;
+      return {
+        items: list.slice(from, from + limit),
+        totalCount: list.length
+      };
+    }
+  },
+
+  fetchPurchaseItemsForPurchase: async (brand: Brand, purchaseId: string): Promise<PurchaseItem[]> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.schema(b).from('purchase_items')
+        .select('id, purchase_id, part_no, part_name, quantity, mrp, created_at')
+        .eq('purchase_id', purchaseId);
+      if (error) throw error;
+      return (data || []).map(scrubRow);
+    } else {
+      return cache[b].purchase_items.filter(item => item.purchase_id === purchaseId);
+    }
+  },
+
+  fetchReturnsPaginated: async (
+    brand: Brand,
+    search: string,
+    page: number,
+    limit: number
+  ): Promise<{ items: ReturnRecord[], totalCount: number }> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      let query = supabase.schema(b).from('returns')
+        .select('id, sale_id, sale_item_id, customer_id, part_no, part_name, returned_quantity, refund_amount, return_date, created_by', { count: 'exact' });
+      
+      if (search) {
+        query = query.or(`part_no.ilike.%${search}%,part_name.ilike.%${search}%`);
+      }
+      
+      const from = (page - 1) * limit;
+      const to = page * limit - 1;
+      
+      const { data, count, error } = await query
+        .order('return_date', { ascending: false })
+        .range(from, to);
+        
+      if (error) throw error;
+      
+      return {
+        items: (data || []).map(scrubRow),
+        totalCount: count || 0
+      };
+    } else {
+      let list = cache[b].returns;
+      if (search) {
+        list = list.filter(r => r.part_no.toLowerCase().includes(search.toLowerCase()) || r.part_name.toLowerCase().includes(search.toLowerCase()));
+      }
+      const from = (page - 1) * limit;
+      return {
+        items: list.slice(from, from + limit),
+        totalCount: list.length
+      };
+    }
+  },
+
+  fetchReturnableSaleLines: async (brand: Brand): Promise<any[]> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      const { data: items, error: err } = await supabase
+        .schema(b)
+        .from('sale_items')
+        .select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, final_amount, returned_quantity, created_at');
+      if (err) throw err;
+      
+      const returnableItems = (items || []).filter(item => item.quantity - item.returned_quantity > 0);
+      const saleIds = Array.from(new Set(returnableItems.map(item => item.sale_id)));
+      
+      if (saleIds.length === 0) return [];
+
+      const { data: sales, error: saleErr } = await supabase
+        .schema(b)
+        .from('sales')
+        .select('id, customer_name, sale_date')
+        .in('id', saleIds);
+      if (saleErr) throw saleErr;
+      
+      const salesMap = new Map(sales?.map(s => [s.id, s]));
+      
+      const lines = returnableItems.map(item => {
+        const sale = salesMap.get(item.sale_id);
+        return {
+          id: item.id,
+          sale_id: item.sale_id,
+          customer_name: sale?.customer_name || 'Walk-in',
+          part_no: item.part_no,
+          part_name: item.part_name,
+          quantity: item.quantity,
+          mrp: item.mrp,
+          discount_percentage: item.discount_percentage,
+          final_amount: item.final_amount,
+          returned_quantity: item.returned_quantity,
+          sale_date: sale?.sale_date || item.created_at
+        };
+      });
+      return lines;
+    } else {
+      const lines: any[] = [];
+      cache[b].sale_items.forEach(item => {
+        const parent = cache[b].sales.find(s => s.id === item.sale_id);
+        if (parent && item.quantity - item.returned_quantity > 0) {
+          lines.push({
+            id: item.id,
+            sale_id: item.sale_id,
+            customer_name: parent.customer_name,
+            part_no: item.part_no,
+            part_name: item.part_name,
+            quantity: item.quantity,
+            mrp: item.mrp,
+            discount_percentage: item.discount_percentage,
+            final_amount: item.final_amount,
+            returned_quantity: item.returned_quantity,
+            sale_date: parent.sale_date
+          });
+        }
+      });
+      return lines;
+    }
+  },
+
+  checkExistingParts: async (brand: Brand, partNos: string[]): Promise<string[]> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      if (partNos.length === 0) return [];
+      const chunks = [];
+      const size = 100;
+      for (let i = 0; i < partNos.length; i += size) {
+        chunks.push(partNos.slice(i, i + size));
+      }
+      let foundPartNos: string[] = [];
+      for (const chunk of chunks) {
+        const { data } = await supabase.schema(b).from('inventory').select('part_no').in('part_no', chunk);
+        if (data) {
+          foundPartNos = foundPartNos.concat(data.map(d => d.part_no));
+        }
+      }
+      return foundPartNos;
+    } else {
+      const lowercaseSet = new Set(cache[b].inventory.map(item => item.part_no.toLowerCase()));
+      return partNos.filter(p => lowercaseSet.has(p.toLowerCase()));
+    }
+  },
+
+  fetchLedgerData: async (brand: Brand): Promise<any> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      console.log(`[Ledger Sync] Dynamically downloading lightweight ledger data...`);
+      const [salesRes, returnsRes, purchasesRes] = await Promise.all([
+        supabase.schema(b).from('sales').select('customer_id, customer_name, customer_category, total_amount, paid_amount, pending_amount, sale_date'),
+        supabase.schema(b).from('returns').select('customer_id, refund_amount, return_date'),
+        supabase.schema(b).from('purchases').select('dealer_name, total_after_discount, discount_amount, invoice_date')
+      ]);
+      return {
+        sales: salesRes.data || [],
+        returns: returnsRes.data || [],
+        purchases: purchasesRes.data || []
+      };
+    } else {
+      return {
+        sales: cache[b].sales,
+        returns: cache[b].returns,
+        purchases: cache[b].purchases
+      };
+    }
+  },
+
+  fetchReportsData: async (brand: Brand): Promise<any> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      console.log(`[Reports Sync] Dynamically downloading lightweight reports dataset...`);
+      const [sales, saleItems, returns, purchases, purchaseItems] = await Promise.all([
+        supabase.schema(b).from('sales').select('id, total_amount, paid_amount, pending_amount, sale_date'),
+        supabase.schema(b).from('sale_items').select('sale_id, part_no, quantity, mrp, discount_percentage, final_amount'),
+        supabase.schema(b).from('returns').select('refund_amount, return_date, returned_quantity, part_no'),
+        supabase.schema(b).from('purchases').select('id, dealer_discount_percentage, total_after_discount, invoice_date'),
+        supabase.schema(b).from('purchase_items').select('purchase_id, part_no, mrp, created_at')
+      ]);
+      return {
+        sales: (sales.data || []).map(scrubRow),
+        saleItems: (saleItems.data || []).map(scrubRow),
+        returns: (returns.data || []).map(scrubRow),
+        purchases: (purchases.data || []).map(scrubRow),
+        purchaseItems: (purchaseItems.data || []).map(scrubRow)
+      };
+    } else {
+      return {
+        sales: cache[b].sales,
+        saleItems: cache[b].sale_items,
+        returns: cache[b].returns,
+        purchases: cache[b].purchases,
+        purchaseItems: cache[b].purchase_items
+      };
+    }
+  },
+
+  fetchPartMovements: async (brand: Brand, partNo: string): Promise<any> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      const [saleItemsRes, purchaseItemsRes, returnsRes] = await Promise.all([
+        supabase.schema(b).from('sale_items')
+          .select('id, sale_id, quantity, mrp, final_amount, created_at, sales(customer_name, created_by, sale_date)')
+          .eq('part_no', partNo),
+        supabase.schema(b).from('purchase_items')
+          .select('id, purchase_id, quantity, mrp, created_at, purchases(dealer_name, created_by, invoice_date, invoice_no)')
+          .eq('part_no', partNo),
+        supabase.schema(b).from('returns')
+          .select('id, sale_id, returned_quantity, refund_amount, return_date, created_by')
+          .eq('part_no', partNo)
+      ]);
+         
+      const salesMovements = (saleItemsRes.data || []).map(item => {
+        const sale = item.sales as any;
+        const saleDate = sale?.sale_date || item.created_at;
+        return {
+          id: item.id,
+          type: 'sale' as const,
+          date: saleDate,
+          quantity: item.quantity,
+          mrp: item.mrp,
+          total: item.final_amount,
+          info: sale 
+            ? `Sold to ${sale.customer_name} (Invoice: ${item.sale_id.substring(0, 8).toUpperCase()})` 
+            : `Sale Record`,
+          referenceId: item.sale_id,
+          operator: sale?.created_by || 'Staff'
+        };
+      });
+       
+      const purchasesMovements = (purchaseItemsRes.data || []).map(item => {
+        const purchase = item.purchases as any;
+        const purchaseDate = purchase?.invoice_date || item.created_at;
+        return {
+          id: item.id,
+          type: 'purchase' as const,
+          date: purchaseDate,
+          quantity: item.quantity,
+          mrp: item.mrp,
+          total: item.quantity * item.mrp,
+          info: purchase 
+            ? `Inward Stock: ${purchase.dealer_name} (Inv: ${purchase.invoice_no || item.purchase_id.substring(0, 8).toUpperCase()})` 
+            : `Purchase Stock Inward`,
+          referenceId: item.purchase_id,
+          operator: purchase?.created_by || 'Staff'
+        };
+      });
+       
+      const returnsMovements = (returnsRes.data || []).map(item => {
+        return {
+          id: item.id,
+          type: 'return' as const,
+          date: item.return_date,
+          quantity: item.returned_quantity,
+          mrp: item.refund_amount / (item.returned_quantity || 1),
+          total: item.refund_amount,
+          info: `Returned by Customer (Ref Sale: ${item.sale_id.substring(0, 8).toUpperCase()})`,
+          referenceId: item.sale_id,
+          operator: item.created_by || 'Staff'
+        };
+      });
+       
+      const unified = [
+        ...salesMovements,
+        ...purchasesMovements,
+        ...returnsMovements
+      ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+       
+      return {
+        sales: salesMovements,
+        purchases: purchasesMovements,
+        returns: returnsMovements,
+        unified
+      };
+    } else {
+      const targetNo = partNo.trim().toLowerCase();
+      const salesMovements = cache[b].sale_items
+        .filter(item => item.part_no.trim().toLowerCase() === targetNo)
+        .map(item => {
+          const parentSale = cache[b].sales.find(s => s.id === item.sale_id);
+          const saleDate = parentSale?.sale_date || item.created_at;
+          return {
+            id: item.id,
+            type: 'sale' as const,
+            date: saleDate,
+            quantity: item.quantity,
+            mrp: item.mrp,
+            total: item.final_amount,
+            info: parentSale 
+              ? `Sold to ${parentSale.customer_name} (Invoice: ${parentSale.id.substring(0, 8).toUpperCase()})` 
+              : `Sale Record`,
+            referenceId: item.sale_id,
+            operator: parentSale?.created_by || 'Staff'
+          };
+        });
+
+      const purchasesMovements = cache[b].purchase_items
+        .filter(item => item.part_no.trim().toLowerCase() === targetNo)
+        .map(item => {
+          const parentPurchase = cache[b].purchases.find(p => p.id === item.purchase_id);
+          const purchaseDate = parentPurchase?.invoice_date || item.created_at;
+          return {
+            id: item.id,
+            type: 'purchase' as const,
+            date: purchaseDate,
+            quantity: item.quantity,
+            mrp: item.mrp,
+            total: item.quantity * item.mrp,
+            info: parentPurchase 
+              ? `Inward Stock: ${parentPurchase.dealer_name} (Inv: ${parentPurchase.invoice_no || item.purchase_id.substring(0, 8).toUpperCase()})` 
+              : `Purchase Stock Inward`,
+            referenceId: item.purchase_id,
+            operator: parentPurchase?.created_by || 'Staff'
+          };
+        });
+
+      const returnsMovements = cache[b].returns
+        .filter(item => item.part_no.trim().toLowerCase() === targetNo)
+        .map(item => {
+          return {
+            id: item.id,
+            type: 'return' as const,
+            date: item.return_date,
+            quantity: item.returned_quantity,
+            mrp: item.refund_amount / (item.returned_quantity || 1),
+            total: item.refund_amount,
+            info: `Returned by Customer (Ref Sale: ${item.sale_id.substring(0, 8).toUpperCase()})`,
+            referenceId: item.sale_id,
+            operator: item.created_by || 'Staff'
+          };
+        });
+
+      const unified = [
+        ...salesMovements,
+        ...purchasesMovements,
+        ...returnsMovements
+      ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+
+      return {
+        sales: salesMovements,
+        purchases: purchasesMovements,
+        returns: returnsMovements,
+        unified
+      };
+    }
+  },
+
+  fetchInventoryPaginated: async (
+    brand: Brand,
+    search: string,
+    page: number,
+    limit: number,
+    showArchived: boolean,
+    showLowStockOnly: boolean,
+    lowStockThreshold: number
+  ): Promise<{ items: InventoryItem[], totalCount: number }> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      let query = supabase.schema(b).from('inventory')
+        .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at', { count: 'exact' });
+      
+      if (!showArchived) {
+        query = query.eq('is_active', true);
+      }
+      if (showLowStockOnly) {
+        query = query.lte('quantity', lowStockThreshold);
+      }
+      if (search) {
+        query = query.or(`part_no.ilike.%${search}%,part_name.ilike.%${search}%`);
+      }
+      
+      const from = (page - 1) * limit;
+      const to = page * limit - 1;
+      
+      const { data, count, error } = await query
+        .order('part_no', { ascending: true })
+        .range(from, to);
+        
+      if (error) throw error;
+      
+      return {
+        items: (data || []).map(scrubRow),
+        totalCount: count || 0
+      };
+    } else {
+      let list = cache[b].inventory;
+      if (!showArchived) list = list.filter(item => item.is_active !== false);
+      if (showLowStockOnly) list = list.filter(item => item.quantity <= lowStockThreshold);
+      if (search) {
+        list = list.filter(item => 
+          item.part_no.toLowerCase().includes(search.toLowerCase()) || 
+          item.part_name.toLowerCase().includes(search.toLowerCase())
+        );
+      }
+      const from = (page - 1) * limit;
+      return {
+        items: list.slice(from, from + limit),
+        totalCount: list.length
+      };
     }
   }
 };

@@ -33,13 +33,11 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   const [activeTab, setActiveTab] = useState<'scan' | 'manual' | 'history'>('scan');
   
   // Local lists
-  const [inventoryList, setInventoryList] = useState<InventoryItem[]>(() => db.getInventory(brand));
-  const [purchasesList, setPurchasesList] = useState<Purchase[]>(() => db.getPurchases(brand));
+  const [inventoryList, setInventoryList] = useState<InventoryItem[]>([]);
   const [toastMessageLocal, setToastMessageLocal] = useState<string | null>(null);
 
   const refreshComponentData = () => {
     setInventoryList(db.getInventory(brand));
-    setPurchasesList(db.getPurchases(brand));
   };
 
   React.useEffect(() => {
@@ -318,6 +316,16 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
       setScanInvoiceDate(parseSafeDate(scanData.invoiceDate));
 
       const rawItems = scanData.items || [];
+      
+      // OPTIMIZED: Fetch ONLY the scanned part numbers to minimize database read egress
+      const partNos = rawItems.map((it: any) => String(it.partNumber || "").trim().toUpperCase()).filter(Boolean);
+      if (partNos.length > 0) {
+        await db.ensureLocalInventoryCacheForParts(brand, partNos);
+      }
+      
+      const freshInventory = db.getInventory(brand);
+      setInventoryList(freshInventory);
+
       const avgDiscount = rawItems.length > 0 
         ? Math.round(rawItems.reduce((acc: number, item: any) => acc + (item.discountPercent || 0), 0) / rawItems.length) 
         : 12;
@@ -328,7 +336,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
         const pName = String(item.name || "").trim();
         const qty = Number(item.quantity) || 1;
         const priceMrp = Number(item.mrp) || 0;
-        const isMatched = inventoryList.some(inv => inv.part_no.toLowerCase() === pNo.toLowerCase());
+        const isMatched = freshInventory.some(inv => inv.part_no.toLowerCase() === pNo.toLowerCase());
         
         return {
           part_no: pNo,
@@ -363,19 +371,23 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
     handleSelectFiles([file]);
   };
 
-  const handleAIScanRowChange = (index: number, field: keyof ParsedAIScanRow, val: any) => {
-    setScanRows(scanRows.map((row, i) => {
+  const handleAIScanRowChange = async (index: number, field: keyof ParsedAIScanRow, val: any) => {
+    const updatedRows = await Promise.all(scanRows.map(async (row, i) => {
       if (i === index) {
         const copy = { ...row, [field]: val };
         // Check dynamically if matches schema inventory
         if (field === 'part_no') {
-          const mat = inventoryList.some(inv => inv.part_no.toLowerCase() === String(val).trim().toLowerCase());
+          const partNoClean = String(val).trim().toUpperCase();
+          await db.ensureLocalInventoryCacheForParts(brand, [partNoClean]);
+          const freshInventory = db.getInventory(brand);
+          const mat = freshInventory.some(inv => inv.part_no.toLowerCase() === partNoClean.toLowerCase());
           copy.isNewPart = !mat;
         }
         return copy;
       }
       return row;
     }));
+    setScanRows(updatedRows);
   };
 
   // Math Calculations for Scanning AI
@@ -481,9 +493,9 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
     }
   };
 
-  const handleDownloadExcel = (p: Purchase) => {
+  const handleDownloadExcel = async (p: Purchase) => {
     try {
-      const items = db.getPurchaseItems(brand).filter(pi => pi.purchase_id === p.id);
+      const items = await db.fetchPurchaseItemsForPurchase(brand, p.id);
       
       const invoiceRows = [
         { A: "INVOICE DETAILS", B: "", C: "", D: "", E: "", F: "" },
@@ -540,32 +552,72 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   const [historyPage, setHistoryPage] = useState(1);
   const historyPerPage = 15;
 
-  const totalHistoryPages = Math.ceil(purchasesList.length / historyPerPage) || 1;
+  const [historyPurchases, setHistoryPurchases] = useState<Purchase[]>([]);
+  const [totalHistoryPurchasesCount, setTotalHistoryPurchasesCount] = useState(0);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
 
-  const paginatedPurchasesList = useMemo(() => {
-    const startIndex = (historyPage - 1) * historyPerPage;
-    return purchasesList.slice(startIndex, startIndex + historyPerPage);
-  }, [purchasesList, historyPage, historyPerPage]);
+  const totalHistoryPages = Math.ceil(totalHistoryPurchasesCount / historyPerPage) || 1;
+
+  useEffect(() => {
+    if (activeTab !== 'history') return;
+    let active = true;
+    setIsLoadingHistory(true);
+    db.fetchPurchasesPaginated(brand, '', historyPage, historyPerPage).then(res => {
+      if (active) {
+        setHistoryPurchases(res.items);
+        setTotalHistoryPurchasesCount(res.totalCount);
+        setIsLoadingHistory(false);
+      }
+    }).catch(err => {
+      console.error(err);
+      if (active) setIsLoadingHistory(false);
+    });
+    return () => { active = false; };
+  }, [brand, activeTab, historyPage]);
+
+  // Handle realtime/subscription sync notification refreshes
+  useEffect(() => {
+    if (activeTab !== 'history') return;
+    const handleNotification = () => {
+      db.fetchPurchasesPaginated(brand, '', historyPage, historyPerPage).then(res => {
+        setHistoryPurchases(res.items);
+        setTotalHistoryPurchasesCount(res.totalCount);
+      });
+    };
+    return db.subscribe(handleNotification);
+  }, [brand, activeTab, historyPage, historyPerPage]);
 
   useEffect(() => {
     setHistoryPage(1);
   }, [brand]);
 
-  const purchaseItemsAssociated = useMemo(() => {
-    if (!viewingPurchase) return [];
-    const all = db.getPurchaseItems(brand);
-    return all.filter(pi => pi.purchase_id === viewingPurchase.id);
+  const [purchaseItemsAssociated, setPurchaseItemsAssociated] = useState<PurchaseItem[]>([]);
+
+  useEffect(() => {
+    if (!viewingPurchase) {
+      setPurchaseItemsAssociated([]);
+      return;
+    }
+    let active = true;
+    db.fetchPurchaseItemsForPurchase(brand, viewingPurchase.id).then(items => {
+      if (active) {
+        setPurchaseItemsAssociated(items);
+      }
+    });
+    return () => { active = false; };
   }, [viewingPurchase, brand]);
 
-  const handleDeleteSyncedInvoice = (pId: string) => {
-    const p = purchasesList.find(x => x.id === pId);
+  const handleDeleteSyncedInvoice = async (pId: string) => {
+    const p = historyPurchases.find(x => x.id === pId);
     if (!p) return;
     const confirmed = window.confirm(`WARNING: Deleting purchase invoice ${p.invoice_no} will automatically subtract original parts quantity counts from active stock lists. This cannot be undone. Proceed?`);
     if (!confirmed) return;
 
     try {
-      db.deletePurchase(brand, pId, user);
-      refreshComponentData();
+      await db.deletePurchase(brand, pId, user);
+      const res = await db.fetchPurchasesPaginated(brand, '', historyPage, historyPerPage);
+      setHistoryPurchases(res.items);
+      setTotalHistoryPurchasesCount(res.totalCount);
       setViewingPurchase(null);
       triggerToast(`Deducted quantities from stock and deleted invoice ${p.invoice_no}!`);
     } catch (err: any) {
@@ -1177,7 +1229,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-slate-705">
-                  {paginatedPurchasesList.map((p) => (
+                  {historyPurchases.map((p) => (
                     <tr key={p.id} className="hover:bg-slate-50/50">
                       <td className="p-3 font-mono font-bold text-slate-900">{p.invoice_no}</td>
                       <td className="p-3 font-semibold text-slate-800">{p.dealer_name}</td>
@@ -1213,7 +1265,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                       </td>
                     </tr>
                   ))}
-                  {paginatedPurchasesList.length === 0 && (
+                  {historyPurchases.length === 0 && (
                     <tr>
                       <td colSpan={6} className="p-8 text-center text-slate-400 font-normal">
                         No purchases recorded in {brand} schema yet.
@@ -1228,7 +1280,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
             {totalHistoryPages > 1 && (
               <div className="bg-slate-50 border-t border-slate-100 px-4 py-3 flex items-center justify-between">
                 <span className="text-slate-500 text-[11px] font-semibold">
-                  Page <strong className="text-slate-800">{historyPage}</strong> of <strong className="text-slate-800">{totalHistoryPages}</strong> ({purchasesList.length} total purchases)
+                  Page <strong className="text-slate-800">{historyPage}</strong> of <strong className="text-slate-800">{totalHistoryPages}</strong> ({totalHistoryPurchasesCount} total purchases)
                 </span>
                 <div className="inline-flex gap-1.5 text-[11px] font-bold">
                   <button

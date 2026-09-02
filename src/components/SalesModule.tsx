@@ -34,6 +34,8 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const [checkoutParts, setCheckoutParts] = useState<SelectedCheckoutPart[]>([]);
   const [partSearchInput, setPartSearchInput] = useState('');
   const [partSearch, setPartSearch] = useState('');
+  const [searchedParts, setSearchedParts] = useState<InventoryItem[]>([]);
+  const [isSearchingParts, setIsSearchingParts] = useState(false);
   const [globalDiscount, setGlobalDiscount] = useState<number>(0);
   const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('Paid');
   const [customPaidAmount, setCustomPaidAmount] = useState<number>(0);
@@ -118,9 +120,11 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   };
 
   // Refresh references
-  const [inventoryList, setInventoryList] = useState<InventoryItem[]>(() => db.getInventory(brand));
-  const [customersList, setCustomersList] = useState<Customer[]>(() => db.getCustomers());
-  const [salesList, setSalesList] = useState<Sale[]>(() => db.getSales(brand));
+  const [inventoryList, setInventoryList] = useState<InventoryItem[]>([]);
+  const [customersList, setCustomersList] = useState<Customer[]>([]);
+  const [salesList, setSalesList] = useState<Sale[]>([]);
+  const [totalSalesCount, setTotalSalesCount] = useState(0);
+  const [isLoadingSales, setIsLoadingSales] = useState(false);
   const [toastMessageLocal, setToastMessageLocal] = useState<string | null>(null);
 
   // Undo confirmation states
@@ -128,10 +132,21 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const [isUndoing, setIsUndoing] = useState(false);
   const [undoError, setUndoError] = useState<string | null>(null);
 
-  const itemsToRestore = useMemo(() => {
-    if (!undoConfirmSale) return [];
-    return db.getSaleItems(brand).filter(item => item.sale_id === undoConfirmSale.id);
-  }, [undoConfirmSale, brand, salesList]);
+  const [itemsToRestore, setItemsToRestore] = useState<SaleItem[]>([]);
+
+  useEffect(() => {
+    if (!undoConfirmSale) {
+      setItemsToRestore([]);
+      return;
+    }
+    let active = true;
+    db.fetchSaleItemsForSale(brand, undoConfirmSale.id).then(items => {
+      if (active) {
+        setItemsToRestore(items);
+      }
+    });
+    return () => { active = false; };
+  }, [undoConfirmSale, brand]);
 
   const handleUndoSale = async () => {
     if (!undoConfirmSale) return;
@@ -141,6 +156,10 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       await db.undoSale(brand, undoConfirmSale.id, user);
       triggerToast(`Successfully undone invoice #${undoConfirmSale.id.substring(0, 8).toUpperCase()}! Stock has been returned to inventory.`);
       setUndoConfirmSale(null);
+      // Trigger a refresh of the sales list
+      const res = await db.fetchSalesPaginated(brand, historySearch, salesPage, salesPerPage, historyCategory, historyPayment);
+      setSalesList(res.items);
+      setTotalSalesCount(res.totalCount);
     } catch (err: any) {
       console.error(err);
       setUndoError(err.message || 'Failed to undo sale. Please try again.');
@@ -152,13 +171,27 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const refreshComponentData = () => {
     setInventoryList(db.getInventory(brand));
     setCustomersList(db.getCustomers());
-    setSalesList(db.getSales(brand));
   };
 
   React.useEffect(() => {
     refreshComponentData();
     return db.subscribe(refreshComponentData);
   }, [brand]);
+
+  React.useEffect(() => {
+    if (!partSearch.trim() || partSearch.trim().length < 2) {
+      setSearchedParts([]);
+      return;
+    }
+    setIsSearchingParts(true);
+    db.searchActiveParts(brand, partSearch).then(results => {
+      setSearchedParts(results);
+      setIsSearchingParts(false);
+    }).catch(err => {
+      console.error(err);
+      setIsSearchingParts(false);
+    });
+  }, [brand, partSearch]);
 
   React.useEffect(() => {
     if (selectedInvoiceForSlip) {
@@ -174,15 +207,8 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     setTimeout(() => setToastMessageLocal(null), 3000);
   };
 
-  // 1. Part search matching
-  const matchedSearchParts = useMemo(() => {
-    if (!partSearch.trim()) return [];
-    return inventoryList.filter(item => {
-      return item.is_active && 
-        (item.part_no.toLowerCase().includes(partSearch.toLowerCase()) || 
-         item.part_name.toLowerCase().includes(partSearch.toLowerCase()));
-    }).slice(0, 5); // top 5 matches
-  }, [inventoryList, partSearch]);
+  // 1. Part search matching - server-side lookup alias
+  const matchedSearchParts = searchedParts;
 
   const handleCreateNewCustomer = async () => {
     if (!customerName.trim()) return;
@@ -354,35 +380,60 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     }
   };
 
-  // History filters
-  const filteredSalesHistory = useMemo(() => {
-    return salesList.filter(s => {
-      const matchesSearch = s.customer_name.toLowerCase().includes(historySearch.toLowerCase()) || 
-                            s.id.toLowerCase().includes(historySearch.toLowerCase());
-      
-      const matchesCategory = historyCategory === 'All' || s.customer_category === historyCategory;
-      const matchesPayment = historyPayment === 'All' || s.payment_status === historyPayment;
+  // Fetch sales paginated on filter or page change
+  useEffect(() => {
+    let active = true;
+    setIsLoadingSales(true);
+    db.fetchSalesPaginated(brand, historySearch, salesPage, salesPerPage, historyCategory, historyPayment)
+      .then(res => {
+        if (active) {
+          setSalesList(res.items);
+          setTotalSalesCount(res.totalCount);
+          setIsLoadingSales(false);
+        }
+      })
+      .catch(err => {
+        console.error(err);
+        if (active) setIsLoadingSales(false);
+      });
+    return () => { active = false; };
+  }, [brand, salesPage, salesPerPage, historySearch, historyCategory, historyPayment]);
 
-      return matchesSearch && matchesCategory && matchesPayment;
-    });
-  }, [salesList, historySearch, historyCategory, historyPayment]);
+  // Handle realtime/subscription sync notification refreshes
+  useEffect(() => {
+    const handleNotification = () => {
+      db.fetchSalesPaginated(brand, historySearch, salesPage, salesPerPage, historyCategory, historyPayment)
+        .then(res => {
+          setSalesList(res.items);
+          setTotalSalesCount(res.totalCount);
+        });
+    };
+    return db.subscribe(handleNotification);
+  }, [brand, historySearch, salesPage, salesPerPage, historyCategory, historyPayment]);
 
-  const totalSalesPages = Math.ceil(filteredSalesHistory.length / salesPerPage) || 1;
+  const totalSalesPages = Math.ceil(totalSalesCount / salesPerPage) || 1;
 
-  const paginatedSalesHistory = useMemo(() => {
-    const startIndex = (salesPage - 1) * salesPerPage;
-    return filteredSalesHistory.slice(startIndex, startIndex + salesPerPage);
-  }, [filteredSalesHistory, salesPage, salesPerPage]);
+  const paginatedSalesHistory = salesList;
 
   const handlePrintSlipAction = () => {
     window.print();
   };
 
-  // Get line items specifically for the print slip modal
-  const selectedInvoiceItems = useMemo(() => {
-    if (!selectedInvoiceForSlip) return [];
-    const allItems = db.getSaleItems(brand);
-    return allItems.filter(item => item.sale_id === selectedInvoiceForSlip.id);
+  // Get line items specifically for the print slip modal on-demand
+  const [selectedInvoiceItems, setSelectedInvoiceItems] = useState<SaleItem[]>([]);
+
+  useEffect(() => {
+    if (!selectedInvoiceForSlip) {
+      setSelectedInvoiceItems([]);
+      return;
+    }
+    let active = true;
+    db.fetchSaleItemsForSale(brand, selectedInvoiceForSlip.id).then(items => {
+      if (active) {
+        setSelectedInvoiceItems(items);
+      }
+    });
+    return () => { active = false; };
   }, [selectedInvoiceForSlip, brand]);
 
   const handleShareWhatsApp = () => {
@@ -587,7 +638,17 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                 </div>
 
                 {/* Autocomplete drawer */}
-                {matchedSearchParts.length > 0 && (
+                {isSearchingParts && (
+                  <div className="absolute left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-20 p-3 text-center text-xs font-semibold text-slate-500">
+                    <span className="inline-block animate-pulse">Searching active inventory list on Supabase...</span>
+                  </div>
+                )}
+                {!isSearchingParts && partSearch.trim().length >= 2 && matchedSearchParts.length === 0 && (
+                  <div className="absolute left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-20 p-3 text-center text-xs font-semibold text-slate-400">
+                    No matching parts found in active inventory.
+                  </div>
+                )}
+                {!isSearchingParts && matchedSearchParts.length > 0 && (
                   <div className="absolute left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-20 overflow-hidden divide-y divide-slate-100">
                     {matchedSearchParts.map((item) => (
                       <button
@@ -950,7 +1011,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
             {totalSalesPages > 1 && (
               <div className="bg-slate-50 border-t border-slate-100 px-4 py-3 flex items-center justify-between">
                 <span className="text-slate-500 text-[11px] font-semibold">
-                  Page <strong className="text-slate-800">{salesPage}</strong> of <strong className="text-slate-800">{totalSalesPages}</strong> ({filteredSalesHistory.length} total sales)
+                  Page <strong className="text-slate-800">{salesPage}</strong> of <strong className="text-slate-800">{totalSalesPages}</strong> ({totalSalesCount} total sales)
                 </span>
                 <div className="inline-flex gap-1.5 text-[11px] font-bold">
                   <button

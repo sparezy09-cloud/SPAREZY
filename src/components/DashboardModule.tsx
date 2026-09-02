@@ -13,53 +13,40 @@ interface DashboardModuleProps {
 }
 
 export default function DashboardModule({ brand, user, onNavigateToModule }: DashboardModuleProps) {
-  const [, forceUpdate] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [metrics, setMetrics] = useState<any>(null);
+
+  const loadData = async () => {
+    setIsLoading(true);
+    try {
+      const data = await db.fetchDashboardMetrics(brand);
+      setMetrics(data);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   useEffect(() => {
-    setIsLoading(true);
-    const timer = setTimeout(() => {
-      setIsLoading(false);
-    }, 750);
-
-    const unsubscribe = db.subscribe(() => {
-      forceUpdate(prev => prev + 1);
-    });
-
-    return () => {
-      clearTimeout(timer);
-      unsubscribe();
-    };
+    loadData();
+    return db.subscribe(loadData);
   }, [brand]);
 
-  // Query only selected brand schema data (optimizes load speed!)
-  const inventory = db.getInventory(brand);
-  const sales = db.getSales(brand);
-  const returns = db.getReturns(brand);
-  const purchases = db.getPurchases(brand);
-  const customers = db.getCustomers();
-
-  // Metrics calculation
-  const activeItems = inventory;
-  
-  const totalSku = activeItems.length;
-  const totalQty = activeItems.reduce((acc, curr) => acc + curr.quantity, 0);
-  const totalValuation = activeItems.reduce((acc, curr) => acc + (curr.quantity * curr.mrp), 0);
-
-  const lowStockItems = activeItems.filter(item => item.quantity <= 3);
-
-  const totalSalesRevenue = sales.reduce((acc, curr) => acc + curr.total_amount, 0);
-  const totalPendingCollected = sales.reduce((acc, curr) => acc + curr.paid_amount, 0); // Note: correct calculated mapping as pre-configured
-  const totalPaidRevenue = sales.reduce((acc, curr) => acc + curr.paid_amount, 0);
-
-  const totalReturnsValuation = returns.reduce((acc, curr) => acc + curr.refund_amount, 0);
-  const totalPurchasesValuation = purchases.reduce((acc, curr) => acc + curr.total_after_discount, 0);
-
-  // Sales trend by customer category
-  const categorySales = sales.reduce((acc, sale) => {
-    acc[sale.customer_category] = (acc[sale.customer_category] || 0) + sale.total_amount;
-    return acc;
-  }, {} as Record<string, number>);
+  // Metrics calculation mapped from dynamic metrics state
+  const totalSku = metrics?.totalSku || 0;
+  const totalQty = metrics?.totalQty || 0;
+  const totalValuation = metrics?.totalValuation || 0;
+  const lowStockItems = metrics?.lowStockItems || [];
+  const totalSalesRevenue = metrics?.totalSalesRevenue || 0;
+  const totalPendingCollected = metrics?.totalPaidRevenue || 0; // Note: correct calculated mapping as pre-configured
+  const totalPaidRevenue = metrics?.totalPaidRevenue || 0;
+  const totalReturnsValuation = metrics?.totalReturnsValuation || 0;
+  const returnsCount = metrics?.returnsCount || 0;
+  const totalPurchasesValuation = metrics?.totalPurchasesValuation || 0;
+  const purchasesCount = metrics?.purchasesCount || 0;
+  const categorySales = metrics?.categorySales || {};
+  const recentSales = metrics?.recentSales || [];
 
   const categories: ('Walk-in' | 'Mistri' | 'Retailer' | 'Garage')[] = ['Walk-in', 'Mistri', 'Retailer', 'Garage'];
   const colors = {
@@ -69,9 +56,7 @@ export default function DashboardModule({ brand, user, onNavigateToModule }: Das
     'Garage': 'bg-indigo-500'
   };
 
-  const recentSales = sales.slice(0, 5);
-
-  if (isLoading) {
+  if (isLoading || !metrics) {
     return (
       <div id="dashboard-loading-root" className="space-y-6">
         {/* Shimmering Brand & User Greeting Header */}
@@ -345,13 +330,13 @@ export default function DashboardModule({ brand, user, onNavigateToModule }: Das
             <div className="p-4 bg-emerald-50/50 border border-emerald-150 rounded-2xl text-center">
               <span className="text-[10px] text-emerald-800 font-bold uppercase tracking-wider block">Customer Returns</span>
               <p className="text-lg font-black text-emerald-955 text-slate-900 mt-1">₹{totalReturnsValuation.toLocaleString('en-IN')}</p>
-              <span className="text-[9px] text-emerald-600 font-semibold block mt-0.5">{returns.length} returns</span>
+              <span className="text-[9px] text-emerald-600 font-semibold block mt-0.5">{returnsCount} returns</span>
             </div>
 
             <div className="p-4 bg-blue-50/50 border border-blue-150 rounded-2xl text-center">
               <span className="text-[10px] text-blue-800 font-bold uppercase tracking-wider block">Purchasing Valuation</span>
               <p className="text-lg font-black text-blue-995 text-slate-900 mt-1">₹{totalPurchasesValuation.toLocaleString('en-IN')}</p>
-              <span className="text-[9px] text-blue-600 font-semibold block mt-0.5">{purchases.length} invoices matched</span>
+              <span className="text-[9px] text-blue-600 font-semibold block mt-0.5">{purchasesCount} invoices matched</span>
             </div>
           </div>
 

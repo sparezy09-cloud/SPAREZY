@@ -57,6 +57,9 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
 
   React.useEffect(() => {
     refreshList();
+    db.ensureInventoryLoaded(brand).then(() => {
+      refreshList();
+    });
     return db.subscribe(refreshList);
   }, [brand, showArchived]);
 
@@ -86,91 +89,29 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
     });
   }, [inventoryList, search, showLowStockOnly, lowStockThreshold]);
 
-  // Part Movement calculator for the details popup
-  const partMovements = useMemo(() => {
+  // Fetch part movements asynchronously when viewing details of a specific part
+  const [partMovements, setPartMovements] = useState<{ sales: any[], purchases: any[], returns: any[], unified: any[] }>({ sales: [], purchases: [], returns: [], unified: [] });
+  const [isLoadingMovements, setIsLoadingMovements] = useState(false);
+
+  React.useEffect(() => {
     if (!viewingPartDetails) {
-      return { sales: [], purchases: [], returns: [], unified: [] };
+      setPartMovements({ sales: [], purchases: [], returns: [], unified: [] });
+      return;
     }
-    const targetNo = viewingPartDetails.part_no.trim().toLowerCase();
-
-    // 1. Match sales
-    const allSales = db.getSales(brand) || [];
-    const allSaleItems = db.getSaleItems(brand) || [];
-    const salesMovements = allSaleItems
-      .filter(item => item.part_no.trim().toLowerCase() === targetNo)
-      .map(item => {
-        const parentSale = allSales.find(s => s.id === item.sale_id);
-        const saleDate = parentSale?.sale_date || parentSale?.created_at || item.created_at || new Date().toISOString();
-        return {
-          id: item.id,
-          type: 'sale' as const,
-          date: saleDate,
-          quantity: item.quantity,
-          mrp: item.mrp || viewingPartDetails.mrp,
-          total: item.final_amount,
-          info: parentSale 
-            ? `Sold to ${parentSale.customer_name} (Invoice: ${parentSale.id.substring(0, 8).toUpperCase()})` 
-            : `Sale Record`,
-          referenceId: item.sale_id,
-          operator: parentSale?.created_by || 'Staff'
-        };
+    let active = true;
+    setIsLoadingMovements(true);
+    db.fetchPartMovements(brand, viewingPartDetails.part_no)
+      .then(res => {
+        if (active) {
+          setPartMovements(res);
+          setIsLoadingMovements(false);
+        }
+      })
+      .catch(err => {
+        console.error(err);
+        if (active) setIsLoadingMovements(false);
       });
-
-    // 2. Match purchases
-    const allPurchases = db.getPurchases(brand) || [];
-    const allPurchaseItems = db.getPurchaseItems(brand) || [];
-    const purchasesMovements = allPurchaseItems
-      .filter(item => item.part_no.trim().toLowerCase() === targetNo)
-      .map(item => {
-        const parentPurchase = allPurchases.find(p => p.id === item.purchase_id);
-        const purchaseDate = parentPurchase?.invoice_date || parentPurchase?.created_at || item.created_at || new Date().toISOString();
-        return {
-          id: item.id,
-          type: 'purchase' as const,
-          date: purchaseDate,
-          quantity: item.quantity,
-          mrp: item.mrp || viewingPartDetails.mrp,
-          total: item.quantity * (item.mrp || viewingPartDetails.mrp),
-          info: parentPurchase 
-            ? `Inward Stock: ${parentPurchase.dealer_name} (Inv: ${parentPurchase.invoice_no || parentPurchase.id.substring(0, 8).toUpperCase()})` 
-            : `Purchase Stock Inward`,
-          referenceId: item.purchase_id,
-          operator: parentPurchase?.created_by || 'Staff'
-        };
-      });
-
-    // 3. Match returns
-    const allReturns = db.getReturns(brand) || [];
-    const returnsMovements = allReturns
-      .filter(item => item.part_no.trim().toLowerCase() === targetNo)
-      .map(item => {
-        const returnDate = item.return_date || new Date().toISOString();
-        return {
-          id: item.id,
-          type: 'return' as const,
-          date: returnDate,
-          quantity: item.returned_quantity,
-          mrp: item.refund_amount / (item.returned_quantity || 1) || viewingPartDetails.mrp,
-          total: item.refund_amount,
-          info: `Returned by Customer (Ref Sale: ${item.sale_id.substring(0, 8).toUpperCase()})`,
-          referenceId: item.sale_id,
-          operator: item.created_by || 'Staff'
-        };
-      });
-
-    // Combine all and sort by date descending
-    const unifiedMovements = [
-      ...salesMovements,
-      ...purchasesMovements,
-      ...returnsMovements
-    ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-
-    return {
-      sales: salesMovements,
-      purchases: purchasesMovements,
-      returns: returnsMovements,
-      unified: unifiedMovements
-    };
+    return () => { active = false; };
   }, [viewingPartDetails, brand]);
 
   // 2. Pagination Math

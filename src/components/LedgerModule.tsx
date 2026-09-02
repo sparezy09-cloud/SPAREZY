@@ -24,21 +24,30 @@ export default function LedgerModule({ brand, user }: LedgerModuleProps) {
   const [activeDealerName, setActiveDealerName] = useState<string | null>(null);
 
   // States
-  const [customersList, setCustomersList] = useState<Customer[]>(() => db.getCustomers());
-  const [salesList, setSalesList] = useState<Sale[]>(() => db.getSales(brand));
-  const [returnsList, setReturnsList] = useState<ReturnRecord[]>(() => db.getReturns(brand));
-  const [purchasesList, setPurchasesList] = useState<Purchase[]>(() => db.getPurchases(brand));
+  const [customersList, setCustomersList] = useState<Customer[]>([]);
+  const [salesList, setSalesList] = useState<any[]>([]);
+  const [returnsList, setReturnsList] = useState<any[]>([]);
+  const [purchasesList, setPurchasesList] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
 
   // Pagination states
   const [customerPage, setCustomerPage] = useState(1);
   const [dealerPage, setDealerPage] = useState(1);
   const ledgersPerPage = 15;
 
-  const refreshComponentData = () => {
-    setCustomersList(db.getCustomers());
-    setSalesList(db.getSales(brand));
-    setReturnsList(db.getReturns(brand));
-    setPurchasesList(db.getPurchases(brand));
+  const refreshComponentData = async () => {
+    setIsLoading(true);
+    try {
+      const ledgerRes = await db.fetchLedgerData(brand);
+      setCustomersList(db.getCustomers());
+      setSalesList(ledgerRes.sales);
+      setReturnsList(ledgerRes.returns);
+      setPurchasesList(ledgerRes.purchases);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   useEffect(() => {
