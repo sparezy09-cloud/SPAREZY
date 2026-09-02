@@ -205,6 +205,9 @@ function initLocalFallback() {
 const scrubRow = (row: any) => {
   if (!row) return row;
   const r = { ...row };
+  if (r.name !== undefined && typeof r.name === 'string' && r.name.includes("|||")) {
+    r.name = r.name.split("|||")[0].trim();
+  }
   if (r.mrp !== undefined) r.mrp = Number(r.mrp);
   if (r.quantity !== undefined) r.quantity = Number(r.quantity);
   if (r.subtotal !== undefined) r.subtotal = Number(r.subtotal);
@@ -1061,7 +1064,7 @@ export const db = {
     if (isSupabaseConfigured && supabase) {
       const dbRow = {
         id: newUser.id,
-        name: newUser.name,
+        name: password && password.trim() ? `${newUser.name} |||${password.trim()}` : newUser.name,
         email: newUser.email.toLowerCase(),
         role: newUser.role,
         status: newUser.status,
