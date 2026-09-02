@@ -1203,6 +1203,11 @@ export const db = {
     return cache[b].inventory.filter(item => item.is_active !== false);
   },
 
+  getPartCompatibilityCache: (brand: Brand): PartVehicleCompatibility[] => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    return cache[b].compatibility || [];
+  },
+
   saveInventory: (brand: Brand, items: InventoryItem[]) => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     cache[b].inventory = items;
@@ -3305,10 +3310,62 @@ export const db = {
     limit: number,
     showArchived: boolean,
     showLowStockOnly: boolean,
-    lowStockThreshold: number
+    lowStockThreshold: number,
+    vehicleFilter?: { brand: string; model: string } | null
   ): Promise<{ items: InventoryItem[], totalCount: number }> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     if (isSupabaseConfigured && supabase) {
+      let filteredPartIds: string[] | null = null;
+
+      // 1. Filter by specific vehicle if filter selected
+      if (vehicleFilter) {
+        const { data: vData, error: vErr } = await supabase
+          .from('vehicles')
+          .select('id')
+          .eq('brand', vehicleFilter.brand)
+          .eq('model', vehicleFilter.model);
+        if (vErr) throw vErr;
+        
+        if (vData && vData.length > 0) {
+          const vIds = vData.map(v => v.id);
+          const { data: cData, error: cErr } = await supabase.schema(b)
+            .from('part_vehicle_compatibility')
+            .select('part_id')
+            .in('vehicle_id', vIds);
+          if (cErr) throw cErr;
+          
+          filteredPartIds = (cData || []).map(c => c.part_id);
+          if (filteredPartIds.length === 0) {
+            return { items: [], totalCount: 0 };
+          }
+        } else {
+          return { items: [], totalCount: 0 };
+        }
+      }
+
+      // 2. Server-side search logic (matching part_no, part_name, or vehicle brand/model)
+      let matchingPartIds: string[] | null = null;
+      if (search && search.trim().length > 0) {
+        const cleanSearch = search.trim();
+        const { data: matchedVehicles, error: vehErr } = await supabase
+          .from('vehicles')
+          .select('id')
+          .or(`brand.ilike.%${cleanSearch}%,model.ilike.%${cleanSearch}%,variant.ilike.%${cleanSearch}%`);
+          
+        if (!vehErr && matchedVehicles && matchedVehicles.length > 0) {
+          const vIds = matchedVehicles.map(v => v.id);
+          const { data: matchedCompats, error: compErr } = await supabase.schema(b)
+            .from('part_vehicle_compatibility')
+            .select('part_id')
+            .in('vehicle_id', vIds);
+            
+          if (!compErr && matchedCompats) {
+            matchingPartIds = matchedCompats.map(c => c.part_id);
+          }
+        }
+      }
+
+      // Build main query on the schema-specific inventory table
       let query = supabase.schema(b).from('inventory')
         .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at', { count: 'exact' });
       
@@ -3318,8 +3375,20 @@ export const db = {
       if (showLowStockOnly) {
         query = query.lte('quantity', lowStockThreshold);
       }
-      if (search) {
-        query = query.or(`part_no.ilike.%${search}%,part_name.ilike.%${search}%`);
+
+      // Apply the specific vehicle filter's part IDs restriction
+      if (filteredPartIds !== null) {
+        query = query.in('id', filteredPartIds);
+      }
+
+      // Apply search string (checking part_no, part_name, or matching compatible parts)
+      if (search && search.trim().length > 0) {
+        const cleanSearch = search.trim();
+        if (matchingPartIds && matchingPartIds.length > 0) {
+          query = query.or(`part_no.ilike.%${cleanSearch}%,part_name.ilike.%${cleanSearch}%,id.in.(${matchingPartIds.join(',')})`);
+        } else {
+          query = query.or(`part_no.ilike.%${cleanSearch}%,part_name.ilike.%${cleanSearch}%`);
+        }
       }
       
       const from = (page - 1) * limit;
@@ -3336,20 +3405,59 @@ export const db = {
         totalCount: count || 0
       };
     } else {
+      // Offline fallback: perform operations on local cache
       let list = cache[b].inventory;
       if (!showArchived) list = list.filter(item => item.is_active !== false);
       if (showLowStockOnly) list = list.filter(item => item.quantity <= lowStockThreshold);
+      
+      if (vehicleFilter) {
+        const vIds = cache.vehicles
+          .filter(v => v.brand.toLowerCase() === vehicleFilter.brand.toLowerCase() && v.model.toLowerCase() === vehicleFilter.model.toLowerCase())
+          .map(v => v.id);
+        const compPartIds = cache[b].compatibility
+          .filter(c => vIds.includes(c.vehicle_id))
+          .map(c => c.part_id);
+        list = list.filter(item => compPartIds.includes(item.id));
+      }
+      
       if (search) {
+        const lowerSearch = search.toLowerCase();
+        const matchedVehIds = cache.vehicles
+          .filter(v => 
+            v.brand.toLowerCase().includes(lowerSearch) || 
+            v.model.toLowerCase().includes(lowerSearch) || 
+            (v.variant && v.variant.toLowerCase().includes(lowerSearch))
+          )
+          .map(v => v.id);
+        const compatPartIds = cache[b].compatibility
+          .filter(c => matchedVehIds.includes(c.vehicle_id))
+          .map(c => c.part_id);
+          
         list = list.filter(item => 
-          item.part_no.toLowerCase().includes(search.toLowerCase()) || 
-          item.part_name.toLowerCase().includes(search.toLowerCase())
+          item.part_no.toLowerCase().includes(lowerSearch) || 
+          item.part_name.toLowerCase().includes(lowerSearch) ||
+          compatPartIds.includes(item.id)
         );
       }
+
       const from = (page - 1) * limit;
       return {
         items: list.slice(from, from + limit),
         totalCount: list.length
       };
+    }
+  },
+
+  getVehicles: async (): Promise<Vehicle[]> => {
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.from('vehicles')
+        .select('id, brand, model, variant, year_from, year_to, fuel_type, engine, vehicle_type')
+        .order('brand', { ascending: true })
+        .order('model', { ascending: true });
+      if (error) throw error;
+      return (data || []) as Vehicle[];
+    } else {
+      return cache.vehicles;
     }
   },
 
@@ -3401,7 +3509,7 @@ export const db = {
         .from('part_vehicle_compatibility')
         .select(`
           id, part_id, vehicle_id, notes, created_at,
-          vehicle:vehicle_id (id, brand, model, variant, year_from, year_to, fuel_type, engine, vehicle_type)
+          vehicle:vehicles!vehicle_id (id, brand, model, variant, year_from, year_to, fuel_type, engine, vehicle_type)
         `)
         .eq('part_id', partId);
       if (error) throw error;
