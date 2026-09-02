@@ -2628,29 +2628,36 @@ export const db = {
         .from('inventory')
         .select('id', { count: 'exact', head: true });
         
-      if (!countErr) {
-        const totalRows = count || 0;
-        if (totalRows > 0) {
-          const pageSize = 1000;
-          const pages = Math.ceil(totalRows / pageSize);
-          const rangePromises = [];
-          for (let i = 0; i < pages; i++) {
-            const from = i * pageSize;
-            const to = (i + 1) * pageSize - 1;
-            rangePromises.push(
-              supabase.schema(b).from('inventory')
-                .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at')
-                .range(from, to)
-            );
-          }
-          const rangeResults = await Promise.all(rangePromises);
-          for (const res of rangeResults) {
-            if (res.data) {
-              bInv = bInv.concat(res.data);
-            }
-          }
-          cache[b].inventory = bInv.map(scrubRow);
+      if (countErr) {
+        console.error(`[Lazy Sync Error] Failed to fetch inventory count for ${brand}:`, countErr);
+        throw new Error(`Failed to load inventory from Supabase: ${countErr.message} (Code: ${countErr.code})`);
+      }
+
+      const totalRows = count || 0;
+      if (totalRows > 0) {
+        const pageSize = 1000;
+        const pages = Math.ceil(totalRows / pageSize);
+        const rangePromises = [];
+        for (let i = 0; i < pages; i++) {
+          const from = i * pageSize;
+          const to = (i + 1) * pageSize - 1;
+          rangePromises.push(
+            supabase.schema(b).from('inventory')
+              .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at')
+              .range(from, to)
+          );
         }
+        const rangeResults = await Promise.all(rangePromises);
+        for (const res of rangeResults) {
+          if (res.error) {
+            console.error(`[Lazy Sync Error] Range query failed:`, res.error);
+            throw new Error(`Failed to load a page of inventory: ${res.error.message}`);
+          }
+          if (res.data) {
+            bInv = bInv.concat(res.data);
+          }
+        }
+        cache[b].inventory = bInv.map(scrubRow);
       }
     }
     return cache[b].inventory;

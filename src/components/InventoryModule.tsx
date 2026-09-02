@@ -50,16 +50,31 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   const [showLowStockOnly, setShowLowStockOnly] = useState(false);
   const [lowStockThreshold, setLowStockThreshold] = useState(5);
   const [inventoryList, setInventoryList] = useState<InventoryItem[]>(() => db.getInventory(brand, false));
+  const [isLoading, setIsLoading] = useState(false);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   const refreshList = () => {
     setInventoryList(db.getInventory(brand, showArchived));
   };
 
+  const loadData = () => {
+    setIsLoading(true);
+    setFetchError(null);
+    db.ensureInventoryLoaded(brand)
+      .then(() => {
+        refreshList();
+        setIsLoading(false);
+      })
+      .catch((err: any) => {
+        console.error("Failed to load inventory:", err);
+        setFetchError(err.message || "Failed to load database inventory.");
+        setIsLoading(false);
+      });
+  };
+
   React.useEffect(() => {
     refreshList();
-    db.ensureInventoryLoaded(brand).then(() => {
-      refreshList();
-    });
+    loadData();
     return db.subscribe(refreshList);
   }, [brand, showArchived]);
 
@@ -798,7 +813,38 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
                   </td>
                 </tr>
               ))}
-              {filteredList.length === 0 && (
+              {isLoading && (
+                <tr>
+                  <td colSpan={7} className="p-12 text-center text-indigo-600 font-bold">
+                    <div className="flex items-center justify-center gap-2">
+                      <span className="w-5 h-5 rounded-full border-2 border-indigo-600 border-t-transparent animate-spin inline-block"></span>
+                      <span>Downloading real-time inventory from database...</span>
+                    </div>
+                  </td>
+                </tr>
+              )}
+              {fetchError && !isLoading && (
+                <tr>
+                  <td colSpan={7} className="p-12 text-center text-red-600">
+                    <div className="max-w-md mx-auto space-y-3 bg-red-50 border border-red-200 rounded-2xl p-6 text-left">
+                      <div className="flex items-center gap-2 text-red-700 font-extrabold text-sm">
+                        <AlertTriangle className="w-5 h-5" />
+                        <span>Database Connection Error</span>
+                      </div>
+                      <p className="text-red-650 text-xs font-semibold leading-relaxed">
+                        {fetchError}
+                      </p>
+                      <button
+                        onClick={loadData}
+                        className="bg-red-600 hover:bg-red-700 text-white font-bold py-1.5 px-4 rounded-xl text-xs transition duration-150 cursor-pointer shadow-xs"
+                      >
+                        Retry Connection
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              )}
+              {!isLoading && !fetchError && filteredList.length === 0 && (
                 <tr>
                   <td colSpan={7} className="p-12 text-center text-slate-400">
                     No results matched your search configurations.
