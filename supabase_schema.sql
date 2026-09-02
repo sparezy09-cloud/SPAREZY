@@ -825,3 +825,104 @@ END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
 
+-- ====================================================================
+-- 5. VEHICLE COMPATIBILITY DATABASE SCHEMAS
+-- ====================================================================
+
+-- Create vehicles master table in public schema
+CREATE TABLE IF NOT EXISTS public.vehicles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand TEXT NOT NULL,
+    model TEXT NOT NULL,
+    variant TEXT,
+    year_from INTEGER,
+    year_to INTEGER,
+    fuel_type TEXT,
+    engine TEXT,
+    vehicle_type TEXT,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Indexes for public.vehicles
+CREATE INDEX IF NOT EXISTS idx_vehicles_brand ON public.vehicles(brand);
+CREATE INDEX IF NOT EXISTS idx_vehicles_model ON public.vehicles(model);
+CREATE INDEX IF NOT EXISTS idx_vehicles_brand_model ON public.vehicles(brand, model);
+
+-- Enable RLS for public.vehicles
+ALTER TABLE public.vehicles ENABLE ROW LEVEL SECURITY;
+
+-- Policies for public.vehicles
+DROP POLICY IF EXISTS vehicles_owner_policy ON public.vehicles;
+CREATE POLICY vehicles_owner_policy ON public.vehicles
+    FOR ALL USING (public.is_owner());
+
+DROP POLICY IF EXISTS vehicles_manager_policy ON public.vehicles;
+CREATE POLICY vehicles_manager_policy ON public.vehicles
+    FOR ALL USING (public.is_manager());
+
+-- Create part_vehicle_compatibility in hyundai schema
+CREATE TABLE IF NOT EXISTS hyundai.part_vehicle_compatibility (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    part_id UUID NOT NULL REFERENCES hyundai.inventory(id) ON DELETE CASCADE,
+    vehicle_id UUID NOT NULL REFERENCES public.vehicles(id) ON DELETE CASCADE,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    CONSTRAINT uniq_hyundai_part_vehicle UNIQUE (part_id, vehicle_id)
+);
+
+-- Indexes for hyundai.part_vehicle_compatibility
+CREATE INDEX IF NOT EXISTS idx_hyundai_part_veh_part ON hyundai.part_vehicle_compatibility(part_id);
+CREATE INDEX IF NOT EXISTS idx_hyundai_part_veh_veh ON hyundai.part_vehicle_compatibility(vehicle_id);
+
+-- Enable RLS for hyundai.part_vehicle_compatibility
+ALTER TABLE hyundai.part_vehicle_compatibility ENABLE ROW LEVEL SECURITY;
+
+-- Policies for hyundai.part_vehicle_compatibility
+DROP POLICY IF EXISTS hyundai_part_veh_owner ON hyundai.part_vehicle_compatibility;
+CREATE POLICY hyundai_part_veh_owner ON hyundai.part_vehicle_compatibility
+    FOR ALL USING (public.is_owner());
+
+DROP POLICY IF EXISTS hyundai_part_veh_manager ON hyundai.part_vehicle_compatibility;
+CREATE POLICY hyundai_part_veh_manager ON hyundai.part_vehicle_compatibility
+    FOR ALL USING (public.is_manager());
+
+-- Create part_vehicle_compatibility in mahindra schema
+CREATE TABLE IF NOT EXISTS mahindra.part_vehicle_compatibility (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    part_id UUID NOT NULL REFERENCES mahindra.inventory(id) ON DELETE CASCADE,
+    vehicle_id UUID NOT NULL REFERENCES public.vehicles(id) ON DELETE CASCADE,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    CONSTRAINT uniq_mahindra_part_vehicle UNIQUE (part_id, vehicle_id)
+);
+
+-- Indexes for mahindra.part_vehicle_compatibility
+CREATE INDEX IF NOT EXISTS idx_mahindra_part_veh_part ON mahindra.part_vehicle_compatibility(part_id);
+CREATE INDEX IF NOT EXISTS idx_mahindra_part_veh_veh ON mahindra.part_vehicle_compatibility(vehicle_id);
+
+-- Enable RLS for mahindra.part_vehicle_compatibility
+ALTER TABLE mahindra.part_vehicle_compatibility ENABLE ROW LEVEL SECURITY;
+
+-- Policies for mahindra.part_vehicle_compatibility
+DROP POLICY IF EXISTS mahindra_part_veh_owner ON mahindra.part_vehicle_compatibility;
+CREATE POLICY mahindra_part_veh_owner ON mahindra.part_vehicle_compatibility
+    FOR ALL USING (public.is_owner());
+
+DROP POLICY IF EXISTS mahindra_part_veh_manager ON mahindra.part_vehicle_compatibility;
+CREATE POLICY mahindra_part_veh_manager ON mahindra.part_vehicle_compatibility
+    FOR ALL USING (public.is_manager());
+
+-- Insert initial seed vehicles for Hyundai and Mahindra
+INSERT INTO public.vehicles (brand, model, variant, year_from, year_to, fuel_type, engine, vehicle_type)
+VALUES 
+    ('Hyundai', 'Creta', 'SX', 2020, 2024, 'Petrol', '1.5L', 'SUV'),
+    ('Hyundai', 'Venue', 'S', 2019, 2024, 'Petrol', '1.2L', 'SUV'),
+    ('Hyundai', 'i20', 'Asta', 2018, 2024, 'Petrol', '1.2L', 'Hatchback'),
+    ('Mahindra', 'Scorpio', 'S11', 2015, 2024, 'Diesel', '2.2L mHawk', 'SUV'),
+    ('Mahindra', 'Thar', 'LX', 2020, 2024, 'Diesel', '2.2L mHawk', 'SUV'),
+    ('Mahindra', 'XUV700', 'AX7', 2021, 2024, 'Diesel', '2.2L', 'SUV'),
+    ('Mahindra', 'Bolero', 'B6', 2012, 2024, 'Diesel', '1.5L mHawk', 'SUV')
+ON CONFLICT DO NOTHING;
+
+
+

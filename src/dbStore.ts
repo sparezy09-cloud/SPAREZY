@@ -3,7 +3,7 @@ import { safeLocalStorage, safeSessionStorage } from './storagePolyfill';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
-  ScanSource
+  ScanSource, Vehicle, PartVehicleCompatibility
 } from './types';
 
 const localStorage = safeLocalStorage;
@@ -16,6 +16,7 @@ const KEY_LOGS = 'sparezy_public_logs_fb';
 const KEY_ACTIVE_USER = 'sparezy_active_user_fb';
 const KEY_ACTIVE_BRAND = 'sparezy_active_brand_fb';
 const KEY_LOCAL_PASSWORDS = 'sparezy_local_user_passwords_fb';
+const KEY_VEHICLES = 'sparezy_vehicles_fb';
 
 // Safe LocalStorage wrapper to prevent quota/limit errors when database partitions grow large
 try {
@@ -59,6 +60,7 @@ let cache = {
   users: [] as User[],
   customers: [] as Customer[],
   transaction_logs: [] as TransactionLog[],
+  vehicles: [] as Vehicle[],
   hyundai: {
     inventory: [] as InventoryItem[],
     sales: [] as Sale[],
@@ -68,6 +70,7 @@ let cache = {
     purchase_items: [] as PurchaseItem[],
     bulk_update_history: [] as BulkUpdateHistory[],
     mrp_history: [] as MRPHistory[],
+    compatibility: [] as PartVehicleCompatibility[],
   },
   mahindra: {
     inventory: [] as InventoryItem[],
@@ -78,8 +81,10 @@ let cache = {
     purchase_items: [] as PurchaseItem[],
     bulk_update_history: [] as BulkUpdateHistory[],
     mrp_history: [] as MRPHistory[],
+    compatibility: [] as PartVehicleCompatibility[],
   }
 };
+
 
 // DB Subscribers list
 type DBListener = () => void;
@@ -194,6 +199,30 @@ function initLocalFallback() {
     connectionStatus = 'failed';
     connectionError = 'VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are missing. Please add them inside environmental secrets in your workspace configuration settings.';
   }
+
+  // Load or seed vehicles
+  if (!localStorage.getItem(KEY_VEHICLES)) {
+    const initialVehicles: Vehicle[] = [
+      { id: uuid(), brand: 'Hyundai', model: 'Creta', variant: 'SX', year_from: 2020, year_to: 2024, fuel_type: 'Petrol', engine: '1.5L', vehicle_type: 'SUV', created_at: new Date().toISOString() },
+      { id: uuid(), brand: 'Hyundai', model: 'Venue', variant: 'S', year_from: 2019, year_to: 2024, fuel_type: 'Petrol', engine: '1.2L', vehicle_type: 'SUV', created_at: new Date().toISOString() },
+      { id: uuid(), brand: 'Hyundai', model: 'i20', variant: 'Asta', year_from: 2018, year_to: 2024, fuel_type: 'Petrol', engine: '1.2L', vehicle_type: 'Hatchback', created_at: new Date().toISOString() },
+      { id: uuid(), brand: 'Mahindra', model: 'Scorpio', variant: 'S11', year_from: 2015, year_to: 2024, fuel_type: 'Diesel', engine: '2.2L mHawk', vehicle_type: 'SUV', created_at: new Date().toISOString() },
+      { id: uuid(), brand: 'Mahindra', model: 'Thar', variant: 'LX', year_from: 2020, year_to: 2024, fuel_type: 'Diesel', engine: '2.2L mHawk', vehicle_type: 'SUV', created_at: new Date().toISOString() },
+      { id: uuid(), brand: 'Mahindra', model: 'XUV700', variant: 'AX7', year_from: 2021, year_to: 2024, fuel_type: 'Diesel', engine: '2.2L', vehicle_type: 'SUV', created_at: new Date().toISOString() },
+      { id: uuid(), brand: 'Mahindra', model: 'Bolero', variant: 'B6', year_from: 2012, year_to: 2024, fuel_type: 'Diesel', engine: '1.5L mHawk', vehicle_type: 'SUV', created_at: new Date().toISOString() }
+    ];
+    localStorage.setItem(KEY_VEHICLES, JSON.stringify(initialVehicles));
+    cache.vehicles = initialVehicles;
+  } else {
+    cache.vehicles = safeParseJSON(localStorage.getItem(KEY_VEHICLES)) || [];
+  }
+
+  // Load compatibilities for offline local states
+  const hCompat = localStorage.getItem('sparezy_schema_hyundai_compatibility');
+  cache.hyundai.compatibility = hCompat ? safeParseJSON(hCompat) || [] : [];
+
+  const mCompat = localStorage.getItem('sparezy_schema_mahindra_compatibility');
+  cache.mahindra.compatibility = mCompat ? safeParseJSON(mCompat) || [] : [];
 }
 
 // Convert schema fields to JS numeric variables safely
@@ -3321,6 +3350,294 @@ export const db = {
         items: list.slice(from, from + limit),
         totalCount: list.length
       };
+    }
+  },
+
+  // Vehicle Compatibility Methods
+  searchVehicles: async (query: string): Promise<Vehicle[]> => {
+    if (!query || query.trim().length < 2) {
+      if (isSupabaseConfigured && supabase) {
+        const { data, error } = await supabase.from('vehicles')
+          .select('id, brand, model, variant, year_from, year_to, fuel_type, engine, vehicle_type')
+          .limit(20);
+        if (error) throw error;
+        return (data || []) as Vehicle[];
+      } else {
+        return cache.vehicles.slice(0, 20);
+      }
+    }
+
+    const clean = query.trim();
+    if (isSupabaseConfigured && supabase) {
+      const words = clean.split(/\s+/).filter(w => w.length > 0);
+      let selectQuery = supabase.from('vehicles').select('id, brand, model, variant, year_from, year_to, fuel_type, engine, vehicle_type');
+      
+      if (words.length === 1) {
+        selectQuery = selectQuery.or(`brand.ilike.%${words[0]}%,model.ilike.%${words[0]}%,variant.ilike.%${words[0]}%`);
+      } else {
+        selectQuery = selectQuery.or(`brand.ilike.%${words[0]}%,model.ilike.%${words[0]}%`).or(`brand.ilike.%${words[1]}%,model.ilike.%${words[1]}%`);
+      }
+      
+      const { data, error } = await selectQuery.limit(20);
+      if (error) throw error;
+      return (data || []) as Vehicle[];
+    } else {
+      const lower = clean.toLowerCase();
+      const words = lower.split(/\s+/).filter(w => w.length > 0);
+      return cache.vehicles.filter(v => {
+        return words.every(word => 
+          v.brand.toLowerCase().includes(word) ||
+          v.model.toLowerCase().includes(word) ||
+          (v.variant && v.variant.toLowerCase().includes(word))
+        );
+      }).slice(0, 20);
+    }
+  },
+
+  fetchPartCompatibility: async (brand: Brand, partId: string): Promise<PartVehicleCompatibility[]> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.schema(b)
+        .from('part_vehicle_compatibility')
+        .select(`
+          id, part_id, vehicle_id, notes, created_at,
+          vehicle:vehicle_id (id, brand, model, variant, year_from, year_to, fuel_type, engine, vehicle_type)
+        `)
+        .eq('part_id', partId);
+      if (error) throw error;
+      
+      const formatted = (data || []).map((row: any) => {
+        const vehicle = Array.isArray(row.vehicle) ? row.vehicle[0] : row.vehicle;
+        return {
+          id: row.id,
+          part_id: row.part_id,
+          vehicle_id: row.vehicle_id,
+          notes: row.notes,
+          created_at: row.created_at,
+          vehicle: vehicle ? (vehicle as Vehicle) : undefined
+        } as PartVehicleCompatibility;
+      });
+      return formatted;
+    } else {
+      const comps = cache[b].compatibility.filter(c => c.part_id === partId);
+      return comps.map(c => {
+        const vehicle = cache.vehicles.find(v => v.id === c.vehicle_id);
+        return {
+          ...c,
+          vehicle
+        };
+      });
+    }
+  },
+
+  addPartCompatibility: async (
+    brand: Brand, 
+    partId: string, 
+    vehicleData: Omit<Vehicle, 'id' | 'created_at'>, 
+    notes?: string
+  ): Promise<PartVehicleCompatibility> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    const activeUser = db.getActiveUser();
+    const userId = activeUser ? activeUser.id : 'system';
+    const userName = activeUser ? activeUser.name : 'System';
+
+    if (isSupabaseConfigured && supabase) {
+      let vehicleQuery = supabase.from('vehicles')
+        .select('id')
+        .eq('brand', vehicleData.brand)
+        .eq('model', vehicleData.model);
+      
+      if (vehicleData.variant) {
+        vehicleQuery = vehicleQuery.eq('variant', vehicleData.variant);
+      } else {
+        vehicleQuery = vehicleQuery.is('variant', null);
+      }
+
+      if (vehicleData.year_from) vehicleQuery = vehicleQuery.eq('year_from', vehicleData.year_from);
+      if (vehicleData.year_to) vehicleQuery = vehicleQuery.eq('year_to', vehicleData.year_to);
+      if (vehicleData.fuel_type) vehicleQuery = vehicleQuery.eq('fuel_type', vehicleData.fuel_type);
+      if (vehicleData.engine) vehicleQuery = vehicleQuery.eq('engine', vehicleData.engine);
+      if (vehicleData.vehicle_type) vehicleQuery = vehicleQuery.eq('vehicle_type', vehicleData.vehicle_type);
+
+      const { data: existingVehicles, error: vehErr } = await vehicleQuery.limit(1);
+      if (vehErr) throw vehErr;
+
+      let vehicleId = '';
+      let finalVehicle: Vehicle;
+
+      if (existingVehicles && existingVehicles.length > 0) {
+        vehicleId = existingVehicles[0].id;
+        const { data: vData, error: fetchVehErr } = await supabase.from('vehicles').select('*').eq('id', vehicleId).single();
+        if (fetchVehErr) throw fetchVehErr;
+        finalVehicle = vData as Vehicle;
+      } else {
+        const newVehicleRecord = {
+          id: uuid(),
+          ...vehicleData,
+          created_at: new Date().toISOString()
+        };
+        const { data: insertedVeh, error: insVehErr } = await supabase.from('vehicles').insert(newVehicleRecord).select().single();
+        if (insVehErr) throw insVehErr;
+        vehicleId = insertedVeh.id;
+        finalVehicle = insertedVeh as Vehicle;
+      }
+
+      const { data: existingComps, error: compChkErr } = await supabase.schema(b)
+        .from('part_vehicle_compatibility')
+        .select('id, part_id, vehicle_id, notes, created_at')
+        .eq('part_id', partId)
+        .eq('vehicle_id', vehicleId)
+        .limit(1);
+      
+      if (compChkErr) throw compChkErr;
+
+      if (existingComps && existingComps.length > 0) {
+        return {
+          ...existingComps[0],
+          vehicle: finalVehicle
+        } as PartVehicleCompatibility;
+      }
+
+      const newCompRecord = {
+        id: uuid(),
+        part_id: partId,
+        vehicle_id: vehicleId,
+        notes: notes || null,
+        created_at: new Date().toISOString()
+      };
+
+      const { error: insCompErr } = await supabase.schema(b)
+        .from('part_vehicle_compatibility')
+        .insert(newCompRecord);
+      
+      if (insCompErr) throw insCompErr;
+
+      const fullRecord: PartVehicleCompatibility = {
+        ...newCompRecord,
+        vehicle: finalVehicle
+      };
+
+      if (!cache[b].compatibility) cache[b].compatibility = [];
+      cache[b].compatibility.push(fullRecord);
+
+      db.logTransaction(userId, userName, 'Add Compatibility', 'Vehicle Compatibility', `Added compatibility for part ID ${partId} with vehicle ${vehicleData.brand} ${vehicleData.model}`, null, fullRecord);
+      db.notify();
+      return fullRecord;
+    } else {
+      let vehicle = cache.vehicles.find(v => 
+        v.brand.toLowerCase() === vehicleData.brand.toLowerCase() &&
+        v.model.toLowerCase() === vehicleData.model.toLowerCase() &&
+        (vehicleData.variant ? v.variant?.toLowerCase() === vehicleData.variant.toLowerCase() : !v.variant)
+      );
+
+      if (!vehicle) {
+        vehicle = {
+          id: uuid(),
+          ...vehicleData,
+          created_at: new Date().toISOString()
+        };
+        cache.vehicles.push(vehicle);
+        localStorage.setItem(KEY_VEHICLES, JSON.stringify(cache.vehicles));
+      }
+
+      let comp = cache[b].compatibility.find(c => c.part_id === partId && c.vehicle_id === vehicle!.id);
+      if (comp) {
+        return {
+          ...comp,
+          vehicle
+        };
+      }
+
+      comp = {
+        id: uuid(),
+        part_id: partId,
+        vehicle_id: vehicle.id,
+        notes: notes || null,
+        created_at: new Date().toISOString()
+      };
+
+      cache[b].compatibility.push(comp);
+      localStorage.setItem(`sparezy_schema_${b}_compatibility`, JSON.stringify(cache[b].compatibility));
+
+      const fullRecord = {
+        ...comp,
+        vehicle
+      };
+
+      db.logTransaction(userId, userName, 'Add Compatibility', 'Vehicle Compatibility', `Added compatibility for part ID ${partId} with vehicle ${vehicleData.brand} ${vehicleData.model}`, null, fullRecord);
+      db.notify();
+      return fullRecord;
+    }
+  },
+
+  removePartCompatibility: async (brand: Brand, compatibilityId: string): Promise<void> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    const activeUser = db.getActiveUser();
+    const userId = activeUser ? activeUser.id : 'system';
+    const userName = activeUser ? activeUser.name : 'System';
+
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase.schema(b)
+        .from('part_vehicle_compatibility')
+        .delete()
+        .eq('id', compatibilityId);
+      if (error) throw error;
+    }
+
+    const deletedRecord = cache[b].compatibility.find(c => c.id === compatibilityId);
+    cache[b].compatibility = cache[b].compatibility.filter(c => c.id !== compatibilityId);
+    
+    if (!isSupabaseConfigured) {
+      localStorage.setItem(`sparezy_schema_${b}_compatibility`, JSON.stringify(cache[b].compatibility));
+    }
+
+    db.logTransaction(userId, userName, 'Remove Compatibility', 'Vehicle Compatibility', `Removed compatibility ID ${compatibilityId}`, deletedRecord, null);
+    db.notify();
+  },
+
+  fetchPartsByVehicle: async (brand: Brand, vehicleBrand: string, vehicleModel: string): Promise<InventoryItem[]> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      const { data: matchingVehicles, error: vehErr } = await supabase.from('vehicles')
+        .select('id')
+        .ilike('brand', vehicleBrand)
+        .ilike('model', vehicleModel);
+      
+      if (vehErr) throw vehErr;
+      if (!matchingVehicles || matchingVehicles.length === 0) return [];
+
+      const vehicleIds = matchingVehicles.map(v => v.id);
+
+      const { data: compatList, error: compErr } = await supabase.schema(b)
+        .from('part_vehicle_compatibility')
+        .select('part_id')
+        .in('vehicle_id', vehicleIds);
+      
+      if (compErr) throw compErr;
+      if (!compatList || compatList.length === 0) return [];
+
+      const partIds = compatList.map(c => c.part_id);
+
+      const { data: parts, error: partsErr } = await supabase.schema(b)
+        .from('inventory')
+        .select('*')
+        .in('id', partIds)
+        .eq('is_active', true);
+      
+      if (partsErr) throw partsErr;
+      return (parts || []).map(scrubRow) as InventoryItem[];
+    } else {
+      const matchingVehicles = cache.vehicles.filter(v => 
+        v.brand.toLowerCase() === vehicleBrand.toLowerCase() &&
+        v.model.toLowerCase() === vehicleModel.toLowerCase()
+      );
+      if (matchingVehicles.length === 0) return [];
+
+      const vehicleIds = matchingVehicles.map(v => v.id);
+      const compatList = cache[b].compatibility.filter(c => vehicleIds.includes(c.vehicle_id));
+      const partIds = compatList.map(c => c.part_id);
+
+      return cache[b].inventory.filter(item => partIds.includes(item.id) && item.is_active !== false);
     }
   }
 };

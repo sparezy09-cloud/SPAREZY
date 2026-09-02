@@ -145,3 +145,26 @@ export interface TransactionLog {
   new_data: string | null; // JSON String or description
   created_at: string;
 }
+
+export interface Vehicle {
+  id: string;
+  brand: string;
+  model: string;
+  variant: string | null;
+  year_from: number | null;
+  year_to: number | null;
+  fuel_type: string | null;
+  engine: string | null;
+  vehicle_type: string | null;
+  created_at: string;
+}
+
+export interface PartVehicleCompatibility {
+  id: string;
+  part_id: string;
+  vehicle_id: string;
+  notes: string | null;
+  created_at: string;
+  vehicle?: Vehicle;
+}
+
