@@ -40,6 +40,12 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
 
   // Vehicle compatibility states
   const [partCompatibilities, setPartCompatibilities] = useState<Record<string, PartVehicleCompatibility[]>>({});
+  
+  // Clear compatibilities cache when brand changes to avoid mixups/memory leaks
+  React.useEffect(() => {
+    setPartCompatibilities({});
+  }, [brand]);
+
   const [activePartForCompatibility, setActivePartForCompatibility] = useState<InventoryItem | null>(null);
   const [isAddVehicleModalOpen, setIsAddVehicleModalOpen] = useState(false);
   const [vehicleSearchText, setVehicleSearchText] = useState('');
@@ -202,7 +208,7 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
         vehicle_type: newVehType || null
       };
 
-      await db.addPartCompatibility(
+      const newCompat = await db.addPartCompatibility(
         brand,
         activePartForCompatibility.id,
         vehicleData,
@@ -210,7 +216,20 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
       );
 
       triggerToast(`Successfully added compatibility for ${activePartForCompatibility.part_no}!`);
-      loadCompatibilitiesForPart(activePartForCompatibility.id);
+      
+      // Update local state instantly to prevent race conditions or database lag
+      const partId = activePartForCompatibility.id;
+      setPartCompatibilities(prev => {
+        const currentList = prev[partId] || [];
+        // Prevent visual duplicates in the same list
+        if (currentList.some(c => c.vehicle_id === newCompat.vehicle_id)) {
+          return prev;
+        }
+        return {
+          ...prev,
+          [partId]: [...currentList, newCompat]
+        };
+      });
 
       setNewVehModel('');
       setNewVehVariant('');
@@ -232,7 +251,15 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
       try {
         await db.removePartCompatibility(brand, compId);
         triggerToast("Compatibility removed successfully.");
-        loadCompatibilitiesForPart(partId);
+        
+        // Update local state instantly to prevent race conditions or database lag
+        setPartCompatibilities(prev => {
+          const currentList = prev[partId] || [];
+          return {
+            ...prev,
+            [partId]: currentList.filter(c => c.id !== compId)
+          };
+        });
       } catch (err: any) {
         alert(err.message || "Failed to remove compatibility");
       }
