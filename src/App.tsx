@@ -300,13 +300,20 @@ export default function App() {
     };
   }, [activeUser]);
 
+  // Lock Manager role to Inventory module exclusively
+  useEffect(() => {
+    if (activeUser && activeUser.role === 'Manager' && activeModule !== 'Inventory') {
+      setActiveModule('Inventory');
+    }
+  }, [activeUser, activeModule]);
+
   const handleBrandSelect = async (brand: Brand, user: User) => {
     // Set active brand and user immediately to jump-start navigation instantly
     db.setActiveUser(user);
     db.setActiveBrand(brand);
     setActiveBrand(brand);
     setActiveUser(user);
-    setActiveModule('Dashboard');
+    setActiveModule(user.role === 'Manager' ? 'Inventory' : 'Dashboard');
 
     // Lazily load the brand's dataset partitions in the background without blocking the screen
     try {
@@ -353,7 +360,12 @@ export default function App() {
     { name: 'Customer & Dealer Ledgers', icon: Users },
     { name: 'Transaction Records', icon: Terminal, ownerOnly: true },
     { name: 'Settings / User Management', icon: Shield, ownerOnly: true },
-  ];
+  ].filter(item => {
+    if (activeUser && activeUser.role === 'Manager') {
+      return item.name === 'Inventory';
+    }
+    return true;
+  });
 
   const renderModuleContent = () => {
     if (!activeBrand || !activeUser) return null;
