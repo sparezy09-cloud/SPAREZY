@@ -1,11 +1,11 @@
 import React, { useState, useMemo } from 'react';
-import { Brand, User, InventoryItem } from '../types';
+import { Brand, User, InventoryItem, Vehicle, PartVehicleCompatibility } from '../types';
 import { db } from '../dbStore';
 import * as XLSX from 'xlsx';
 import { 
   Search, EyeOff, Archive, CheckCircle2, Pencil, 
   Trash2, Plus, ArrowLeft, ArrowRight, X, Layers, Download, FileSpreadsheet,
-  AlertTriangle, History, Calendar
+  AlertTriangle, History, Calendar, Car
 } from 'lucide-react';
 
 interface InventoryModuleProps {
@@ -37,6 +37,23 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   const [deletingItemConfirm, setDeletingItemConfirm] = useState<InventoryItem | null>(null);
   const [viewingPartDetails, setViewingPartDetails] = useState<InventoryItem | null>(null);
   const [movementTab, setMovementTab] = useState<'all' | 'sales' | 'purchases' | 'returns'>('all');
+
+  // Vehicle compatibility states
+  const [partCompatibilities, setPartCompatibilities] = useState<Record<string, PartVehicleCompatibility[]>>({});
+  const [activePartForCompatibility, setActivePartForCompatibility] = useState<InventoryItem | null>(null);
+  const [isAddVehicleModalOpen, setIsAddVehicleModalOpen] = useState(false);
+
+  // Form states for adding compatibility
+  const [newVehBrand, setNewVehBrand] = useState('Hyundai');
+  const [newVehModel, setNewVehModel] = useState('');
+  const [newVehVariant, setNewVehVariant] = useState('');
+  const [newVehYearFrom, setNewVehYearFrom] = useState('');
+  const [newVehYearTo, setNewVehYearTo] = useState('');
+  const [newVehFuelType, setNewVehFuelType] = useState('Petrol');
+  const [newVehEngine, setNewVehEngine] = useState('');
+  const [newVehType, setNewVehType] = useState('SUV');
+  const [compatNotes, setCompatNotes] = useState('');
+  const [isSavingCompatibility, setIsSavingCompatibility] = useState(false);
 
   // Form Fields for Manual Create/Edit
   const [formPartNo, setFormPartNo] = useState('');
@@ -129,12 +146,97 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
     return () => { active = false; };
   }, [viewingPartDetails, brand]);
 
+  const loadCompatibilitiesForPart = (partId: string) => {
+    db.fetchPartCompatibility(brand, partId).then(list => {
+      setPartCompatibilities(prev => ({
+        ...prev,
+        [partId]: list
+      }));
+    }).catch(console.error);
+  };
+
+  const handleAddCompatibilitySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activePartForCompatibility) return;
+    if (!newVehBrand.trim() || !newVehModel.trim()) {
+      alert("Brand and Model are required!");
+      return;
+    }
+
+    setIsSavingCompatibility(true);
+    try {
+      const vehicleData = {
+        brand: newVehBrand.trim(),
+        model: newVehModel.trim(),
+        variant: newVehVariant.trim() || null,
+        year_from: newVehYearFrom ? Number(newVehYearFrom) : null,
+        year_to: newVehYearTo ? Number(newVehYearTo) : null,
+        fuel_type: newVehFuelType || null,
+        engine: newVehEngine.trim() || null,
+        vehicle_type: newVehType || null
+      };
+
+      await db.addPartCompatibility(
+        brand,
+        activePartForCompatibility.id,
+        vehicleData,
+        compatNotes.trim() || undefined
+      );
+
+      triggerToast(`Successfully added compatibility for ${activePartForCompatibility.part_no}!`);
+      loadCompatibilitiesForPart(activePartForCompatibility.id);
+
+      setNewVehModel('');
+      setNewVehVariant('');
+      setNewVehYearFrom('');
+      setNewVehYearTo('');
+      setNewVehEngine('');
+      setCompatNotes('');
+      setIsAddVehicleModalOpen(false);
+      setActivePartForCompatibility(null);
+    } catch (err: any) {
+      alert(err.message || "Failed to add compatibility");
+    } finally {
+      setIsSavingCompatibility(false);
+    }
+  };
+
+  const handleRemoveCompatibility = async (partId: string, compId: string) => {
+    if (confirm("Are you sure you want to remove this vehicle compatibility?")) {
+      try {
+        await db.removePartCompatibility(brand, compId);
+        triggerToast("Compatibility removed successfully.");
+        loadCompatibilitiesForPart(partId);
+      } catch (err: any) {
+        alert(err.message || "Failed to remove compatibility");
+      }
+    }
+  };
+
   // 2. Pagination Math
   const totalPages = Math.ceil(filteredList.length / itemsPerPage) || 1;
   const paginatedList = useMemo(() => {
     const startIndex = (currentPage - 1) * itemsPerPage;
     return filteredList.slice(startIndex, startIndex + itemsPerPage);
   }, [filteredList, currentPage]);
+
+  // Lazy-load part compatibilities for the current paginated list
+  React.useEffect(() => {
+    let active = true;
+    paginatedList.forEach(item => {
+      if (item.id && !partCompatibilities[item.id]) {
+        db.fetchPartCompatibility(brand, item.id).then(list => {
+          if (active) {
+            setPartCompatibilities(prev => ({
+              ...prev,
+              [item.id]: list
+            }));
+          }
+        }).catch(console.error);
+      }
+    });
+    return () => { active = false; };
+  }, [paginatedList, brand]);
 
   const currentIdsOnPage = useMemo(() => {
     return paginatedList.map(item => item.id);
@@ -743,7 +845,44 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
                         placeholder="Part Name"
                       />
                     ) : (
-                      item.part_name
+                      <div className="space-y-1.5">
+                        <div className="font-bold text-slate-800">{item.part_name}</div>
+                        {/* Inline Compatible Vehicles */}
+                        <div className="flex flex-wrap gap-1 items-center">
+                          <span className="text-[9px] text-slate-400 font-extrabold uppercase mr-1">Fits:</span>
+                          {(!partCompatibilities[item.id] || partCompatibilities[item.id].length === 0) ? (
+                            <span className="text-[10px] text-slate-400 italic font-normal">None specified</span>
+                          ) : (
+                            partCompatibilities[item.id].map(comp => (
+                              <span key={comp.id} className="inline-flex items-center gap-1 bg-slate-100 border border-slate-200 text-slate-700 text-[9px] px-1.5 py-0.5 rounded font-bold leading-none">
+                                {comp.vehicle?.brand} {comp.vehicle?.model}
+                                <button 
+                                  type="button" 
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleRemoveCompatibility(item.id, comp.id);
+                                  }}
+                                  className="text-slate-400 hover:text-red-600 font-extrabold text-[11px] ml-0.5 cursor-pointer leading-none"
+                                  title="Remove compatibility"
+                                >
+                                  &times;
+                                </button>
+                              </span>
+                            ))
+                          )}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActivePartForCompatibility(item);
+                              setIsAddVehicleModalOpen(true);
+                            }}
+                            className="text-indigo-600 hover:text-indigo-800 text-[10px] font-extrabold flex items-center gap-0.5 ml-1.5 hover:underline cursor-pointer"
+                          >
+                            <Plus className="w-3 h-3" /> Add Vehicle
+                          </button>
+                        </div>
+                      </div>
                     )}
                   </td>
                   <td className="p-4 font-semibold">
@@ -1480,6 +1619,190 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
                 Close
               </button>
             </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* ADD VEHICLE COMPATIBILITY MODAL */}
+      {isAddVehicleModalOpen && activePartForCompatibility && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50 animate-fade-in text-left">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md border border-slate-200 overflow-hidden text-xs">
+            
+            <div className="bg-slate-50 px-5 py-4 border-b border-slate-200 flex justify-between items-center">
+              <div className="space-y-0.5">
+                <span className="text-[9px] uppercase font-bold text-indigo-600 tracking-wider">Vehicle compatibility mapping</span>
+                <h3 className="font-extrabold text-slate-900 text-sm">
+                  Add Compatible Vehicle for {activePartForCompatibility.part_no}
+                </h3>
+              </div>
+              <button 
+                type="button"
+                onClick={() => {
+                  setIsAddVehicleModalOpen(false);
+                  setActivePartForCompatibility(null);
+                }} 
+                className="p-1.5 rounded-lg hover:bg-slate-100 transition text-slate-400 hover:text-slate-600 cursor-pointer"
+                disabled={isSavingCompatibility}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddCompatibilitySubmit} className="p-6 space-y-4">
+              <p className="text-slate-500 font-semibold leading-relaxed">
+                Add compatibility mapping for part <strong className="text-slate-800">{activePartForCompatibility.part_name} ({activePartForCompatibility.part_no})</strong>. If the vehicle model doesn't exist, it will be added to the directory.
+              </p>
+
+              <div className="grid grid-cols-2 gap-3 text-xs font-semibold">
+                <div>
+                  <label className="block text-slate-550 mb-1">Brand *</label>
+                  <select
+                    className="w-full p-2 border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                    value={newVehBrand}
+                    onChange={(e) => setNewVehBrand(e.target.value)}
+                  >
+                    <option value="Hyundai">Hyundai</option>
+                    <option value="Mahindra">Mahindra</option>
+                    <option value="Suzuki">Suzuki</option>
+                    <option value="Tata">Tata</option>
+                    <option value="Toyota">Toyota</option>
+                    <option value="Honda">Honda</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-550 mb-1">Model Name *</label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Creta"
+                    className="w-full p-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                    value={newVehModel}
+                    onChange={(e) => setNewVehModel(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 text-xs font-semibold">
+                <div>
+                  <label className="block text-slate-550 mb-1">Variant (Optional)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. SX"
+                    className="w-full p-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                    value={newVehVariant}
+                    onChange={(e) => setNewVehVariant(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-550 mb-1">Vehicle Type</label>
+                  <select
+                    className="w-full p-2 border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                    value={newVehType}
+                    onChange={(e) => setNewVehType(e.target.value)}
+                  >
+                    <option value="SUV">SUV</option>
+                    <option value="Hatchback">Hatchback</option>
+                    <option value="Sedan">Sedan</option>
+                    <option value="MUV">MUV</option>
+                    <option value="Pickup">Pickup</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-2 text-xs font-semibold">
+                <div>
+                  <label className="block text-slate-550 mb-1">Year From</label>
+                  <input
+                    type="number"
+                    min="1990"
+                    max="2030"
+                    placeholder="e.g. 2018"
+                    className="w-full p-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-600 font-mono"
+                    value={newVehYearFrom}
+                    onChange={(e) => setNewVehYearFrom(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-550 mb-1">Year To</label>
+                  <input
+                    type="number"
+                    min="1990"
+                    max="2030"
+                    placeholder="e.g. 2024"
+                    className="w-full p-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-600 font-mono"
+                    value={newVehYearTo}
+                    onChange={(e) => setNewVehYearTo(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-550 mb-1">Fuel Type</label>
+                  <select
+                    className="w-full p-2 border border-slate-200 rounded-xl bg-white focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                    value={newVehFuelType}
+                    onChange={(e) => setNewVehFuelType(e.target.value)}
+                  >
+                    <option value="Petrol">Petrol</option>
+                    <option value="Diesel">Diesel</option>
+                    <option value="CNG">CNG</option>
+                    <option value="Electric">Electric</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 text-xs font-semibold">
+                <div>
+                  <label className="block text-slate-550 mb-1">Engine Size</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. 1.5L CRDi"
+                    className="w-full p-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-600 font-mono"
+                    value={newVehEngine}
+                    onChange={(e) => setNewVehEngine(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-550 mb-1">Notes / Fitment Info</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Front axle only"
+                    className="w-full p-2 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-indigo-600"
+                    value={compatNotes}
+                    onChange={(e) => setCompatNotes(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="flex flex-col gap-2 pt-2 text-xs font-bold font-sans">
+                <button
+                  type="submit"
+                  disabled={isSavingCompatibility}
+                  className="w-full bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white py-2.5 rounded-xl text-center flex items-center justify-center gap-1 shadow-sm transition cursor-pointer"
+                >
+                  <CheckCircle2 className="w-4 h-4" />
+                  {isSavingCompatibility ? 'Adding compatibility...' : 'Add Vehicle Compatibility'}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAddVehicleModalOpen(false);
+                    setActivePartForCompatibility(null);
+                  }}
+                  disabled={isSavingCompatibility}
+                  className="w-full bg-slate-100 text-slate-600 hover:bg-slate-200 py-2.5 rounded-xl cursor-pointer text-center transition"
+                >
+                  Cancel
+                </button>
+              </div>
+
+            </form>
 
           </div>
         </div>
