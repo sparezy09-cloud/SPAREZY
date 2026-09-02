@@ -60,45 +60,9 @@ if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js')
       .then((reg) => {
         console.log('⚡ [Sparezy PWA] Service Worker registered successfully: ', reg.scope);
-
-        const notifyUpdate = () => {
-          console.log('⚡ [Sparezy PWA] Dispatching pwa-update-available event');
-          window.dispatchEvent(new CustomEvent('pwa-update-available', { detail: reg }));
-        };
-
-        // Check if there is already a waiting service worker on page load
-        if (reg.waiting) {
-          notifyUpdate();
-        }
-
-        // Listen for new service worker installations
-        reg.addEventListener('updatefound', () => {
-          const installingWorker = reg.installing;
-          if (installingWorker) {
-            installingWorker.addEventListener('statechange', () => {
-              if (installingWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                notifyUpdate();
-              }
-            });
-          }
-        });
       })
       .catch((err) => {
         console.warn('❌ [Sparezy PWA] Service Worker registration failed: ', err);
       });
-
-    // Handle standard reload when the active service worker controller changes
-    let refreshing = false;
-    const hasController = !!navigator.serviceWorker.controller;
-    navigator.serviceWorker.addEventListener('controllerchange', () => {
-      if (refreshing) return;
-      if (!hasController) {
-        console.log('⚡ [Sparezy PWA] Service worker activated for first time (no previous controller). Skipping reload.');
-        return;
-      }
-      refreshing = true;
-      console.log('⚡ [Sparezy PWA] Active controller changed. Reloading page to apply update...');
-      window.location.reload();
-    });
   });
 }

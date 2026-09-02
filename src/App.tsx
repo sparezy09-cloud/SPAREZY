@@ -16,7 +16,6 @@ import LedgerModule from './components/LedgerModule';
 import TransactionsModule from './components/TransactionsModule';
 import SettingsModule from './components/SettingsModule';
 import OwnerReportsModule from './components/OwnerReportsModule';
-import PWAUpdatePopup from './components/PWAUpdatePopup';
 
 // Menu icons
 import { 
@@ -799,7 +798,6 @@ export default function App() {
         </div>
       )}
 
-      <PWAUpdatePopup />
     </div>
   );
 }

@@ -13,13 +13,7 @@ self.addEventListener('install', (event) => {
       return cache.addAll(ASSETS_TO_CACHE);
     })
   );
-});
-
-self.addEventListener('message', (event) => {
-  if (event.data && event.data.type === 'SKIP_WAITING') {
-    console.log('[Sparezy PWA SW] skipWaiting invoked via message trigger');
-    self.skipWaiting();
-  }
+  self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
