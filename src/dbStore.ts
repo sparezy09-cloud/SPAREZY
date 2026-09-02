@@ -632,15 +632,15 @@ export const db = {
             activeBrandChannel = null;
           }
 
-          // Initialize local caches to empty arrays as we now load data on-demand
-          cache[b].inventory = [];
-          cache[b].sales = [];
-          cache[b].sale_items = [];
-          cache[b].returns = [];
-          cache[b].purchases = [];
-          cache[b].purchase_items = [];
-          cache[b].bulk_update_history = [];
-          cache[b].mrp_history = [];
+          // Initialize local caches to empty arrays as we now load data on-demand (only if they are not already populated)
+          if (!cache[b].inventory || cache[b].inventory.length === 0) cache[b].inventory = [];
+          if (!cache[b].sales || cache[b].sales.length === 0) cache[b].sales = [];
+          if (!cache[b].sale_items || cache[b].sale_items.length === 0) cache[b].sale_items = [];
+          if (!cache[b].returns || cache[b].returns.length === 0) cache[b].returns = [];
+          if (!cache[b].purchases || cache[b].purchases.length === 0) cache[b].purchases = [];
+          if (!cache[b].purchase_items || cache[b].purchase_items.length === 0) cache[b].purchase_items = [];
+          if (!cache[b].bulk_update_history || cache[b].bulk_update_history.length === 0) cache[b].bulk_update_history = [];
+          if (!cache[b].mrp_history || cache[b].mrp_history.length === 0) cache[b].mrp_history = [];
 
           // 1. INVENTORY ACCESS CHECK - OPTIMIZED SELECT 1 ROW
           console.log(`[Query Diagnostic] Running optimized inventory connectivity select for schema: ${b}`);
