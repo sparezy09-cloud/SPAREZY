@@ -226,7 +226,7 @@ export default function PurchaseRequestsModule({ brand, user, onNavigateToPurcha
         </div>
         <button
           onClick={() => setIsCreating(true)}
-          className="bg-indigo-650 hover:bg-indigo-700 text-white font-bold py-2.5 px-4 rounded-xl flex items-center gap-2 transition text-xs shadow-sm cursor-pointer"
+          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-4 rounded-xl flex items-center gap-2 transition text-xs shadow-sm cursor-pointer"
         >
           <PlusCircle className="w-4 h-4" />
           Create New Request
