@@ -5,10 +5,24 @@
 export type UserRole = 'Owner' | 'Manager';
 export type UserStatus = 'Active' | 'Disabled';
 export type Brand = 'Hyundai' | 'Mahindra';
-export type CustomerCategory = 'Walk-in' | 'Mistri' | 'Retailer' | 'Garage';
+export type CustomerCategory = 'Walk-in' | 'Mistri' | 'Retailer' | 'Garage' | 'Direct Customer';
 export type PaymentStatus = 'Paid' | 'Pending' | 'Custom Amount';
 export type ScanSource = 'manual' | 'image' | 'pdf' | 'excel';
 export type BulkUpdateType = 'Stock Update' | 'MRP Update';
+export type PurchaseRequestStatus = 'Pending' | 'Approved' | 'Rejected' | 'Completed';
+
+export interface PurchaseRequest {
+  id: string;
+  part_no: string;
+  part_name: string;
+  current_stock: number;
+  requested_quantity: number;
+  note: string | null;
+  requester_email: string;
+  requester_name: string;
+  status: PurchaseRequestStatus;
+  created_at: string;
+}
 
 export interface User {
   id: string;

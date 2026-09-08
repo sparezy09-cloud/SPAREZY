@@ -16,6 +16,7 @@ import LedgerModule from './components/LedgerModule';
 import TransactionsModule from './components/TransactionsModule';
 import SettingsModule from './components/SettingsModule';
 import OwnerReportsModule from './components/OwnerReportsModule';
+import PurchaseRequestsModule from './components/PurchaseRequestsModule';
 
 // Menu icons
 import { 
@@ -300,9 +301,9 @@ export default function App() {
     };
   }, [activeUser]);
 
-  // Lock Manager role to Inventory module exclusively
+  // Lock Manager role to Inventory or Purchase Requests modules
   useEffect(() => {
-    if (activeUser && activeUser.role === 'Manager' && activeModule !== 'Inventory') {
+    if (activeUser && activeUser.role === 'Manager' && activeModule !== 'Inventory' && activeModule !== 'Purchase Requests') {
       setActiveModule('Inventory');
     }
   }, [activeUser, activeModule]);
@@ -352,6 +353,7 @@ export default function App() {
   const sidebarItems = [
     { name: 'Dashboard', icon: LayoutDashboard },
     { name: 'Inventory', icon: Layers },
+    { name: 'Purchase Requests', icon: FileSpreadsheet },
     { name: 'Sales', icon: ShoppingBag },
     { name: 'Returns', icon: RotateCcw },
     { name: 'Purchases', icon: FileText },
@@ -362,7 +364,7 @@ export default function App() {
     { name: 'Settings / User Management', icon: Shield, ownerOnly: true },
   ].filter(item => {
     if (activeUser && activeUser.role === 'Manager') {
-      return item.name === 'Inventory';
+      return item.name === 'Inventory' || item.name === 'Purchase Requests';
     }
     return true;
   });
@@ -387,6 +389,14 @@ export default function App() {
         );
       case 'Inventory':
         return <InventoryModule brand={activeBrand} user={activeUser} />;
+      case 'Purchase Requests':
+        return (
+          <PurchaseRequestsModule 
+            brand={activeBrand} 
+            user={activeUser} 
+            onNavigateToPurchases={() => setActiveModule('Purchases')} 
+          />
+        );
       case 'Sales':
         return <SalesModule brand={activeBrand} user={activeUser} />;
       case 'Returns':

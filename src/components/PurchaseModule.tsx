@@ -27,6 +27,7 @@ interface ParsedAIScanRow {
   quantity: number;
   mrp: number;
   isNewPart: boolean;
+  isArchivedMatched?: boolean;
 }
 
 export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
@@ -336,7 +337,9 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
         const pName = String(item.name || "").trim();
         const qty = Number(item.quantity) || 1;
         const priceMrp = Number(item.mrp) || 0;
-        const isMatched = freshInventory.some(inv => inv.part_no.toLowerCase() === pNo.toLowerCase());
+        const matchPart = freshInventory.find(inv => inv.part_no.toLowerCase() === pNo.toLowerCase());
+        const isMatched = !!matchPart;
+        const isArchivedMatched = matchPart ? !matchPart.is_active : false;
         
         return {
           part_no: pNo,
@@ -344,7 +347,8 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
           hsn: "87089900", // Automobile parts standard code fallback
           quantity: qty,
           mrp: priceMrp,
-          isNewPart: !isMatched
+          isNewPart: !isMatched,
+          isArchivedMatched
         };
       });
 
@@ -947,9 +951,11 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                             <span className={`inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold ${
                               row.isNewPart 
                                 ? 'bg-amber-100 text-amber-800 border border-amber-200' 
-                                : 'bg-emerald-100 text-emerald-850 border border-emerald-250'
+                                : row.isArchivedMatched
+                                  ? 'bg-rose-100 text-rose-850 border border-rose-250'
+                                  : 'bg-emerald-100 text-emerald-850 border border-emerald-250'
                             }`}>
-                              {row.isNewPart ? 'New Part' : 'Matched'}
+                              {row.isNewPart ? 'New Part' : row.isArchivedMatched ? 'Archived Matched' : 'Matched'}
                             </span>
                           </td>
                           <td className="p-3 font-mono">

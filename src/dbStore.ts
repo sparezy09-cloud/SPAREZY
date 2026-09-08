@@ -3,7 +3,7 @@ import { safeLocalStorage, safeSessionStorage } from './storagePolyfill';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
-  ScanSource
+  ScanSource, PurchaseRequest, PurchaseRequestStatus
 } from './types';
 
 const localStorage = safeLocalStorage;
@@ -73,6 +73,7 @@ let cache = {
     purchase_items: [] as PurchaseItem[],
     bulk_update_history: [] as BulkUpdateHistory[],
     mrp_history: [] as MRPHistory[],
+    purchase_requests: [] as PurchaseRequest[],
   },
   mahindra: {
     inventory: [] as InventoryItem[],
@@ -83,6 +84,7 @@ let cache = {
     purchase_items: [] as PurchaseItem[],
     bulk_update_history: [] as BulkUpdateHistory[],
     mrp_history: [] as MRPHistory[],
+    purchase_requests: [] as PurchaseRequest[],
   }
 };
 
@@ -649,6 +651,7 @@ export const db = {
           if (!cache[b].purchase_items || cache[b].purchase_items.length === 0) cache[b].purchase_items = [];
           if (!cache[b].bulk_update_history || cache[b].bulk_update_history.length === 0) cache[b].bulk_update_history = [];
           if (!cache[b].mrp_history || cache[b].mrp_history.length === 0) cache[b].mrp_history = [];
+          if (!cache[b].purchase_requests) cache[b].purchase_requests = [];
 
           // 1. INVENTORY ACCESS CHECK - OPTIMIZED SELECT 1 ROW
           console.log(`[Query Diagnostic] Running optimized inventory connectivity select for schema: ${b}`);
@@ -2110,6 +2113,98 @@ export const db = {
     db.logTransaction(user.id, user.name, 'Create Purchase', 'Purchases', `Added brand purchase invoice ${invoiceNo} for dealer ${dealerName}`, null, purchase);
     db.notify();
     return purchase;
+  },
+
+  createPurchaseRequest: async (
+    brand: Brand,
+    partNo: string,
+    partName: string,
+    currentStock: number,
+    requestedQuantity: number,
+    note: string | null,
+    user: User
+  ): Promise<PurchaseRequest> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    const list = cache[b].purchase_requests || [];
+    
+    const requestRec: PurchaseRequest = {
+      id: uuid(),
+      part_no: partNo,
+      part_name: partName,
+      current_stock: currentStock,
+      requested_quantity: requestedQuantity,
+      note: note,
+      requester_email: user.email,
+      requester_name: user.name,
+      status: 'Pending',
+      created_at: new Date().toISOString()
+    };
+    
+    list.unshift(requestRec);
+    cache[b].purchase_requests = list;
+    
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase.schema(b).from('purchase_requests').insert(requestRec);
+      if (error) {
+        console.warn("Failed to save purchase request in Supabase:", error.message);
+      }
+    } else {
+      localStorage.setItem(`sparezy_schema_${b}_purchase_requests`, JSON.stringify(list));
+    }
+    
+    db.logTransaction(user.id, user.name, 'Create Purchase Request', 'Purchase Requests', `Created purchase request for part ${partNo}`, null, requestRec);
+    db.notify();
+    return requestRec;
+  },
+
+  updatePurchaseRequestStatus: async (
+    brand: Brand,
+    requestId: string,
+    status: PurchaseRequestStatus,
+    user: User
+  ): Promise<void> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    const list = cache[b].purchase_requests || [];
+    const idx = list.findIndex(r => r.id === requestId);
+    if (idx > -1) {
+      const oldReq = { ...list[idx] };
+      list[idx].status = status;
+      cache[b].purchase_requests = list;
+      
+      if (isSupabaseConfigured && supabase) {
+        const { error } = await supabase.schema(b).from('purchase_requests').update({ status }).eq('id', requestId);
+        if (error) {
+          throw new Error(`Failed to update purchase request status in DB: ${error.message}`);
+        }
+      } else {
+        localStorage.setItem(`sparezy_schema_${b}_purchase_requests`, JSON.stringify(list));
+      }
+      
+      db.logTransaction(user.id, user.name, 'Update Purchase Request Status', 'Purchase Requests', `Updated purchase request status of part ${oldReq.part_no} to ${status}`, oldReq, list[idx]);
+      db.notify();
+    } else {
+      throw new Error("Purchase request not found");
+    }
+  },
+
+  fetchPurchaseRequests: async (brand: Brand): Promise<PurchaseRequest[]> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase.schema(b).from('purchase_requests').select('*').order('created_at', { ascending: false });
+      if (error) {
+        console.warn("Failed to fetch purchase requests from Supabase:", error.message);
+        return cache[b].purchase_requests || [];
+      }
+      const processed = (data || []).map(scrubRow);
+      cache[b].purchase_requests = processed;
+      return processed;
+    } else {
+      const local = localStorage.getItem(`sparezy_schema_${b}_purchase_requests`);
+      if (local) {
+        cache[b].purchase_requests = JSON.parse(local);
+      }
+      return cache[b].purchase_requests || [];
+    }
   },
 
   deletePurchase: async (brand: Brand, purchaseId: string, user: User) => {

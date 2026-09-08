@@ -374,6 +374,9 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 -- --------------------------------------------------
 
 -- public.users Policies
+DROP POLICY IF EXISTS allow_anon_select ON public.users;
+CREATE POLICY allow_anon_select ON public.users FOR SELECT USING (true);
+
 DROP POLICY IF EXISTS user_self_read_write ON public.users;
 CREATE POLICY user_self_read_write ON public.users
     FOR ALL
