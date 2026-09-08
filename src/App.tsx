@@ -301,9 +301,9 @@ export default function App() {
     };
   }, [activeUser]);
 
-  // Lock Manager role to Inventory or Purchase Requests modules
+  // Lock Manager role to Inventory or Order Requests modules
   useEffect(() => {
-    if (activeUser && activeUser.role === 'Manager' && activeModule !== 'Inventory' && activeModule !== 'Purchase Requests') {
+    if (activeUser && activeUser.role === 'Manager' && activeModule !== 'Inventory' && activeModule !== 'Order Requests') {
       setActiveModule('Inventory');
     }
   }, [activeUser, activeModule]);
@@ -353,7 +353,7 @@ export default function App() {
   const sidebarItems = [
     { name: 'Dashboard', icon: LayoutDashboard },
     { name: 'Inventory', icon: Layers },
-    { name: 'Purchase Requests', icon: FileSpreadsheet },
+    { name: 'Order Requests', icon: FileSpreadsheet },
     { name: 'Sales', icon: ShoppingBag },
     { name: 'Returns', icon: RotateCcw },
     { name: 'Purchases', icon: FileText },
@@ -364,7 +364,7 @@ export default function App() {
     { name: 'Settings / User Management', icon: Shield, ownerOnly: true },
   ].filter(item => {
     if (activeUser && activeUser.role === 'Manager') {
-      return item.name === 'Inventory' || item.name === 'Purchase Requests';
+      return item.name === 'Inventory' || item.name === 'Order Requests';
     }
     return true;
   });
@@ -389,7 +389,7 @@ export default function App() {
         );
       case 'Inventory':
         return <InventoryModule brand={activeBrand} user={activeUser} />;
-      case 'Purchase Requests':
+      case 'Order Requests':
         return (
           <PurchaseRequestsModule 
             brand={activeBrand} 

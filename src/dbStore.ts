@@ -2152,7 +2152,7 @@ export const db = {
       localStorage.setItem(`sparezy_schema_${b}_purchase_requests`, JSON.stringify(list));
     }
     
-    db.logTransaction(user.id, user.name, 'Create Purchase Request', 'Purchase Requests', `Created purchase request for part ${partNo}`, null, requestRec);
+    db.logTransaction(user.id, user.name, 'Create Order Request', 'Order Requests', `Created order request for part ${partNo}`, null, requestRec);
     db.notify();
     return requestRec;
   },
@@ -2180,7 +2180,7 @@ export const db = {
         localStorage.setItem(`sparezy_schema_${b}_purchase_requests`, JSON.stringify(list));
       }
       
-      db.logTransaction(user.id, user.name, 'Update Purchase Request Status', 'Purchase Requests', `Updated purchase request status of part ${oldReq.part_no} to ${status}`, oldReq, list[idx]);
+      db.logTransaction(user.id, user.name, 'Update Order Request Status', 'Order Requests', `Updated order request status of part ${oldReq.part_no} to ${status}`, oldReq, list[idx]);
       db.notify();
     } else {
       throw new Error("Purchase request not found");

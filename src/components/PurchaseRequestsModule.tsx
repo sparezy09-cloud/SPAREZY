@@ -41,7 +41,7 @@ export default function PurchaseRequestsModule({ brand, user, onNavigateToPurcha
       const data = await db.fetchPurchaseRequests(brand);
       setRequests(data);
     } catch (err) {
-      console.error("Failed to load purchase requests:", err);
+      console.error("Failed to load order requests:", err);
     } finally {
       setIsLoading(false);
     }
@@ -94,7 +94,7 @@ export default function PurchaseRequestsModule({ brand, user, onNavigateToPurcha
         note.trim() || null,
         user
       );
-      setCreateSuccess("Purchase request submitted successfully!");
+      setCreateSuccess("Order request submitted successfully!");
       setPartNo('');
       setPartName('');
       setCurrentStock(0);
@@ -221,8 +221,8 @@ export default function PurchaseRequestsModule({ brand, user, onNavigateToPurcha
       {/* Top action header card */}
       <div className="bg-white border border-slate-200 p-6 rounded-3xl shadow-2xs flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <div>
-          <h2 className="text-base font-bold tracking-tight text-slate-900">Purchase Requests Dashboard</h2>
-          <p className="text-[11px] text-slate-500 mt-0.5">Manage, review, and request parts procurement for {brand}.</p>
+          <h2 className="text-base font-bold tracking-tight text-slate-900">Order Requests Dashboard</h2>
+          <p className="text-[11px] text-slate-500 mt-0.5">Manage, review, and request parts orders for {brand}.</p>
         </div>
         <button
           onClick={() => setIsCreating(true)}
@@ -346,7 +346,7 @@ export default function PurchaseRequestsModule({ brand, user, onNavigateToPurcha
               {filteredRequests.length === 0 && (
                 <tr>
                   <td colSpan={7} className="text-center p-8 text-slate-400 italic">
-                    {isLoading ? "Synchronizing purchase requests..." : "No purchase requests match the filter criteria."}
+                    {isLoading ? "Synchronizing order requests..." : "No order requests match the filter criteria."}
                   </td>
                 </tr>
               )}
