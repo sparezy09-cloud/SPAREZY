@@ -225,6 +225,7 @@ export default function PurchaseRequestsModule({ brand, user, onNavigateToPurcha
           <p className="text-[11px] text-slate-500 mt-0.5">Manage, review, and request parts orders for {brand}.</p>
         </div>
         <button
+          id="purchase-request-button"
           onClick={() => setIsCreating(true)}
           className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2.5 px-4 rounded-xl flex items-center gap-2 transition text-xs shadow-sm cursor-pointer"
         >

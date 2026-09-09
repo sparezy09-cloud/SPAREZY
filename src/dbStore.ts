@@ -3,7 +3,7 @@ import { safeLocalStorage, safeSessionStorage } from './storagePolyfill';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
-  ScanSource, PurchaseRequest, PurchaseRequestStatus
+  ScanSource, PurchaseRequest, PurchaseRequestStatus, CustomerPayment, CustomerLedgerEntry
 } from './types';
 
 const localStorage = safeLocalStorage;
@@ -16,6 +16,8 @@ const KEY_LOGS = 'sparezy_public_logs_fb';
 const KEY_ACTIVE_USER = 'sparezy_active_user_fb';
 const KEY_ACTIVE_BRAND = 'sparezy_active_brand_fb';
 const KEY_LOCAL_PASSWORDS = 'sparezy_local_user_passwords_fb';
+const KEY_CUSTOMER_PAYMENTS = 'sparezy_public_customer_payments_fb';
+const KEY_CUSTOMER_LEDGER = 'sparezy_public_customer_ledger_fb';
 
 // Safe LocalStorage wrapper to prevent quota/limit errors when database partitions grow large
 try {
@@ -64,6 +66,8 @@ let cache = {
   users: [] as User[],
   customers: [] as Customer[],
   transaction_logs: [] as TransactionLog[],
+  customer_payments: [] as CustomerPayment[],
+  customer_ledger: [] as CustomerLedgerEntry[],
   hyundai: {
     inventory: [] as InventoryItem[],
     sales: [] as Sale[],
@@ -196,6 +200,13 @@ export function clearSchemaError(schema: string, table: string) {
 // Initialize fallback structures in localStorage to protect against missing credentials
 function initLocalFallback() {
   if (typeof window === 'undefined') return;
+  // Load caches from local storage
+  cache.users = safeParseJSON(localStorage.getItem(KEY_USERS)) || [] as User[];
+  cache.customers = safeParseJSON(localStorage.getItem(KEY_CUSTOMERS)) || [] as Customer[];
+  cache.transaction_logs = safeParseJSON(localStorage.getItem(KEY_LOGS)) || [] as TransactionLog[];
+  cache.customer_payments = safeParseJSON(localStorage.getItem(KEY_CUSTOMER_PAYMENTS)) || [] as CustomerPayment[];
+  cache.customer_ledger = safeParseJSON(localStorage.getItem(KEY_CUSTOMER_LEDGER)) || [] as CustomerLedgerEntry[];
+
   // If no env variables are configured, set failed state immediately
   if (!isSupabaseConfigured) {
     connectionStatus = 'failed';
@@ -223,6 +234,12 @@ const scrubRow = (row: any) => {
   if (r.refund_amount !== undefined) r.refund_amount = Number(r.refund_amount);
   if (r.old_mrp !== undefined) r.old_mrp = Number(r.old_mrp);
   if (r.new_mrp !== undefined) r.new_mrp = Number(r.new_mrp);
+  if (r.starting_outstanding !== undefined) r.starting_outstanding = Number(r.starting_outstanding);
+  if (r.current_outstanding !== undefined) r.current_outstanding = Number(r.current_outstanding);
+  if (r.total_sales !== undefined) r.total_sales = Number(r.total_sales);
+  if (r.total_payments !== undefined) r.total_payments = Number(r.total_payments);
+  if (r.total_returns !== undefined) r.total_returns = Number(r.total_returns);
+  if (r.amount !== undefined) r.amount = Number(r.amount);
   
   if (r.old_data !== undefined) {
     r.old_data = r.old_data ? (typeof r.old_data === 'string' ? r.old_data : JSON.stringify(r.old_data)) : null;
@@ -342,7 +359,7 @@ export const db = {
           console.log("[Refresh Engine] Purging stale metadata & reloading public tables...");
           const [usersRes, customersRes, logsRes] = await Promise.all([
             supabase.from('users').select('id, name, email, role, status, created_at'),
-            supabase.from('customers').select('id, customer_name, customer_category, phone, created_at'),
+            supabase.from('customers').select('id, customer_name, customer_category, phone, starting_outstanding, current_outstanding, total_sales, total_payments, total_returns, created_at'),
             supabase.from('transaction_logs')
               .select('id, user_id, user_name, action_type, module_name, description, created_at, old_data, new_data')
               .order('created_at', { ascending: false })
@@ -410,7 +427,7 @@ export const db = {
           mInvRes
         ] = await Promise.all([
           supabase.from('users').select('id, name, email, role, status, created_at'),
-          supabase.from('customers').select('id, customer_name, customer_category, phone, created_at'),
+          supabase.from('customers').select('id, customer_name, customer_category, phone, starting_outstanding, current_outstanding, total_sales, total_payments, total_returns, created_at'),
           supabase.from('transaction_logs').select('id, user_id, user_name, action_type, module_name, description, created_at, old_data, new_data').order('created_at', { ascending: false }).limit(100),
           supabase.auth.getSession(),
           supabase.rpc('current_schema'),
@@ -1160,12 +1177,18 @@ export const db = {
     return cache.customers;
   },
 
-  addCustomer: async (name: string, category: CustomerCategory, phone?: string): Promise<Customer> => {
+  addCustomer: async (name: string, category: CustomerCategory, phone?: string, startingOutstanding: number = 0): Promise<Customer> => {
+    const custId = uuid();
     const newCust: Customer = {
-      id: uuid(),
+      id: custId,
       customer_name: name,
       customer_category: category,
       phone: phone || '',
+      starting_outstanding: startingOutstanding,
+      current_outstanding: startingOutstanding,
+      total_sales: 0,
+      total_payments: 0,
+      total_returns: 0,
       created_at: new Date().toISOString()
     };
     cache.customers.unshift(newCust); // Use unshift to add to top of lists
@@ -1179,13 +1202,290 @@ export const db = {
     } else {
       localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(cache.customers));
     }
+
+    // Always create an Opening Balance ledger entry
+    await db.createLedgerEntry({
+      customer_id: custId,
+      brand: null,
+      tx_type: 'Opening Balance',
+      tx_id: custId,
+      description: 'Opening Balance',
+      amount: startingOutstanding,
+      payment_method: null,
+      reference_no: null,
+      tx_date: new Date().toISOString().split('T')[0]
+    });
     
     const activeUser = db.getActiveUser();
     const userId = activeUser ? activeUser.id : 'system';
     const userName = activeUser ? activeUser.name : 'System';
-    db.logTransaction(userId, userName, 'Create Customer', 'Customer Ledger', `Created customer ${name} categorised under ${category}`, null, newCust);
+    db.logTransaction(userId, userName, 'Create Customer', 'Customer Ledger', `Created customer ${name} categorised under ${category} with starting outstanding ₹${startingOutstanding}`, null, newCust);
     db.notify();
     return newCust;
+  },
+
+  updateCustomer: async (
+    id: string,
+    name: string,
+    category: CustomerCategory,
+    phone?: string,
+    startingOutstanding: number = 0
+  ): Promise<Customer> => {
+    const idx = cache.customers.findIndex(c => c.id === id);
+    if (idx === -1) throw new Error("Customer not found.");
+
+    const oldCust = { ...cache.customers[idx] };
+    
+    // 1. Check if starting outstanding changed. If so, we need to update the ledger's Opening Balance
+    if (Number(oldCust.starting_outstanding) !== Number(startingOutstanding)) {
+      let openingEntries: CustomerLedgerEntry[] = [];
+      if (isSupabaseConfigured && supabase) {
+        const { data } = await supabase.from('customer_ledger').select('*').eq('customer_id', id).eq('tx_type', 'Opening Balance');
+        openingEntries = (data || []).map(scrubRow) as CustomerLedgerEntry[];
+      } else {
+        openingEntries = cache.customer_ledger.filter(e => e.customer_id === id && e.tx_type === 'Opening Balance');
+      }
+
+      if (openingEntries.length > 0) {
+        const entry = openingEntries[0];
+        if (isSupabaseConfigured && supabase) {
+          await supabase.from('customer_ledger').update({ amount: startingOutstanding }).eq('id', entry.id);
+        } else {
+          const eIdx = cache.customer_ledger.findIndex(x => x.id === entry.id);
+          if (eIdx > -1) cache.customer_ledger[eIdx].amount = startingOutstanding;
+          localStorage.setItem(KEY_CUSTOMER_LEDGER, JSON.stringify(cache.customer_ledger));
+        }
+      } else {
+        await db.createLedgerEntry({
+          customer_id: id,
+          brand: null,
+          tx_type: 'Opening Balance',
+          tx_id: id,
+          description: 'Opening Balance',
+          amount: startingOutstanding,
+          payment_method: null,
+          reference_no: null,
+          tx_date: new Date().toISOString().split('T')[0]
+        });
+      }
+    }
+
+    // 2. Update basic fields in memory first
+    cache.customers[idx].customer_name = name;
+    cache.customers[idx].customer_category = category;
+    cache.customers[idx].phone = phone || '';
+
+    // 3. Trigger recalculation to update current outstanding and totals safely!
+    await db.recalculateCustomerBalance(id);
+
+    const updatedCust = cache.customers[idx];
+
+    // 4. Update parent table basic details in Supabase
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase
+        .from('customers')
+        .update({
+          customer_name: name,
+          customer_category: category,
+          phone: phone || '',
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', id);
+      if (error) {
+        console.error("❌ Error updating customer in Supabase:", error);
+      }
+    } else {
+      localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(cache.customers));
+    }
+
+    const activeUser = db.getActiveUser();
+    const userId = activeUser ? activeUser.id : 'system';
+    const userName = activeUser ? activeUser.name : 'System';
+    db.logTransaction(userId, userName, 'Update Customer', 'Customer Ledger', `Updated customer details for ${name}`, oldCust, updatedCust);
+    db.notify();
+    return updatedCust;
+  },
+
+  createLedgerEntry: async (
+    entry: Omit<CustomerLedgerEntry, 'id' | 'created_at'>
+  ): Promise<CustomerLedgerEntry> => {
+    const newEntry: CustomerLedgerEntry = {
+      id: uuid(),
+      ...entry,
+      created_at: new Date().toISOString()
+    };
+
+    cache.customer_ledger.unshift(newEntry);
+
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase.from('customer_ledger').insert(newEntry);
+      if (error) {
+        console.error("❌ Error inserting ledger entry into Supabase:", error);
+        throw new Error(`Failed to save ledger transaction: ${error.message}`);
+      }
+    } else {
+      localStorage.setItem(KEY_CUSTOMER_LEDGER, JSON.stringify(cache.customer_ledger));
+    }
+
+    await db.recalculateCustomerBalance(entry.customer_id);
+    return newEntry;
+  },
+
+  recalculateCustomerBalance: async (customerId: string): Promise<void> => {
+    let entries: CustomerLedgerEntry[] = [];
+    if (isSupabaseConfigured && supabase) {
+      const { data, error } = await supabase
+        .from('customer_ledger')
+        .select('*')
+        .eq('customer_id', customerId);
+      if (error) {
+        console.error("Error reading ledger for recalculation:", error);
+      } else {
+        entries = (data || []).map(scrubRow) as CustomerLedgerEntry[];
+      }
+    } else {
+      entries = cache.customer_ledger.filter(e => e.customer_id === customerId);
+    }
+
+    let starting_outstanding = 0;
+    let total_sales = 0;
+    let total_payments = 0;
+    let total_returns = 0;
+
+    entries.forEach(e => {
+      if (e.tx_type === 'Opening Balance') {
+        starting_outstanding = Number(e.amount);
+      } else if (e.tx_type === 'Sale') {
+        total_sales += Number(e.amount);
+      } else if (e.tx_type === 'Payment') {
+        total_payments += Math.abs(Number(e.amount));
+      } else if (e.tx_type === 'Return') {
+        total_returns += Math.abs(Number(e.amount));
+      }
+    });
+
+    const current_outstanding = starting_outstanding + total_sales - total_payments - total_returns;
+
+    const idx = cache.customers.findIndex(c => c.id === customerId);
+    if (idx > -1) {
+      cache.customers[idx] = {
+        ...cache.customers[idx],
+        starting_outstanding,
+        current_outstanding,
+        total_sales,
+        total_payments,
+        total_returns,
+        updated_at: new Date().toISOString()
+      };
+    }
+
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase
+        .from('customers')
+        .update({
+          starting_outstanding,
+          current_outstanding,
+          total_sales,
+          total_payments,
+          total_returns,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', customerId);
+      if (error) {
+        console.error("Error updating customer balances in Supabase:", error);
+      }
+    } else {
+      localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(cache.customers));
+    }
+    db.notify();
+  },
+
+  createCustomerPayment: async (
+    payment: Omit<CustomerPayment, 'id' | 'created_at'>
+  ): Promise<CustomerPayment> => {
+    const payId = uuid();
+    const newPayment: CustomerPayment = {
+      id: payId,
+      ...payment,
+      created_at: new Date().toISOString()
+    };
+
+    cache.customer_payments.unshift(newPayment);
+
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase.from('customer_payments').insert(newPayment);
+      if (error) {
+        console.error("❌ Error inserting customer payment into Supabase:", error);
+        throw new Error(`Failed to save customer payment: ${error.message}`);
+      }
+    } else {
+      localStorage.setItem(KEY_CUSTOMER_PAYMENTS, JSON.stringify(cache.customer_payments));
+    }
+
+    await db.createLedgerEntry({
+      customer_id: payment.customer_id,
+      brand: null,
+      tx_type: 'Payment',
+      tx_id: payId,
+      description: payment.note ? `Payment - ${payment.payment_method} (${payment.note})` : `Payment - ${payment.payment_method}`,
+      amount: -payment.amount,
+      payment_method: payment.payment_method,
+      reference_no: payId,
+      tx_date: payment.payment_date
+    });
+
+    await db.recalculateCustomerBalance(payment.customer_id);
+
+    const activeUser = db.getActiveUser();
+    const userId = activeUser ? activeUser.id : 'system';
+    const userName = activeUser ? activeUser.name : 'System';
+    db.logTransaction(userId, userName, 'Receive Payment', 'Customer Ledger', `Received payment of ₹${payment.amount} via ${payment.payment_method}`, null, newPayment);
+    db.notify();
+    return newPayment;
+  },
+
+  getCustomerPayments: (customerId: string): CustomerPayment[] => {
+    return cache.customer_payments.filter(p => p.customer_id === customerId);
+  },
+
+  getCustomerLedger: async (
+    customerId: string,
+    page: number = 1,
+    pageSize: number = 20
+  ): Promise<{ items: CustomerLedgerEntry[], totalCount: number }> => {
+    if (isSupabaseConfigured && supabase) {
+      const start = (page - 1) * pageSize;
+      const end = start + pageSize - 1;
+      const { data, count, error } = await supabase
+        .from('customer_ledger')
+        .select('*', { count: 'exact' })
+        .eq('customer_id', customerId)
+        .order('tx_date', { ascending: false })
+        .order('created_at', { ascending: false })
+        .range(start, end);
+      if (error) {
+        console.error("Error reading customer ledger from Supabase:", error);
+        return { items: [], totalCount: 0 };
+      }
+      return {
+        items: (data || []).map(scrubRow) as CustomerLedgerEntry[],
+        totalCount: count || 0
+      };
+    } else {
+      const filtered = cache.customer_ledger
+        .filter(e => e.customer_id === customerId)
+        .sort((a, b) => {
+          const dateCompare = b.tx_date.localeCompare(a.tx_date);
+          if (dateCompare !== 0) return dateCompare;
+          return b.created_at.localeCompare(a.created_at);
+        });
+      const start = (page - 1) * pageSize;
+      const items = filtered.slice(start, start + pageSize);
+      return {
+        items,
+        totalCount: filtered.length
+      };
+    }
   },
 
   // Inventory lists
@@ -1665,6 +1965,40 @@ export const db = {
     }
     
     db.logTransaction(user.id, user.name, 'Create Sale', 'Sales', `Created invoice ${saleId} for ${customerName} (₹${totalAmount.toFixed(2)})`, null, sale);
+
+    // Create ledger entries if customerId is specified
+    if (customerId) {
+      try {
+        await db.createLedgerEntry({
+          customer_id: customerId,
+          brand,
+          tx_type: 'Sale',
+          tx_id: saleId,
+          description: `Sale Invoice #${saleId.substring(0, 8)}`,
+          amount: totalAmount,
+          payment_method: null,
+          reference_no: saleId,
+          tx_date: new Date().toISOString().split('T')[0]
+        });
+
+        if (calculatedPaid > 0) {
+          await db.createLedgerEntry({
+            customer_id: customerId,
+            brand,
+            tx_type: 'Payment',
+            tx_id: saleId,
+            description: `Payment for Invoice #${saleId.substring(0, 8)}`,
+            amount: -calculatedPaid,
+            payment_method: 'Cash', // Default to cash for invoice payment
+            reference_no: saleId,
+            tx_date: new Date().toISOString().split('T')[0]
+          });
+        }
+      } catch (err) {
+        console.error("Error creating sale ledger entries:", err);
+      }
+    }
+
     lastBrandFetchTime[b] = 0;
     db.notify();
     return sale;
@@ -1701,6 +2035,58 @@ export const db = {
     }
 
     db.logTransaction(user.id, user.name, 'Receive Payment', 'Sales', `Received payment for invoice ${saleId} (Total: ₹${sale.total_amount}, Paid: ₹${paidAmount}, Pending: ₹${sale.pending_amount})`, oldSale, sale);
+
+    // Sync Customer Ledger if sale has a customer_id
+    if (sale.customer_id) {
+      (async () => {
+        try {
+          let existingEntries: CustomerLedgerEntry[] = [];
+          if (isSupabaseConfigured && supabase) {
+            const { data } = await supabase.from('customer_ledger').select('*').eq('customer_id', sale.customer_id).eq('tx_type', 'Payment').eq('tx_id', saleId);
+            existingEntries = (data || []).map(scrubRow) as CustomerLedgerEntry[];
+          } else {
+            existingEntries = cache.customer_ledger.filter(e => e.customer_id === sale.customer_id && e.tx_type === 'Payment' && e.tx_id === saleId);
+          }
+
+          if (existingEntries.length > 0) {
+            const entry = existingEntries[0];
+            if (paidAmount > 0) {
+              if (isSupabaseConfigured && supabase) {
+                await supabase.from('customer_ledger').update({ amount: -paidAmount }).eq('id', entry.id);
+              } else {
+                const eIdx = cache.customer_ledger.findIndex(x => x.id === entry.id);
+                if (eIdx > -1) cache.customer_ledger[eIdx].amount = -paidAmount;
+                localStorage.setItem(KEY_CUSTOMER_LEDGER, JSON.stringify(cache.customer_ledger));
+              }
+            } else {
+              if (isSupabaseConfigured && supabase) {
+                await supabase.from('customer_ledger').delete().eq('id', entry.id);
+              } else {
+                cache.customer_ledger = cache.customer_ledger.filter(x => x.id !== entry.id);
+                localStorage.setItem(KEY_CUSTOMER_LEDGER, JSON.stringify(cache.customer_ledger));
+              }
+            }
+          } else if (paidAmount > 0) {
+            await db.createLedgerEntry({
+              customer_id: sale.customer_id,
+              brand,
+              tx_type: 'Payment',
+              tx_id: saleId,
+              description: `Payment for Invoice #${saleId.substring(0, 8)}`,
+              amount: -paidAmount,
+              payment_method: 'Cash',
+              reference_no: saleId,
+              tx_date: new Date().toISOString().split('T')[0]
+            });
+          }
+
+          await db.recalculateCustomerBalance(sale.customer_id);
+        } catch (err) {
+          console.error("Error syncing payment ledger entry in updateSalePayment:", err);
+        }
+      })();
+    }
+
     db.notify();
     return sale;
   },
@@ -1784,6 +2170,21 @@ export const db = {
       localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
       localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(cache[b].sales));
       localStorage.setItem(`sparezy_schema_${b}_sale_items`, JSON.stringify(cache[b].sale_items));
+    }
+
+    // Delete customer ledger entries if customer_id exists
+    if (sale.customer_id) {
+      try {
+        if (isSupabaseConfigured && supabase) {
+          await supabase.from('customer_ledger').delete().eq('tx_id', saleId);
+        } else {
+          cache.customer_ledger = cache.customer_ledger.filter(e => e.tx_id !== saleId);
+          localStorage.setItem(KEY_CUSTOMER_LEDGER, JSON.stringify(cache.customer_ledger));
+        }
+        await db.recalculateCustomerBalance(sale.customer_id);
+      } catch (err) {
+        console.error("Error deleting sale ledger entries during undoSale:", err);
+      }
     }
 
     db.logTransaction(
@@ -1930,6 +2331,26 @@ export const db = {
     }
     
     db.logTransaction(user.id, user.name, 'Sale Return', 'Returns', `Processed return for billing ${saleId}: Quantity ${returnedQty} of ${sItem.part_no}`, oldSale, sale);
+
+    // Record ledger entry if sale has customer_id
+    if (sale.customer_id) {
+      try {
+        await db.createLedgerEntry({
+          customer_id: sale.customer_id,
+          brand,
+          tx_type: 'Return',
+          tx_id: returnRec.id,
+          description: `Return: ${returnedQty}x of ${sItem.part_no} (${sItem.part_name})`,
+          amount: -refundAmount, // Returns decrease outstanding (credit/negative)
+          payment_method: null,
+          reference_no: returnRec.id,
+          tx_date: new Date().toISOString().split('T')[0]
+        });
+      } catch (err) {
+        console.error("Error creating return ledger entry in processReturn:", err);
+      }
+    }
+
     db.notify();
     return returnRec;
   },

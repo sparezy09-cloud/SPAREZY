@@ -53,6 +53,37 @@ export interface Customer {
   customer_name: string;
   customer_category: CustomerCategory;
   phone?: string;
+  starting_outstanding: number;
+  current_outstanding: number;
+  total_sales: number;
+  total_payments: number;
+  total_returns: number;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface CustomerPayment {
+  id: string;
+  customer_id: string;
+  amount: number;
+  payment_method: 'Cash' | 'UPI' | 'Bank';
+  payment_date: string;
+  note: string | null;
+  created_by: string;
+  created_at: string;
+}
+
+export interface CustomerLedgerEntry {
+  id: string;
+  customer_id: string;
+  brand: Brand | null;
+  tx_type: 'Opening Balance' | 'Sale' | 'Payment' | 'Return';
+  tx_id: string | null;
+  description: string;
+  amount: number;
+  payment_method: 'Cash' | 'UPI' | 'Bank' | null;
+  reference_no: string | null;
+  tx_date: string;
   created_at: string;
 }
 
