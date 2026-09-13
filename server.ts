@@ -166,6 +166,10 @@ Return the data strictly as a JSON object matching the requested schema.`;
             type: Type.STRING, 
             description: "The unique invoice number or bill number (e.g. GST-1293). This MUST NOT be a date format like 'DD/MM/YYYY'." 
           },
+          billStatedTotal: {
+            type: Type.NUMBER,
+            description: "Total invoice amount as explicitly printed on the bill for reconciliation"
+          },
           items: {
             type: Type.ARRAY,
             items: {
@@ -247,6 +251,33 @@ Return the data strictly as a JSON object matching the requested schema.`;
       }
       responseData = parseCleanJson(responseFallback.text);
       modelUsed = "gemini-3.1-flash-lite";
+    }
+
+    // Normalize keys to support both camelCase and Section 5 snake_case schema
+    if (responseData && typeof responseData === 'object') {
+      const items = responseData.items || responseData.line_items || [];
+      const lineItems = items.map((it: any) => ({
+        part_number: it.partNumber || it.part_number || '',
+        part_name: it.name || it.part_name || it.partName || '',
+        qty: Number(it.quantity || it.qty || 1),
+        unit_price: Number(it.printedUnitPrice || it.unit_price || it.mrp || 0),
+        mrp: Number(it.mrp || 0),
+        discountPercent: Number(it.discountPercent || 0),
+        partNumber: it.partNumber || it.part_number || '',
+        name: it.name || it.part_name || it.partName || '',
+        quantity: Number(it.quantity || it.qty || 1),
+        printedUnitPrice: Number(it.printedUnitPrice || it.unit_price || it.mrp || 0)
+      }));
+
+      responseData = {
+        ...responseData,
+        supplier_name: responseData.dealerName || responseData.supplier_name || 'Vendor',
+        bill_number: responseData.invoiceNumber || responseData.bill_number || '',
+        bill_date: responseData.invoiceDate || responseData.bill_date || '',
+        bill_stated_total: Number(responseData.billStatedTotal || responseData.bill_stated_total || 0),
+        line_items: lineItems,
+        items: lineItems
+      };
     }
 
     res.json({

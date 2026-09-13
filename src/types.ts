@@ -190,3 +190,78 @@ export interface TransactionLog {
   new_data: string | null; // JSON String or description
   created_at: string;
 }
+
+// Version 2: Brand Discount Settings
+export interface BrandDiscountSetting {
+  brand: Brand;
+  discount_percent: number;
+}
+
+// Version 2: AI Bill Intake & Purchase Bills
+export type PartMatchStatus = 'matched' | 'archived' | 'new';
+export type PurchaseBillStatus = 'pending_review' | 'confirmed';
+
+export interface PurchaseBill {
+  id: string;
+  brand: Brand;
+  bill_number: string;
+  bill_date: string;
+  supplier_name: string;
+  scanned_file_url?: string;
+  scanned_thumbnail_url?: string;
+  subtotal: number;
+  discount_percent: number;
+  discount_amount: number;
+  total_after_discount: number;
+  bill_stated_total: number;
+  status: PurchaseBillStatus;
+  created_by?: string;
+  created_at: string;
+  confirmed_at?: string | null;
+}
+
+export interface PurchaseBillItem {
+  id: string;
+  purchase_bill_id: string;
+  part_number_scanned: string;
+  part_name_scanned: string;
+  qty: number;
+  unit_price: number;
+  match_status: PartMatchStatus;
+  matched_part_id?: string | null;
+  resolved: boolean;
+  resolution_action?: 'create' | 'reactivate' | 'match' | 'skip';
+  new_selling_price?: number;
+  new_category?: string;
+  created_at?: string;
+}
+
+// Version 2: Stock Movements
+export type StockMovementReason = 'purchase' | 'sale' | 'adjustment' | 'request_fulfilled';
+
+export interface StockMovement {
+  id: string;
+  brand: Brand;
+  part_id: string;
+  part_no: string;
+  part_name: string;
+  change_qty: number;
+  reason: StockMovementReason;
+  reference_id?: string | null;
+  created_by?: string;
+  created_at: string;
+}
+
+// Version 2: Khatabook Customer Balance View
+export interface CustomerBalanceView {
+  customer_id: string;
+  name: string;
+  customer_type: CustomerCategory;
+  phone?: string;
+  opening_balance: number;
+  total_sales: number;
+  total_paid_at_sale: number;
+  total_payments: number;
+  pending_balance: number;
+  status_tier: 'settled' | 'partial' | 'high_due';
+}

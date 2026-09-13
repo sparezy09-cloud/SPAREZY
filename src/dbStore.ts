@@ -3,7 +3,8 @@ import { safeLocalStorage, safeSessionStorage } from './storagePolyfill';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
-  ScanSource, PurchaseRequest, PurchaseRequestStatus, CustomerPayment, CustomerLedgerEntry
+  ScanSource, PurchaseRequest, PurchaseRequestStatus, CustomerPayment, CustomerLedgerEntry,
+  PurchaseBill, PurchaseBillItem, PartMatchStatus, PurchaseBillStatus, StockMovement, StockMovementReason, CustomerBalanceView
 } from './types';
 
 const localStorage = safeLocalStorage;
@@ -18,6 +19,10 @@ const KEY_ACTIVE_BRAND = 'sparezy_active_brand_fb';
 const KEY_LOCAL_PASSWORDS = 'sparezy_local_user_passwords_fb';
 const KEY_CUSTOMER_PAYMENTS = 'sparezy_public_customer_payments_fb';
 const KEY_CUSTOMER_LEDGER = 'sparezy_public_customer_ledger_fb';
+const KEY_BRAND_DISCOUNTS = 'sparezy_brand_discounts_v2';
+const KEY_PURCHASE_BILLS = 'sparezy_purchase_bills_v2';
+const KEY_PURCHASE_BILL_ITEMS = 'sparezy_purchase_bill_items_v2';
+const KEY_STOCK_MOVEMENTS = 'sparezy_stock_movements_v2';
 
 // Safe LocalStorage wrapper to prevent quota/limit errors when database partitions grow large
 try {
@@ -68,6 +73,16 @@ let cache = {
   transaction_logs: [] as TransactionLog[],
   customer_payments: [] as CustomerPayment[],
   customer_ledger: [] as CustomerLedgerEntry[],
+  brand_discounts: {
+    Hyundai: 12.00,
+    Mahindra: 19.36
+  } as Record<Brand, number>,
+  purchase_bills: [] as PurchaseBill[],
+  purchase_bill_items: [] as PurchaseBillItem[],
+  stock_movements: {
+    hyundai: [] as StockMovement[],
+    mahindra: [] as StockMovement[]
+  },
   hyundai: {
     inventory: [] as InventoryItem[],
     sales: [] as Sale[],
@@ -206,6 +221,22 @@ function initLocalFallback() {
   cache.transaction_logs = safeParseJSON(localStorage.getItem(KEY_LOGS)) || [] as TransactionLog[];
   cache.customer_payments = safeParseJSON(localStorage.getItem(KEY_CUSTOMER_PAYMENTS)) || [] as CustomerPayment[];
   cache.customer_ledger = safeParseJSON(localStorage.getItem(KEY_CUSTOMER_LEDGER)) || [] as CustomerLedgerEntry[];
+  const storedDiscounts = safeParseJSON(localStorage.getItem(KEY_BRAND_DISCOUNTS));
+  if (storedDiscounts) {
+    cache.brand_discounts = {
+      Hyundai: typeof storedDiscounts.Hyundai === 'number' ? storedDiscounts.Hyundai : 12.00,
+      Mahindra: typeof storedDiscounts.Mahindra === 'number' ? storedDiscounts.Mahindra : 19.36
+    };
+  }
+  cache.purchase_bills = safeParseJSON(localStorage.getItem(KEY_PURCHASE_BILLS)) || [] as PurchaseBill[];
+  cache.purchase_bill_items = safeParseJSON(localStorage.getItem(KEY_PURCHASE_BILL_ITEMS)) || [] as PurchaseBillItem[];
+  const storedMovements = safeParseJSON(localStorage.getItem(KEY_STOCK_MOVEMENTS));
+  if (storedMovements) {
+    cache.stock_movements = {
+      hyundai: storedMovements.hyundai || [],
+      mahindra: storedMovements.mahindra || []
+    };
+  }
 
   // If no env variables are configured, set failed state immediately
   if (!isSupabaseConfigured) {
@@ -3858,5 +3889,429 @@ export const db = {
         totalCount: list.length
       };
     }
+  },
+
+  // --- VERSION 2: BRAND DISCOUNT SETTINGS ---
+  getBrandDiscountSettings: (): Record<Brand, number> => {
+    return {
+      Hyundai: cache.brand_discounts.Hyundai ?? 12.00,
+      Mahindra: cache.brand_discounts.Mahindra ?? 19.36
+    };
+  },
+
+  getBrandDiscount: (brand: Brand): number => {
+    const val = cache.brand_discounts[brand];
+    if (typeof val === 'number') return val;
+    return brand === 'Hyundai' ? 12.00 : 19.36;
+  },
+
+  updateBrandDiscount: async (brand: Brand, percent: number): Promise<void> => {
+    cache.brand_discounts[brand] = Number(percent);
+    localStorage.setItem(KEY_BRAND_DISCOUNTS, JSON.stringify(cache.brand_discounts));
+    if (isSupabaseConfigured && supabase) {
+      try {
+        await supabase.from('brand_discount_settings').upsert({
+          brand,
+          discount_percent: Number(percent),
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'brand' });
+      } catch (err) {
+        console.warn("[Brand Discount Save Notice] Supabase table update optional fallback:", err);
+      }
+    }
+    db.notify();
+  },
+
+  // --- VERSION 2: PURCHASE BILLS & RECONCILIATION ---
+  getPurchaseBills: (brand?: Brand): PurchaseBill[] => {
+    let bills = [...cache.purchase_bills];
+    if (brand) {
+      bills = bills.filter(b => b.brand === brand);
+    }
+    return bills.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  },
+
+  getPurchaseBill: (billId: string): { bill: PurchaseBill | null; items: PurchaseBillItem[] } => {
+    const bill = cache.purchase_bills.find(b => b.id === billId) || null;
+    const items = cache.purchase_bill_items.filter(i => i.purchase_bill_id === billId);
+    return { bill, items };
+  },
+
+  getPurchaseBillItems: (_brand: Brand, billId: string): PurchaseBillItem[] => {
+    return cache.purchase_bill_items.filter(i => i.purchase_bill_id === billId);
+  },
+
+  createPurchaseBill: async (params: {
+    brand: Brand;
+    billNumber: string;
+    billDate: string;
+    supplierName: string;
+    scannedFileUrl?: string;
+    scannedThumbnailUrl?: string;
+    items: Array<{
+      part_no: string;
+      part_name: string;
+      quantity: number;
+      unit_price: number;
+      hsn?: string;
+    }>;
+    billStatedTotal?: number;
+    user?: User;
+  }): Promise<{ bill: PurchaseBill; items: PurchaseBillItem[] }> => {
+    const b = params.brand.toLowerCase() as 'hyundai' | 'mahindra';
+    const discountPercent = db.getBrandDiscount(params.brand);
+    
+    // Check match status against current brand inventory
+    const inventory = cache[b].inventory;
+    
+    let subtotal = 0;
+    const billId = uuid();
+    const billItems: PurchaseBillItem[] = [];
+
+    for (const rawItem of params.items) {
+      const lineTotal = Number(rawItem.quantity || 1) * Number(rawItem.unit_price || 0);
+      subtotal += lineTotal;
+
+      const cleanPartNo = (rawItem.part_no || '').trim().toUpperCase();
+      const existingPart = inventory.find(i => i.part_no.toUpperCase() === cleanPartNo);
+
+      let matchStatus: PartMatchStatus = 'new';
+      let matchedPartId: string | null = null;
+
+      if (existingPart) {
+        matchedPartId = existingPart.id;
+        matchStatus = existingPart.is_active ? 'matched' : 'archived';
+      }
+
+      const itemRec: PurchaseBillItem = {
+        id: uuid(),
+        purchase_bill_id: billId,
+        part_number_scanned: cleanPartNo || 'UNKNOWN-PART',
+        part_name_scanned: rawItem.part_name || cleanPartNo || 'Spare Part',
+        qty: Number(rawItem.quantity) || 1,
+        unit_price: Number(rawItem.unit_price) || 0,
+        match_status: matchStatus,
+        matched_part_id: matchedPartId,
+        resolved: matchStatus === 'matched',
+        resolution_action: matchStatus === 'matched' ? 'match' : undefined,
+        new_selling_price: Number(rawItem.unit_price) || 0,
+        new_category: 'General',
+        created_at: new Date().toISOString()
+      };
+
+      billItems.push(itemRec);
+    }
+
+    const discountAmount = subtotal * (discountPercent / 100);
+    const totalAfterDiscount = subtotal - discountAmount;
+    const statedTotal = typeof params.billStatedTotal === 'number' && params.billStatedTotal > 0 
+      ? params.billStatedTotal 
+      : totalAfterDiscount;
+
+    const newBill: PurchaseBill = {
+      id: billId,
+      brand: params.brand,
+      bill_number: params.billNumber || `BILL-${Date.now().toString().slice(-6)}`,
+      bill_date: params.billDate || new Date().toISOString().split('T')[0],
+      supplierName: params.supplierName || 'Auto Spares Supplier',
+      supplier_name: params.supplierName || 'Auto Spares Supplier',
+      scanned_file_url: params.scannedFileUrl,
+      scanned_thumbnail_url: params.scannedThumbnailUrl,
+      subtotal: Math.round(subtotal * 100) / 100,
+      discount_percent: discountPercent,
+      discount_amount: Math.round(discountAmount * 100) / 100,
+      total_after_discount: Math.round(totalAfterDiscount * 100) / 100,
+      bill_stated_total: Math.round(statedTotal * 100) / 100,
+      status: 'pending_review',
+      created_by: params.user?.name || 'Staff',
+      created_at: new Date().toISOString()
+    } as PurchaseBill;
+
+    // Cache locally
+    cache.purchase_bills.unshift(newBill);
+    cache.purchase_bill_items.push(...billItems);
+    localStorage.setItem(KEY_PURCHASE_BILLS, JSON.stringify(cache.purchase_bills));
+    localStorage.setItem(KEY_PURCHASE_BILL_ITEMS, JSON.stringify(cache.purchase_bill_items));
+
+    // Supabase persist if configured
+    if (isSupabaseConfigured && supabase) {
+      try {
+        await supabase.from('purchase_bills').insert({
+          id: newBill.id,
+          brand: newBill.brand,
+          bill_number: newBill.bill_number,
+          bill_date: newBill.bill_date,
+          supplier_name: newBill.supplier_name,
+          scanned_file_url: newBill.scanned_file_url,
+          scanned_thumbnail_url: newBill.scanned_thumbnail_url,
+          subtotal: newBill.subtotal,
+          discount_percent: newBill.discount_percent,
+          discount_amount: newBill.discount_amount,
+          total_after_discount: newBill.total_after_discount,
+          bill_stated_total: newBill.bill_stated_total,
+          status: newBill.status,
+          created_by: newBill.created_by,
+          created_at: newBill.created_at
+        });
+        await supabase.from('purchase_bill_items').insert(billItems);
+      } catch (err) {
+        console.warn("[Purchase Bills Sync] Supabase table insert optional fallback:", err);
+      }
+    }
+
+    db.notify();
+    return { bill: newBill, items: billItems };
+  },
+
+  confirmPurchaseBill: async (
+    billId: string,
+    itemResolutions: Array<{
+      itemId: string;
+      action: 'create' | 'reactivate' | 'match' | 'skip';
+      sellingPrice?: number;
+      category?: string;
+      partNo?: string;
+      partName?: string;
+      qty?: number;
+      unitPrice?: number;
+    }>,
+    user: User
+  ): Promise<void> => {
+    const billIdx = cache.purchase_bills.findIndex(b => b.id === billId);
+    if (billIdx === -1) throw new Error(`Purchase Bill ${billId} not found.`);
+    const bill = cache.purchase_bills[billIdx];
+    const b = bill.brand.toLowerCase() as 'hyundai' | 'mahindra';
+
+    // Retrieve bill items
+    const billItems = cache.purchase_bill_items.filter(i => i.purchase_bill_id === billId);
+
+    for (const res of itemResolutions) {
+      if (res.action === 'skip') continue;
+
+      const billItem = billItems.find(i => i.id === res.itemId);
+      const partNo = (res.partNo || billItem?.part_number_scanned || '').trim().toUpperCase();
+      const partName = res.partName || billItem?.part_name_scanned || partNo;
+      const qty = Number(res.qty ?? billItem?.qty ?? 1);
+      const unitPrice = Number(res.unitPrice ?? res.sellingPrice ?? billItem?.unit_price ?? 0);
+
+      if (!partNo) continue;
+
+      // Locate inventory part in brand schema
+      let invPart = cache[b].inventory.find(i => i.part_no.toUpperCase() === partNo);
+
+      if (invPart) {
+        // Matched or Reactivated
+        invPart.quantity += qty;
+        if (unitPrice > 0) invPart.mrp = unitPrice;
+        if (!invPart.is_active) {
+          invPart.is_active = true;
+          invPart.archived_at = null;
+        }
+        invPart.updated_at = new Date().toISOString();
+
+        if (isSupabaseConfigured && supabase) {
+          await supabase.schema(b).from('inventory').update({
+            quantity: invPart.quantity,
+            mrp: invPart.mrp,
+            is_active: invPart.is_active,
+            archived_at: invPart.archived_at,
+            updated_at: invPart.updated_at
+          }).eq('id', invPart.id);
+        }
+      } else {
+        // Create new part
+        const newPart: InventoryItem = {
+          id: uuid(),
+          part_no: partNo,
+          part_name: partName,
+          quantity: qty,
+          hsn: '8708',
+          mrp: unitPrice,
+          brand: bill.brand,
+          is_active: true,
+          archived_at: null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        };
+        cache[b].inventory.unshift(newPart);
+        invPart = newPart;
+
+        if (isSupabaseConfigured && supabase) {
+          await supabase.schema(b).from('inventory').insert(newPart);
+        }
+      }
+
+      // Record Stock Movement
+      await db.logStockMovement(
+        bill.brand,
+        invPart.id,
+        invPart.part_no,
+        invPart.part_name,
+        qty,
+        'purchase',
+        bill.id,
+        user
+      );
+
+      // Update bill item resolved status
+      if (billItem) {
+        billItem.resolved = true;
+        billItem.resolution_action = res.action;
+        billItem.matched_part_id = invPart.id;
+      }
+    }
+
+    // Mark bill as confirmed
+    bill.status = 'confirmed';
+    bill.confirmed_at = new Date().toISOString();
+
+    // Persist changes
+    localStorage.setItem(KEY_PURCHASE_BILLS, JSON.stringify(cache.purchase_bills));
+    localStorage.setItem(KEY_PURCHASE_BILL_ITEMS, JSON.stringify(cache.purchase_bill_items));
+    localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(cache[b].inventory));
+
+    if (isSupabaseConfigured && supabase) {
+      try {
+        await supabase.from('purchase_bills').update({
+          status: 'confirmed',
+          confirmed_at: bill.confirmed_at
+        }).eq('id', bill.id);
+      } catch (err) {
+        console.warn("[Purchase Bill Confirm] Supabase update notice:", err);
+      }
+    }
+
+    db.logTransaction(
+      user.id,
+      user.name,
+      'Confirm Purchase Bill',
+      'Inventory',
+      `Confirmed purchase bill #${bill.bill_number} from ${bill.supplier_name}. Updated stock and logged stock movements.`,
+      null,
+      bill
+    );
+
+    lastBrandFetchTime[b] = 0;
+    db.notify();
+  },
+
+  deletePurchaseBill: async (billId: string, user: User): Promise<void> => {
+    const bill = cache.purchase_bills.find(b => b.id === billId);
+    cache.purchase_bills = cache.purchase_bills.filter(b => b.id !== billId);
+    cache.purchase_bill_items = cache.purchase_bill_items.filter(i => i.purchase_bill_id !== billId);
+
+    localStorage.setItem(KEY_PURCHASE_BILLS, JSON.stringify(cache.purchase_bills));
+    localStorage.setItem(KEY_PURCHASE_BILL_ITEMS, JSON.stringify(cache.purchase_bill_items));
+
+    if (isSupabaseConfigured && supabase) {
+      try {
+        await supabase.from('purchase_bills').delete().eq('id', billId);
+        await supabase.from('purchase_bill_items').delete().eq('purchase_bill_id', billId);
+      } catch (err) {
+        console.warn("[Purchase Bill Delete] Supabase delete notice:", err);
+      }
+    }
+
+    if (bill) {
+      db.logTransaction(
+        user.id,
+        user.name,
+        'Delete Purchase Bill',
+        'Purchases',
+        `Deleted draft purchase bill #${bill.bill_number}`,
+        bill,
+        null
+      );
+    }
+    db.notify();
+  },
+
+  // --- VERSION 2: STOCK MOVEMENTS AUDIT ---
+  getStockMovements: (brand: Brand, partNo?: string): StockMovement[] => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    let movements = cache.stock_movements[b] || [];
+    if (partNo) {
+      movements = movements.filter(m => m.part_no.toUpperCase() === partNo.trim().toUpperCase());
+    }
+    return [...movements].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  },
+
+  logStockMovement: async (
+    brand: Brand,
+    partId: string,
+    partNo: string,
+    partName: string,
+    changeQty: number,
+    reason: StockMovementReason,
+    refId: string | null,
+    user: User
+  ): Promise<StockMovement> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    const movement: StockMovement = {
+      id: uuid(),
+      brand,
+      part_id: partId,
+      part_no: partNo,
+      part_name: partName,
+      change_qty: changeQty,
+      reason,
+      reference_id: refId,
+      created_by: user.name,
+      created_at: new Date().toISOString()
+    };
+
+    if (!cache.stock_movements[b]) {
+      cache.stock_movements[b] = [];
+    }
+    cache.stock_movements[b].unshift(movement);
+    localStorage.setItem(KEY_STOCK_MOVEMENTS, JSON.stringify(cache.stock_movements));
+
+    if (isSupabaseConfigured && supabase) {
+      try {
+        await supabase.schema(b).from('stock_movements').insert(movement);
+      } catch (err) {
+        console.warn("[Stock Movements Sync] Supabase table insert optional fallback:", err);
+      }
+    }
+
+    return movement;
+  },
+
+  // --- VERSION 2: KHATABOOK RUNNING BALANCE VIEW ---
+  getCustomerBalances: (filterTier?: 'all' | 'settled' | 'partial' | 'high_due'): CustomerBalanceView[] => {
+    const customers = cache.customers || [];
+    const balances: CustomerBalanceView[] = customers.map(c => {
+      const opening = Number(c.starting_outstanding || 0);
+      const totalSales = Number(c.total_sales || 0);
+      const totalPayments = Number(c.total_payments || 0);
+      const pendingBalance = opening + totalSales - totalPayments;
+
+      let tier: 'settled' | 'partial' | 'high_due' = 'settled';
+      if (pendingBalance >= 10000) {
+        tier = 'high_due';
+      } else if (pendingBalance > 0) {
+        tier = 'partial';
+      } else {
+        tier = 'settled';
+      }
+
+      return {
+        customer_id: c.id,
+        name: c.customer_name,
+        customer_type: c.customer_category,
+        phone: c.phone,
+        opening_balance: opening,
+        total_sales: totalSales,
+        total_paid_at_sale: 0,
+        total_payments: totalPayments,
+        pending_balance: pendingBalance,
+        status_tier: tier
+      };
+    });
+
+    if (filterTier && filterTier !== 'all') {
+      return balances.filter(b => b.status_tier === filterTier);
+    }
+    return balances;
   }
 };
