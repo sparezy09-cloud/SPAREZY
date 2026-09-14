@@ -5,24 +5,10 @@
 export type UserRole = 'Owner' | 'Manager';
 export type UserStatus = 'Active' | 'Disabled';
 export type Brand = 'Hyundai' | 'Mahindra';
-export type CustomerCategory = 'Walk-in' | 'Mistri' | 'Retailer' | 'Garage' | 'Direct Customer';
+export type CustomerCategory = 'Walk-in' | 'Mistri' | 'Retailer' | 'Garage';
 export type PaymentStatus = 'Paid' | 'Pending' | 'Custom Amount';
 export type ScanSource = 'manual' | 'image' | 'pdf' | 'excel';
 export type BulkUpdateType = 'Stock Update' | 'MRP Update';
-export type PurchaseRequestStatus = 'Pending' | 'Approved' | 'Rejected' | 'Completed';
-
-export interface PurchaseRequest {
-  id: string;
-  part_no: string;
-  part_name: string;
-  current_stock: number;
-  requested_quantity: number;
-  note: string | null;
-  requester_email: string;
-  requester_name: string;
-  status: PurchaseRequestStatus;
-  created_at: string;
-}
 
 export interface User {
   id: string;
@@ -53,37 +39,6 @@ export interface Customer {
   customer_name: string;
   customer_category: CustomerCategory;
   phone?: string;
-  starting_outstanding: number;
-  current_outstanding: number;
-  total_sales: number;
-  total_payments: number;
-  total_returns: number;
-  created_at: string;
-  updated_at?: string;
-}
-
-export interface CustomerPayment {
-  id: string;
-  customer_id: string;
-  amount: number;
-  payment_method: 'Cash' | 'UPI' | 'Bank';
-  payment_date: string;
-  note: string | null;
-  created_by: string;
-  created_at: string;
-}
-
-export interface CustomerLedgerEntry {
-  id: string;
-  customer_id: string;
-  brand: Brand | null;
-  tx_type: 'Opening Balance' | 'Sale' | 'Payment' | 'Return';
-  tx_id: string | null;
-  description: string;
-  amount: number;
-  payment_method: 'Cash' | 'UPI' | 'Bank' | null;
-  reference_no: string | null;
-  tx_date: string;
   created_at: string;
 }
 
@@ -189,79 +144,4 @@ export interface TransactionLog {
   old_data: string | null; // JSON String or description
   new_data: string | null; // JSON String or description
   created_at: string;
-}
-
-// Version 2: Brand Discount Settings
-export interface BrandDiscountSetting {
-  brand: Brand;
-  discount_percent: number;
-}
-
-// Version 2: AI Bill Intake & Purchase Bills
-export type PartMatchStatus = 'matched' | 'archived' | 'new';
-export type PurchaseBillStatus = 'pending_review' | 'confirmed';
-
-export interface PurchaseBill {
-  id: string;
-  brand: Brand;
-  bill_number: string;
-  bill_date: string;
-  supplier_name: string;
-  scanned_file_url?: string;
-  scanned_thumbnail_url?: string;
-  subtotal: number;
-  discount_percent: number;
-  discount_amount: number;
-  total_after_discount: number;
-  bill_stated_total: number;
-  status: PurchaseBillStatus;
-  created_by?: string;
-  created_at: string;
-  confirmed_at?: string | null;
-}
-
-export interface PurchaseBillItem {
-  id: string;
-  purchase_bill_id: string;
-  part_number_scanned: string;
-  part_name_scanned: string;
-  qty: number;
-  unit_price: number;
-  match_status: PartMatchStatus;
-  matched_part_id?: string | null;
-  resolved: boolean;
-  resolution_action?: 'create' | 'reactivate' | 'match' | 'skip';
-  new_selling_price?: number;
-  new_category?: string;
-  created_at?: string;
-}
-
-// Version 2: Stock Movements
-export type StockMovementReason = 'purchase' | 'sale' | 'adjustment' | 'request_fulfilled';
-
-export interface StockMovement {
-  id: string;
-  brand: Brand;
-  part_id: string;
-  part_no: string;
-  part_name: string;
-  change_qty: number;
-  reason: StockMovementReason;
-  reference_id?: string | null;
-  created_by?: string;
-  created_at: string;
-}
-
-// Version 2: Khatabook Customer Balance View
-export interface CustomerBalanceView {
-  customer_id: string;
-  name: string;
-  customer_type: CustomerCategory;
-  phone?: string;
-  opening_balance: number;
-  total_sales: number;
-  total_paid_at_sale: number;
-  total_payments: number;
-  pending_balance: number;
-  status_tier: 'settled' | 'partial' | 'high_due';
 }

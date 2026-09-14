@@ -29,8 +29,8 @@ END $$;
 
 -- Convert legacy Owner role to the new Admin role. Drop the old check first so the UPDATE can succeed.
 ALTER TABLE public.users DROP CONSTRAINT IF EXISTS users_role_check;
-UPDATE public.users SET role = 'Admin' WHERE role = 'Owner';
 ALTER TABLE public.users ADD CONSTRAINT users_role_check CHECK (role IN ('Admin','Manager'));
+UPDATE public.users SET role = 'Admin' WHERE role = 'Owner';
 
 COMMENT ON TABLE public.transaction_logs IS 'Immutable business audit trail. Do not delete transaction history.';
 

@@ -16,7 +16,6 @@ import LedgerModule from './components/LedgerModule';
 import TransactionsModule from './components/TransactionsModule';
 import SettingsModule from './components/SettingsModule';
 import OwnerReportsModule from './components/OwnerReportsModule';
-import PurchaseRequestsModule from './components/PurchaseRequestsModule';
 
 // Menu icons
 import { 
@@ -301,20 +300,13 @@ export default function App() {
     };
   }, [activeUser]);
 
-  // Lock Manager role to Inventory or Order Requests modules
-  useEffect(() => {
-    if (activeUser && activeUser.role === 'Manager' && activeModule !== 'Inventory' && activeModule !== 'Order Requests') {
-      setActiveModule('Inventory');
-    }
-  }, [activeUser, activeModule]);
-
   const handleBrandSelect = async (brand: Brand, user: User) => {
     // Set active brand and user immediately to jump-start navigation instantly
     db.setActiveUser(user);
     db.setActiveBrand(brand);
     setActiveBrand(brand);
     setActiveUser(user);
-    setActiveModule(user.role === 'Manager' ? 'Inventory' : 'Dashboard');
+    setActiveModule('Dashboard');
 
     // Lazily load the brand's dataset partitions in the background without blocking the screen
     try {
@@ -353,7 +345,6 @@ export default function App() {
   const sidebarItems = [
     { name: 'Dashboard', icon: LayoutDashboard },
     { name: 'Inventory', icon: Layers },
-    { name: 'Order Requests', icon: FileSpreadsheet },
     { name: 'Sales', icon: ShoppingBag },
     { name: 'Returns', icon: RotateCcw },
     { name: 'Purchases', icon: FileText },
@@ -362,12 +353,7 @@ export default function App() {
     { name: 'Customer & Dealer Ledgers', icon: Users },
     { name: 'Transaction Records', icon: Terminal, ownerOnly: true },
     { name: 'Settings / User Management', icon: Shield, ownerOnly: true },
-  ].filter(item => {
-    if (activeUser && activeUser.role === 'Manager') {
-      return item.name === 'Inventory' || item.name === 'Order Requests';
-    }
-    return true;
-  });
+  ];
 
   const renderModuleContent = () => {
     if (!activeBrand || !activeUser) return null;
@@ -389,14 +375,6 @@ export default function App() {
         );
       case 'Inventory':
         return <InventoryModule brand={activeBrand} user={activeUser} />;
-      case 'Order Requests':
-        return (
-          <PurchaseRequestsModule 
-            brand={activeBrand} 
-            user={activeUser} 
-            onNavigateToPurchases={() => setActiveModule('Purchases')} 
-          />
-        );
       case 'Sales':
         return <SalesModule brand={activeBrand} user={activeUser} />;
       case 'Returns':

@@ -3,8 +3,7 @@ import { safeLocalStorage, safeSessionStorage } from './storagePolyfill';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
-  ScanSource, PurchaseRequest, PurchaseRequestStatus, CustomerPayment, CustomerLedgerEntry,
-  PurchaseBill, PurchaseBillItem, PartMatchStatus, PurchaseBillStatus, StockMovement, StockMovementReason, CustomerBalanceView
+  ScanSource
 } from './types';
 
 const localStorage = safeLocalStorage;
@@ -17,12 +16,6 @@ const KEY_LOGS = 'sparezy_public_logs_fb';
 const KEY_ACTIVE_USER = 'sparezy_active_user_fb';
 const KEY_ACTIVE_BRAND = 'sparezy_active_brand_fb';
 const KEY_LOCAL_PASSWORDS = 'sparezy_local_user_passwords_fb';
-const KEY_CUSTOMER_PAYMENTS = 'sparezy_public_customer_payments_fb';
-const KEY_CUSTOMER_LEDGER = 'sparezy_public_customer_ledger_fb';
-const KEY_BRAND_DISCOUNTS = 'sparezy_brand_discounts_v2';
-const KEY_PURCHASE_BILLS = 'sparezy_purchase_bills_v2';
-const KEY_PURCHASE_BILL_ITEMS = 'sparezy_purchase_bill_items_v2';
-const KEY_STOCK_MOVEMENTS = 'sparezy_stock_movements_v2';
 
 // Safe LocalStorage wrapper to prevent quota/limit errors when database partitions grow large
 try {
@@ -46,12 +39,7 @@ const uuid = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     return crypto.randomUUID();
   }
-  // Fallback to RFC 4122 v4 compliant UUID to ensure Postgres UUID syntax check passes
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = Math.random() * 16 | 0;
-    const v = c === 'x' ? r : (r & 0x3 | 0x8);
-    return v.toString(16);
-  });
+  return 'id-' + Math.random().toString(36).substr(2, 9) + '-' + Date.now().toString(36);
 };
 
 const safeParseJSON = (str: any) => {
@@ -71,18 +59,6 @@ let cache = {
   users: [] as User[],
   customers: [] as Customer[],
   transaction_logs: [] as TransactionLog[],
-  customer_payments: [] as CustomerPayment[],
-  customer_ledger: [] as CustomerLedgerEntry[],
-  brand_discounts: {
-    Hyundai: 12.00,
-    Mahindra: 19.36
-  } as Record<Brand, number>,
-  purchase_bills: [] as PurchaseBill[],
-  purchase_bill_items: [] as PurchaseBillItem[],
-  stock_movements: {
-    hyundai: [] as StockMovement[],
-    mahindra: [] as StockMovement[]
-  },
   hyundai: {
     inventory: [] as InventoryItem[],
     sales: [] as Sale[],
@@ -92,7 +68,6 @@ let cache = {
     purchase_items: [] as PurchaseItem[],
     bulk_update_history: [] as BulkUpdateHistory[],
     mrp_history: [] as MRPHistory[],
-    purchase_requests: [] as PurchaseRequest[],
   },
   mahindra: {
     inventory: [] as InventoryItem[],
@@ -103,7 +78,6 @@ let cache = {
     purchase_items: [] as PurchaseItem[],
     bulk_update_history: [] as BulkUpdateHistory[],
     mrp_history: [] as MRPHistory[],
-    purchase_requests: [] as PurchaseRequest[],
   }
 };
 
@@ -215,29 +189,6 @@ export function clearSchemaError(schema: string, table: string) {
 // Initialize fallback structures in localStorage to protect against missing credentials
 function initLocalFallback() {
   if (typeof window === 'undefined') return;
-  // Load caches from local storage
-  cache.users = safeParseJSON(localStorage.getItem(KEY_USERS)) || [] as User[];
-  cache.customers = safeParseJSON(localStorage.getItem(KEY_CUSTOMERS)) || [] as Customer[];
-  cache.transaction_logs = safeParseJSON(localStorage.getItem(KEY_LOGS)) || [] as TransactionLog[];
-  cache.customer_payments = safeParseJSON(localStorage.getItem(KEY_CUSTOMER_PAYMENTS)) || [] as CustomerPayment[];
-  cache.customer_ledger = safeParseJSON(localStorage.getItem(KEY_CUSTOMER_LEDGER)) || [] as CustomerLedgerEntry[];
-  const storedDiscounts = safeParseJSON(localStorage.getItem(KEY_BRAND_DISCOUNTS));
-  if (storedDiscounts) {
-    cache.brand_discounts = {
-      Hyundai: typeof storedDiscounts.Hyundai === 'number' ? storedDiscounts.Hyundai : 12.00,
-      Mahindra: typeof storedDiscounts.Mahindra === 'number' ? storedDiscounts.Mahindra : 19.36
-    };
-  }
-  cache.purchase_bills = safeParseJSON(localStorage.getItem(KEY_PURCHASE_BILLS)) || [] as PurchaseBill[];
-  cache.purchase_bill_items = safeParseJSON(localStorage.getItem(KEY_PURCHASE_BILL_ITEMS)) || [] as PurchaseBillItem[];
-  const storedMovements = safeParseJSON(localStorage.getItem(KEY_STOCK_MOVEMENTS));
-  if (storedMovements) {
-    cache.stock_movements = {
-      hyundai: storedMovements.hyundai || [],
-      mahindra: storedMovements.mahindra || []
-    };
-  }
-
   // If no env variables are configured, set failed state immediately
   if (!isSupabaseConfigured) {
     connectionStatus = 'failed';
@@ -249,9 +200,6 @@ function initLocalFallback() {
 const scrubRow = (row: any) => {
   if (!row) return row;
   const r = { ...row };
-  if (r.name !== undefined && typeof r.name === 'string' && r.name.includes("|||")) {
-    r.name = r.name.split("|||")[0].trim();
-  }
   if (r.mrp !== undefined) r.mrp = Number(r.mrp);
   if (r.quantity !== undefined) r.quantity = Number(r.quantity);
   if (r.subtotal !== undefined) r.subtotal = Number(r.subtotal);
@@ -265,12 +213,6 @@ const scrubRow = (row: any) => {
   if (r.refund_amount !== undefined) r.refund_amount = Number(r.refund_amount);
   if (r.old_mrp !== undefined) r.old_mrp = Number(r.old_mrp);
   if (r.new_mrp !== undefined) r.new_mrp = Number(r.new_mrp);
-  if (r.starting_outstanding !== undefined) r.starting_outstanding = Number(r.starting_outstanding);
-  if (r.current_outstanding !== undefined) r.current_outstanding = Number(r.current_outstanding);
-  if (r.total_sales !== undefined) r.total_sales = Number(r.total_sales);
-  if (r.total_payments !== undefined) r.total_payments = Number(r.total_payments);
-  if (r.total_returns !== undefined) r.total_returns = Number(r.total_returns);
-  if (r.amount !== undefined) r.amount = Number(r.amount);
   
   if (r.old_data !== undefined) {
     r.old_data = r.old_data ? (typeof r.old_data === 'string' ? r.old_data : JSON.stringify(r.old_data)) : null;
@@ -390,7 +332,7 @@ export const db = {
           console.log("[Refresh Engine] Purging stale metadata & reloading public tables...");
           const [usersRes, customersRes, logsRes] = await Promise.all([
             supabase.from('users').select('id, name, email, role, status, created_at'),
-            supabase.from('customers').select('id, customer_name, customer_category, phone, starting_outstanding, current_outstanding, total_sales, total_payments, total_returns, created_at'),
+            supabase.from('customers').select('id, customer_name, customer_category, phone, created_at'),
             supabase.from('transaction_logs')
               .select('id, user_id, user_name, action_type, module_name, description, created_at, old_data, new_data')
               .order('created_at', { ascending: false })
@@ -458,7 +400,7 @@ export const db = {
           mInvRes
         ] = await Promise.all([
           supabase.from('users').select('id, name, email, role, status, created_at'),
-          supabase.from('customers').select('id, customer_name, customer_category, phone, starting_outstanding, current_outstanding, total_sales, total_payments, total_returns, created_at'),
+          supabase.from('customers').select('id, customer_name, customer_category, phone, created_at'),
           supabase.from('transaction_logs').select('id, user_id, user_name, action_type, module_name, description, created_at, old_data, new_data').order('created_at', { ascending: false }).limit(100),
           supabase.auth.getSession(),
           supabase.rpc('current_schema'),
@@ -690,20 +632,56 @@ export const db = {
             activeBrandChannel = null;
           }
 
-          // Initialize local caches to empty arrays as we now load data on-demand (only if they are not already populated)
-          if (!cache[b].inventory || cache[b].inventory.length === 0) cache[b].inventory = [];
-          if (!cache[b].sales || cache[b].sales.length === 0) cache[b].sales = [];
-          if (!cache[b].sale_items || cache[b].sale_items.length === 0) cache[b].sale_items = [];
-          if (!cache[b].returns || cache[b].returns.length === 0) cache[b].returns = [];
-          if (!cache[b].purchases || cache[b].purchases.length === 0) cache[b].purchases = [];
-          if (!cache[b].purchase_items || cache[b].purchase_items.length === 0) cache[b].purchase_items = [];
-          if (!cache[b].bulk_update_history || cache[b].bulk_update_history.length === 0) cache[b].bulk_update_history = [];
-          if (!cache[b].mrp_history || cache[b].mrp_history.length === 0) cache[b].mrp_history = [];
-          if (!cache[b].purchase_requests) cache[b].purchase_requests = [];
-
-          // 1. INVENTORY ACCESS CHECK - OPTIMIZED SELECT 1 ROW
-          console.log(`[Query Diagnostic] Running optimized inventory connectivity select for schema: ${b}`);
-          const { error: errInv } = await supabase.schema(b).from('inventory').select('id').limit(1);
+          // 1. INVENTORY ACCESS CHECK - OPTIMIZED PARALLEL RANGE FETCH TO BYPASS POSTGREST 1000 ROW LIMIT
+          console.log(`[Query Diagnostic] Running inventory select for schema: ${b}`);
+          
+          let bInv: any[] = [];
+          let errInv: any = null;
+          
+          try {
+            const { count, error: countErr } = await supabase
+              .schema(b)
+              .from('inventory')
+              .select('id', { count: 'exact', head: true });
+              
+            if (countErr) {
+              errInv = countErr;
+            } else {
+              const totalRows = count || 0;
+              console.log(`[Optimized Sync] Found total ${totalRows} parts in '${b}.inventory'. Initiating parallel range downloads...`);
+              
+              if (totalRows === 0) {
+                bInv = [];
+              } else {
+                const pageSize = 1000;
+                const pages = Math.ceil(totalRows / pageSize);
+                const rangePromises = [];
+                
+                for (let i = 0; i < pages; i++) {
+                  const from = i * pageSize;
+                  const to = (i + 1) * pageSize - 1;
+                  rangePromises.push(
+                    supabase.schema(b).from('inventory')
+                      .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at')
+                      .range(from, to)
+                  );
+                }
+                
+                const rangeResults = await Promise.all(rangePromises);
+                for (const res of rangeResults) {
+                  if (res.error) {
+                    errInv = res.error;
+                    break;
+                  }
+                  if (res.data) {
+                    bInv = bInv.concat(res.data);
+                  }
+                }
+              }
+            }
+          } catch (fetchExc: any) {
+            errInv = fetchExc;
+          }
 
           if (errInv) {
             const category = getErrorCategory(errInv.code, errInv.message);
@@ -718,8 +696,10 @@ export const db = {
               diagnosticStats.mahindraInventoryOk = false;
               diagnosticStats.mahindraInventoryError = errInv.message;
             }
+            // Do not use local fallback data if query fails
+            cache[b].inventory = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: inventory diagnostics passed`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: inventory, Count: ${bInv?.length || 0}`);
             diagnosticStats.inventoryTest = { success: true, error: null };
             
             if (b === 'hyundai') {
@@ -730,100 +710,139 @@ export const db = {
               diagnosticStats.mahindraInventoryError = null;
             }
             clearSchemaError(b, 'inventory');
+            cache[b].inventory = (bInv || []).map(scrubRow);
           }
 
-          // 2. SALES ACCESS CHECK - OPTIMIZED SELECT 1 ROW
-          console.log(`[Query Diagnostic] Running optimized sales connectivity select for schema: ${b}`);
-          const { error: errSales } = await supabase.schema(b).from('sales').select('id').limit(1);
+          // 2. SALES ACCESS CHECK
+          console.log(`[Query Diagnostic] Running sales select for schema: ${b}`);
+          const { data: bSales, error: errSales } = await supabase.schema(b).from('sales')
+            .select('id, customer_id, customer_name, customer_category, sale_date, subtotal, discount_percentage, discount_amount, total_amount, payment_status, paid_amount, pending_amount, created_by, created_at')
+            .order('created_at', { ascending: false });
           if (errSales) {
             const category = getErrorCategory(errSales.code, errSales.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: sales, Error: ${errSales.message}`, errSales);
             reportSupabaseError(b, 'sales', 'select', errSales.message, errSales.code);
             diagnosticStats.salesTest = { success: false, error: errSales.message };
+            cache[b].sales = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: sales diagnostics passed`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: sales, Count: ${bSales?.length || 0}`);
             diagnosticStats.salesTest = { success: true, error: null };
             clearSchemaError(b, 'sales');
+            cache[b].sales = (bSales || []).map(scrubRow);
           }
 
-          // 3. SALE ITEMS ACCESS CHECK - OPTIMIZED SELECT 1 ROW
-          console.log(`[Query Diagnostic] Running optimized sale_items connectivity select for schema: ${b}`);
-          const { error: errSalesItems } = await supabase.schema(b).from('sale_items').select('id').limit(1);
+          // 3. SALE ITEMS ACCESS CHECK
+          console.log(`[Query Diagnostic] Running sale_items select for schema: ${b}`);
+          const { data: bSaleItems, error: errSalesItems } = await supabase.schema(b).from('sale_items')
+            .select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, final_amount, returned_quantity, created_at');
           if (errSalesItems) {
             const category = getErrorCategory(errSalesItems.code, errSalesItems.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: sale_items, Error: ${errSalesItems.message}`, errSalesItems);
             reportSupabaseError(b, 'sale_items', 'select', errSalesItems.message, errSalesItems.code);
+            cache[b].sale_items = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: sale_items diagnostics passed`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: sale_items, Count: ${bSaleItems?.length || 0}`);
             clearSchemaError(b, 'sale_items');
+            cache[b].sale_items = (bSaleItems || []).map(scrubRow);
           }
 
-          // 4. RETURNS ACCESS CHECK - OPTIMIZED SELECT 1 ROW
-          console.log(`[Query Diagnostic] Running optimized returns connectivity select for schema: ${b}`);
-          const { error: errReturns } = await supabase.schema(b).from('returns').select('id').limit(1);
+          // 4. RETURNS ACCESS CHECK
+          console.log(`[Query Diagnostic] Running returns select for schema: ${b}`);
+          const { data: bReturns, error: errReturns } = await supabase.schema(b).from('returns')
+            .select('id, sale_id, sale_item_id, customer_id, part_no, part_name, returned_quantity, refund_amount, return_date, created_by')
+            .order('return_date', { ascending: false });
           if (errReturns) {
             const category = getErrorCategory(errReturns.code, errReturns.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: returns, Error: ${errReturns.message}`, errReturns);
             reportSupabaseError(b, 'returns', 'select', errReturns.message, errReturns.code);
-            diagnosticStats.returnsTest = { success: false, error: errReturns.message };
+            cache[b].returns = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: returns diagnostics passed`);
-            diagnosticStats.returnsTest = { success: true, error: null };
+            console.log(`✅ [Query Result] Schema: ${b}, Table: returns, Count: ${bReturns?.length || 0}`);
             clearSchemaError(b, 'returns');
+            cache[b].returns = (bReturns || []).map(scrubRow);
           }
 
-          // 5. PURCHASES ACCESS CHECK - OPTIMIZED SELECT 1 ROW
-          console.log(`[Query Diagnostic] Running optimized purchases connectivity select for schema: ${b}`);
-          const { error: errPurchases } = await supabase.schema(b).from('purchases').select('id').limit(1);
+          // 4b. RETURNS DIAGNOCTICS ACCESS CHECK (Requirement 5)
+          console.log(`[Query Diagnostic] Running returns diagnostic select for schema: ${b}`);
+          const { error: errReturnsDiag } = await supabase
+            .schema(b)
+            .from('returns')
+            .select('id, return_date')
+            .order('return_date', { ascending: false })
+            .limit(1);
+          if (errReturnsDiag) {
+            diagnosticStats.returnsTest = { success: false, error: errReturnsDiag.message };
+          } else {
+            diagnosticStats.returnsTest = { success: true, error: null };
+          }
+
+          // 5. PURCHASES ACCESS CHECK
+          console.log(`[Query Diagnostic] Running purchases select for schema: ${b}`);
+          const { data: bPurchases, error: errPurchases } = await supabase.schema(b).from('purchases')
+            .select('id, dealer_name, invoice_no, invoice_date, subtotal, dealer_discount_percentage, discount_amount, total_after_discount, scan_source, created_by, created_at')
+            .order('created_at', { ascending: false });
           if (errPurchases) {
             const category = getErrorCategory(errPurchases.code, errPurchases.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: purchases, Error: ${errPurchases.message}`, errPurchases);
             reportSupabaseError(b, 'purchases', 'select', errPurchases.message, errPurchases.code);
             diagnosticStats.purchaseTest = { success: false, error: errPurchases.message };
+            cache[b].purchases = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: purchases diagnostics passed`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: purchases, Count: ${bPurchases?.length || 0}`);
             diagnosticStats.purchaseTest = { success: true, error: null };
             clearSchemaError(b, 'purchases');
+            cache[b].purchases = (bPurchases || []).map(scrubRow);
           }
 
-          // 6. PURCHASE ITEMS ACCESS CHECK - OPTIMIZED SELECT 1 ROW
-          console.log(`[Query Diagnostic] Running optimized purchase_items connectivity select for schema: ${b}`);
-          const { error: errPItems } = await supabase.schema(b).from('purchase_items').select('id').limit(1);
+          // 6. PURCHASE ITEMS ACCESS CHECK
+          console.log(`[Query Diagnostic] Running purchase_items select for schema: ${b}`);
+          const { data: bPItems, error: errPItems } = await supabase.schema(b).from('purchase_items')
+            .select('id, purchase_id, part_no, part_name, hsn, quantity, mrp, is_new_part, matched_inventory, created_at');
           if (errPItems) {
             const category = getErrorCategory(errPItems.code, errPItems.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: purchase_items, Error: ${errPItems.message}`, errPItems);
             reportSupabaseError(b, 'purchase_items', 'select', errPItems.message, errPItems.code);
+            cache[b].purchase_items = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: purchase_items diagnostics passed`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: purchase_items, Count: ${bPItems?.length || 0}`);
             clearSchemaError(b, 'purchase_items');
+            cache[b].purchase_items = (bPItems || []).map(scrubRow);
           }
 
-          // 7. BULK UPDATE HISTORY ACCESS CHECK - OPTIMIZED SELECT 1 ROW
-          console.log(`[Query Diagnostic] Running optimized bulk_update_history connectivity select for schema: ${b}`);
-          const { error: errBulk } = await supabase.schema(b).from('bulk_update_history').select('id').limit(1);
+          // 7. BULK UPDATE HISTORY ACCESS CHECK
+          console.log(`[Query Diagnostic] Running bulk_update_history select for schema: ${b}`);
+          const { data: bBulk, error: errBulk } = await supabase.schema(b).from('bulk_update_history')
+            .select('id, update_type, file_name, total_rows, success_rows, failed_rows, created_by, created_at, can_undo')
+            .order('created_at', { ascending: false });
           if (errBulk) {
             const category = getErrorCategory(errBulk.code, errBulk.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: bulk_update_history, Error: ${errBulk.message}`, errBulk);
             reportSupabaseError(b, 'bulk_update_history', 'select', errBulk.message, errBulk.code);
             diagnosticStats.bulkUpdateHistoryTest = { success: false, error: errBulk.message };
+            cache[b].bulk_update_history = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: bulk_update_history diagnostics passed`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: bulk_update_history, Count: ${bBulk?.length || 0}`);
             diagnosticStats.bulkUpdateHistoryTest = { success: true, error: null };
             clearSchemaError(b, 'bulk_update_history');
+            cache[b].bulk_update_history = (bBulk || []).map(scrubRow);
           }
 
-          // 8. MRP HISTORY ACCESS CHECK - OPTIMIZED SELECT 1 ROW
-          console.log(`[Query Diagnostic] Running optimized mrp_history connectivity select for schema: ${b}`);
-          const { error: errMrp } = await supabase.schema(b).from('mrp_history').select('id').limit(1);
+          // 8. MRP HISTORY ACCESS CHECK
+          console.log(`[Query Diagnostic] Running mrp_history select for schema: ${b}`);
+          const { data: bMrp, error: errMrp } = await supabase.schema(b).from('mrp_history')
+            .select('id, part_no, old_mrp, new_mrp, changed_by, changed_at')
+            .order('changed_at', { ascending: false });
           if (errMrp) {
             const category = getErrorCategory(errMrp.code, errMrp.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: mrp_history, Error: ${errMrp.message}`, errMrp);
             reportSupabaseError(b, 'mrp_history', 'select', errMrp.message, errMrp.code);
             diagnosticStats.mrpHistoryTest = { success: false, error: errMrp.message };
+            cache[b].mrp_history = [];
           } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: mrp_history diagnostics passed`);
+            console.log(`✅ [Query Result] Schema: ${b}, Table: mrp_history, Count: ${bMrp?.length || 0}`);
             diagnosticStats.mrpHistoryTest = { success: true, error: null };
             clearSchemaError(b, 'mrp_history');
+            cache[b].mrp_history = (bMrp || []).map(scrubRow);
           }
 
           // Subscribing specifically to this active brand's schema channels
@@ -1090,20 +1109,8 @@ export const db = {
   },
 
   addUser: async (name: string, email: string, role: UserRole, currentEditor: User, customId?: string, password?: string): Promise<User> => {
-    // If Supabase is configured, we must enforce a valid UUID for the database primary key.
-    // Alphanumeric IDs like "deepak" will fail the UUID syntax check.
-    const isValidUUID = (str: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
-    
-    let resolvedId = uuid();
-    if (customId && customId.trim()) {
-      const trimmed = customId.trim();
-      if (!isSupabaseConfigured || isValidUUID(trimmed)) {
-        resolvedId = trimmed;
-      }
-    }
-
     const newUser: User = {
-      id: resolvedId,
+      id: customId && customId.trim() ? customId.trim() : uuid(),
       name,
       email,
       role,
@@ -1115,7 +1122,7 @@ export const db = {
     if (isSupabaseConfigured && supabase) {
       const dbRow = {
         id: newUser.id,
-        name: password && password.trim() ? `${newUser.name} |||${password.trim()}` : newUser.name,
+        name: newUser.name,
         email: newUser.email.toLowerCase(),
         role: newUser.role,
         status: newUser.status,
@@ -1208,18 +1215,12 @@ export const db = {
     return cache.customers;
   },
 
-  addCustomer: async (name: string, category: CustomerCategory, phone?: string, startingOutstanding: number = 0): Promise<Customer> => {
-    const custId = uuid();
+  addCustomer: async (name: string, category: CustomerCategory, phone?: string): Promise<Customer> => {
     const newCust: Customer = {
-      id: custId,
+      id: uuid(),
       customer_name: name,
       customer_category: category,
       phone: phone || '',
-      starting_outstanding: startingOutstanding,
-      current_outstanding: startingOutstanding,
-      total_sales: 0,
-      total_payments: 0,
-      total_returns: 0,
       created_at: new Date().toISOString()
     };
     cache.customers.unshift(newCust); // Use unshift to add to top of lists
@@ -1233,290 +1234,13 @@ export const db = {
     } else {
       localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(cache.customers));
     }
-
-    // Always create an Opening Balance ledger entry
-    await db.createLedgerEntry({
-      customer_id: custId,
-      brand: null,
-      tx_type: 'Opening Balance',
-      tx_id: custId,
-      description: 'Opening Balance',
-      amount: startingOutstanding,
-      payment_method: null,
-      reference_no: null,
-      tx_date: new Date().toISOString().split('T')[0]
-    });
     
     const activeUser = db.getActiveUser();
     const userId = activeUser ? activeUser.id : 'system';
     const userName = activeUser ? activeUser.name : 'System';
-    db.logTransaction(userId, userName, 'Create Customer', 'Customer Ledger', `Created customer ${name} categorised under ${category} with starting outstanding ₹${startingOutstanding}`, null, newCust);
+    db.logTransaction(userId, userName, 'Create Customer', 'Customer Ledger', `Created customer ${name} categorised under ${category}`, null, newCust);
     db.notify();
     return newCust;
-  },
-
-  updateCustomer: async (
-    id: string,
-    name: string,
-    category: CustomerCategory,
-    phone?: string,
-    startingOutstanding: number = 0
-  ): Promise<Customer> => {
-    const idx = cache.customers.findIndex(c => c.id === id);
-    if (idx === -1) throw new Error("Customer not found.");
-
-    const oldCust = { ...cache.customers[idx] };
-    
-    // 1. Check if starting outstanding changed. If so, we need to update the ledger's Opening Balance
-    if (Number(oldCust.starting_outstanding) !== Number(startingOutstanding)) {
-      let openingEntries: CustomerLedgerEntry[] = [];
-      if (isSupabaseConfigured && supabase) {
-        const { data } = await supabase.from('customer_ledger').select('*').eq('customer_id', id).eq('tx_type', 'Opening Balance');
-        openingEntries = (data || []).map(scrubRow) as CustomerLedgerEntry[];
-      } else {
-        openingEntries = cache.customer_ledger.filter(e => e.customer_id === id && e.tx_type === 'Opening Balance');
-      }
-
-      if (openingEntries.length > 0) {
-        const entry = openingEntries[0];
-        if (isSupabaseConfigured && supabase) {
-          await supabase.from('customer_ledger').update({ amount: startingOutstanding }).eq('id', entry.id);
-        } else {
-          const eIdx = cache.customer_ledger.findIndex(x => x.id === entry.id);
-          if (eIdx > -1) cache.customer_ledger[eIdx].amount = startingOutstanding;
-          localStorage.setItem(KEY_CUSTOMER_LEDGER, JSON.stringify(cache.customer_ledger));
-        }
-      } else {
-        await db.createLedgerEntry({
-          customer_id: id,
-          brand: null,
-          tx_type: 'Opening Balance',
-          tx_id: id,
-          description: 'Opening Balance',
-          amount: startingOutstanding,
-          payment_method: null,
-          reference_no: null,
-          tx_date: new Date().toISOString().split('T')[0]
-        });
-      }
-    }
-
-    // 2. Update basic fields in memory first
-    cache.customers[idx].customer_name = name;
-    cache.customers[idx].customer_category = category;
-    cache.customers[idx].phone = phone || '';
-
-    // 3. Trigger recalculation to update current outstanding and totals safely!
-    await db.recalculateCustomerBalance(id);
-
-    const updatedCust = cache.customers[idx];
-
-    // 4. Update parent table basic details in Supabase
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase
-        .from('customers')
-        .update({
-          customer_name: name,
-          customer_category: category,
-          phone: phone || '',
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', id);
-      if (error) {
-        console.error("❌ Error updating customer in Supabase:", error);
-      }
-    } else {
-      localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(cache.customers));
-    }
-
-    const activeUser = db.getActiveUser();
-    const userId = activeUser ? activeUser.id : 'system';
-    const userName = activeUser ? activeUser.name : 'System';
-    db.logTransaction(userId, userName, 'Update Customer', 'Customer Ledger', `Updated customer details for ${name}`, oldCust, updatedCust);
-    db.notify();
-    return updatedCust;
-  },
-
-  createLedgerEntry: async (
-    entry: Omit<CustomerLedgerEntry, 'id' | 'created_at'>
-  ): Promise<CustomerLedgerEntry> => {
-    const newEntry: CustomerLedgerEntry = {
-      id: uuid(),
-      ...entry,
-      created_at: new Date().toISOString()
-    };
-
-    cache.customer_ledger.unshift(newEntry);
-
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase.from('customer_ledger').insert(newEntry);
-      if (error) {
-        console.error("❌ Error inserting ledger entry into Supabase:", error);
-        throw new Error(`Failed to save ledger transaction: ${error.message}`);
-      }
-    } else {
-      localStorage.setItem(KEY_CUSTOMER_LEDGER, JSON.stringify(cache.customer_ledger));
-    }
-
-    await db.recalculateCustomerBalance(entry.customer_id);
-    return newEntry;
-  },
-
-  recalculateCustomerBalance: async (customerId: string): Promise<void> => {
-    let entries: CustomerLedgerEntry[] = [];
-    if (isSupabaseConfigured && supabase) {
-      const { data, error } = await supabase
-        .from('customer_ledger')
-        .select('*')
-        .eq('customer_id', customerId);
-      if (error) {
-        console.error("Error reading ledger for recalculation:", error);
-      } else {
-        entries = (data || []).map(scrubRow) as CustomerLedgerEntry[];
-      }
-    } else {
-      entries = cache.customer_ledger.filter(e => e.customer_id === customerId);
-    }
-
-    let starting_outstanding = 0;
-    let total_sales = 0;
-    let total_payments = 0;
-    let total_returns = 0;
-
-    entries.forEach(e => {
-      if (e.tx_type === 'Opening Balance') {
-        starting_outstanding = Number(e.amount);
-      } else if (e.tx_type === 'Sale') {
-        total_sales += Number(e.amount);
-      } else if (e.tx_type === 'Payment') {
-        total_payments += Math.abs(Number(e.amount));
-      } else if (e.tx_type === 'Return') {
-        total_returns += Math.abs(Number(e.amount));
-      }
-    });
-
-    const current_outstanding = starting_outstanding + total_sales - total_payments - total_returns;
-
-    const idx = cache.customers.findIndex(c => c.id === customerId);
-    if (idx > -1) {
-      cache.customers[idx] = {
-        ...cache.customers[idx],
-        starting_outstanding,
-        current_outstanding,
-        total_sales,
-        total_payments,
-        total_returns,
-        updated_at: new Date().toISOString()
-      };
-    }
-
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase
-        .from('customers')
-        .update({
-          starting_outstanding,
-          current_outstanding,
-          total_sales,
-          total_payments,
-          total_returns,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', customerId);
-      if (error) {
-        console.error("Error updating customer balances in Supabase:", error);
-      }
-    } else {
-      localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(cache.customers));
-    }
-    db.notify();
-  },
-
-  createCustomerPayment: async (
-    payment: Omit<CustomerPayment, 'id' | 'created_at'>
-  ): Promise<CustomerPayment> => {
-    const payId = uuid();
-    const newPayment: CustomerPayment = {
-      id: payId,
-      ...payment,
-      created_at: new Date().toISOString()
-    };
-
-    cache.customer_payments.unshift(newPayment);
-
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase.from('customer_payments').insert(newPayment);
-      if (error) {
-        console.error("❌ Error inserting customer payment into Supabase:", error);
-        throw new Error(`Failed to save customer payment: ${error.message}`);
-      }
-    } else {
-      localStorage.setItem(KEY_CUSTOMER_PAYMENTS, JSON.stringify(cache.customer_payments));
-    }
-
-    await db.createLedgerEntry({
-      customer_id: payment.customer_id,
-      brand: null,
-      tx_type: 'Payment',
-      tx_id: payId,
-      description: payment.note ? `Payment - ${payment.payment_method} (${payment.note})` : `Payment - ${payment.payment_method}`,
-      amount: -payment.amount,
-      payment_method: payment.payment_method,
-      reference_no: payId,
-      tx_date: payment.payment_date
-    });
-
-    await db.recalculateCustomerBalance(payment.customer_id);
-
-    const activeUser = db.getActiveUser();
-    const userId = activeUser ? activeUser.id : 'system';
-    const userName = activeUser ? activeUser.name : 'System';
-    db.logTransaction(userId, userName, 'Receive Payment', 'Customer Ledger', `Received payment of ₹${payment.amount} via ${payment.payment_method}`, null, newPayment);
-    db.notify();
-    return newPayment;
-  },
-
-  getCustomerPayments: (customerId: string): CustomerPayment[] => {
-    return cache.customer_payments.filter(p => p.customer_id === customerId);
-  },
-
-  getCustomerLedger: async (
-    customerId: string,
-    page: number = 1,
-    pageSize: number = 20
-  ): Promise<{ items: CustomerLedgerEntry[], totalCount: number }> => {
-    if (isSupabaseConfigured && supabase) {
-      const start = (page - 1) * pageSize;
-      const end = start + pageSize - 1;
-      const { data, count, error } = await supabase
-        .from('customer_ledger')
-        .select('*', { count: 'exact' })
-        .eq('customer_id', customerId)
-        .order('tx_date', { ascending: false })
-        .order('created_at', { ascending: false })
-        .range(start, end);
-      if (error) {
-        console.error("Error reading customer ledger from Supabase:", error);
-        return { items: [], totalCount: 0 };
-      }
-      return {
-        items: (data || []).map(scrubRow) as CustomerLedgerEntry[],
-        totalCount: count || 0
-      };
-    } else {
-      const filtered = cache.customer_ledger
-        .filter(e => e.customer_id === customerId)
-        .sort((a, b) => {
-          const dateCompare = b.tx_date.localeCompare(a.tx_date);
-          if (dateCompare !== 0) return dateCompare;
-          return b.created_at.localeCompare(a.created_at);
-        });
-      const start = (page - 1) * pageSize;
-      const items = filtered.slice(start, start + pageSize);
-      return {
-        items,
-        totalCount: filtered.length
-      };
-    }
   },
 
   // Inventory lists
@@ -1875,7 +1599,6 @@ export const db = {
     user: User
   ): Promise<Sale> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    await db.ensureLocalInventoryCacheForParts(brand, items.map(item => item.part_no));
     const inventory = cache[b].inventory;
     const saleId = uuid();
     const saleItemsList = cache[b].sale_items;
@@ -1996,40 +1719,6 @@ export const db = {
     }
     
     db.logTransaction(user.id, user.name, 'Create Sale', 'Sales', `Created invoice ${saleId} for ${customerName} (₹${totalAmount.toFixed(2)})`, null, sale);
-
-    // Create ledger entries if customerId is specified
-    if (customerId) {
-      try {
-        await db.createLedgerEntry({
-          customer_id: customerId,
-          brand,
-          tx_type: 'Sale',
-          tx_id: saleId,
-          description: `Sale Invoice #${saleId.substring(0, 8)}`,
-          amount: totalAmount,
-          payment_method: null,
-          reference_no: saleId,
-          tx_date: new Date().toISOString().split('T')[0]
-        });
-
-        if (calculatedPaid > 0) {
-          await db.createLedgerEntry({
-            customer_id: customerId,
-            brand,
-            tx_type: 'Payment',
-            tx_id: saleId,
-            description: `Payment for Invoice #${saleId.substring(0, 8)}`,
-            amount: -calculatedPaid,
-            payment_method: 'Cash', // Default to cash for invoice payment
-            reference_no: saleId,
-            tx_date: new Date().toISOString().split('T')[0]
-          });
-        }
-      } catch (err) {
-        console.error("Error creating sale ledger entries:", err);
-      }
-    }
-
     lastBrandFetchTime[b] = 0;
     db.notify();
     return sale;
@@ -2066,58 +1755,6 @@ export const db = {
     }
 
     db.logTransaction(user.id, user.name, 'Receive Payment', 'Sales', `Received payment for invoice ${saleId} (Total: ₹${sale.total_amount}, Paid: ₹${paidAmount}, Pending: ₹${sale.pending_amount})`, oldSale, sale);
-
-    // Sync Customer Ledger if sale has a customer_id
-    if (sale.customer_id) {
-      (async () => {
-        try {
-          let existingEntries: CustomerLedgerEntry[] = [];
-          if (isSupabaseConfigured && supabase) {
-            const { data } = await supabase.from('customer_ledger').select('*').eq('customer_id', sale.customer_id).eq('tx_type', 'Payment').eq('tx_id', saleId);
-            existingEntries = (data || []).map(scrubRow) as CustomerLedgerEntry[];
-          } else {
-            existingEntries = cache.customer_ledger.filter(e => e.customer_id === sale.customer_id && e.tx_type === 'Payment' && e.tx_id === saleId);
-          }
-
-          if (existingEntries.length > 0) {
-            const entry = existingEntries[0];
-            if (paidAmount > 0) {
-              if (isSupabaseConfigured && supabase) {
-                await supabase.from('customer_ledger').update({ amount: -paidAmount }).eq('id', entry.id);
-              } else {
-                const eIdx = cache.customer_ledger.findIndex(x => x.id === entry.id);
-                if (eIdx > -1) cache.customer_ledger[eIdx].amount = -paidAmount;
-                localStorage.setItem(KEY_CUSTOMER_LEDGER, JSON.stringify(cache.customer_ledger));
-              }
-            } else {
-              if (isSupabaseConfigured && supabase) {
-                await supabase.from('customer_ledger').delete().eq('id', entry.id);
-              } else {
-                cache.customer_ledger = cache.customer_ledger.filter(x => x.id !== entry.id);
-                localStorage.setItem(KEY_CUSTOMER_LEDGER, JSON.stringify(cache.customer_ledger));
-              }
-            }
-          } else if (paidAmount > 0) {
-            await db.createLedgerEntry({
-              customer_id: sale.customer_id,
-              brand,
-              tx_type: 'Payment',
-              tx_id: saleId,
-              description: `Payment for Invoice #${saleId.substring(0, 8)}`,
-              amount: -paidAmount,
-              payment_method: 'Cash',
-              reference_no: saleId,
-              tx_date: new Date().toISOString().split('T')[0]
-            });
-          }
-
-          await db.recalculateCustomerBalance(sale.customer_id);
-        } catch (err) {
-          console.error("Error syncing payment ledger entry in updateSalePayment:", err);
-        }
-      })();
-    }
-
     db.notify();
     return sale;
   },
@@ -2128,33 +1765,17 @@ export const db = {
     user: User
   ): Promise<void> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    
-    // Lazy-load sale details if not present in cache
-    let sale = cache[b].sales.find(s => s.id === saleId);
-    if (!sale && isSupabaseConfigured && supabase) {
-      const { data: dbSale } = await supabase.schema(b).from('sales').select('id, brand, customer_id, customer_name, customer_category, phone, billing_address, total_amount, discount_amount, total_after_discount, paid_amount, pending_amount, payment_status, payment_method, sale_date, notes, created_by, created_at, updated_at').eq('id', saleId).single();
-      if (dbSale) {
-        sale = scrubRow(dbSale);
-        cache[b].sales.push(sale);
-      }
-    }
-    
-    if (!sale) {
+    const sales = cache[b].sales;
+    const saleIdx = sales.findIndex(s => s.id === saleId);
+    if (saleIdx === -1) {
       throw new Error(`Sale ID ${saleId} not found.`);
     }
+    const sale = sales[saleIdx];
 
-    // Lazy-load sale items if not present in cache
-    let saleItems = cache[b].sale_items.filter(item => item.sale_id === saleId);
-    if (saleItems.length === 0 && isSupabaseConfigured && supabase) {
-      const { data: dbItems } = await supabase.schema(b).from('sale_items').select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, discount_amount, final_amount, returned_quantity, refund_amount, created_at, updated_at').eq('sale_id', saleId);
-      if (dbItems) {
-        saleItems = dbItems.map(scrubRow);
-        cache[b].sale_items.push(...saleItems);
-      }
-    }
+    // Find all sale items for this sale
+    const saleItems = cache[b].sale_items.filter(item => item.sale_id === saleId);
 
     // Verify inventory items exist and update quantities
-    await db.ensureLocalInventoryCacheForParts(brand, saleItems.map(item => item.part_no));
     const inventory = cache[b].inventory;
     
     // Perform safety check first
@@ -2203,21 +1824,6 @@ export const db = {
       localStorage.setItem(`sparezy_schema_${b}_sale_items`, JSON.stringify(cache[b].sale_items));
     }
 
-    // Delete customer ledger entries if customer_id exists
-    if (sale.customer_id) {
-      try {
-        if (isSupabaseConfigured && supabase) {
-          await supabase.from('customer_ledger').delete().eq('tx_id', saleId);
-        } else {
-          cache.customer_ledger = cache.customer_ledger.filter(e => e.tx_id !== saleId);
-          localStorage.setItem(KEY_CUSTOMER_LEDGER, JSON.stringify(cache.customer_ledger));
-        }
-        await db.recalculateCustomerBalance(sale.customer_id);
-      } catch (err) {
-        console.error("Error deleting sale ledger entries during undoSale:", err);
-      }
-    }
-
     db.logTransaction(
       user.id,
       user.name,
@@ -2246,44 +1852,26 @@ export const db = {
     db.notify();
   },
 
-  processReturn: async (
+  processReturn: (
     brand: Brand, 
     saleId: string, 
     saleItemId: string, 
     returnedQty: number, 
     refundAmount: number, 
     user: User
-  ): Promise<ReturnRecord> => {
+  ) => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    
-    // Lazy-load sale item if not present in cache
-    let sItem = cache[b].sale_items.find(si => si.id === saleItemId);
-    if (!sItem && isSupabaseConfigured && supabase) {
-      const { data: dbItem } = await supabase.schema(b).from('sale_items').select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, discount_amount, final_amount, returned_quantity, refund_amount, created_at, updated_at').eq('id', saleItemId).single();
-      if (dbItem) {
-        sItem = scrubRow(dbItem);
-        cache[b].sale_items.push(sItem);
-      }
-    }
-    if (!sItem) throw new Error("Sale item not found");
-    
-    // Lazy-load parent sale if not present in cache
-    let sale = cache[b].sales.find(s => s.id === saleId);
-    if (!sale && isSupabaseConfigured && supabase) {
-      const { data: dbSale } = await supabase.schema(b).from('sales').select('id, brand, customer_id, customer_name, customer_category, phone, billing_address, total_amount, discount_amount, total_after_discount, paid_amount, pending_amount, payment_status, payment_method, sale_date, notes, created_by, created_at, updated_at').eq('id', saleId).single();
-      if (dbSale) {
-        sale = scrubRow(dbSale);
-        cache[b].sales.push(sale);
-      }
-    }
-    if (!sale) throw new Error("Parent sale not found");
-
-    // Pre-load inventory part
-    await db.ensureLocalInventoryCacheForParts(brand, [sItem.part_no]);
+    const saleItems = cache[b].sale_items;
+    const sales = cache[b].sales;
     const inventory = cache[b].inventory;
     const returns = cache[b].returns;
     
-    // Check returnable
+    const sItem = saleItems.find(si => si.id === saleItemId);
+    if (!sItem) throw new Error("Sale item not found");
+    
+    const sale = sales.find(s => s.id === saleId);
+    if (!sale) throw new Error("Parent sale not found");
+    
     const maxReturnable = sItem.quantity - sItem.returned_quantity;
     if (returnedQty > maxReturnable) {
       throw new Error(`Cannot return ${returnedQty}. Maximim returnable left is ${maxReturnable}`);
@@ -2291,8 +1879,7 @@ export const db = {
     
     sItem.returned_quantity += returnedQty;
     if (isSupabaseConfigured && supabase) {
-      const { error: itemErr } = await supabase.schema(b).from('sale_items').update({ returned_quantity: sItem.returned_quantity }).eq('id', sItem.id);
-      if (itemErr) throw new Error(`Database error updating sale item: ${itemErr.message}`);
+      supabase.schema(b).from('sale_items').update({ returned_quantity: sItem.returned_quantity }).eq('id', sItem.id).then();
     }
     
     const invElement = inventory.find(i => i.part_no === sItem.part_no);
@@ -2304,13 +1891,12 @@ export const db = {
       }
       invElement.updated_at = new Date().toISOString();
       if (isSupabaseConfigured && supabase) {
-        const { error: invErr } = await supabase.schema(b).from('inventory').update({
+        supabase.schema(b).from('inventory').update({
           quantity: invElement.quantity,
           is_active: invElement.is_active,
           archived_at: invElement.archived_at,
           updated_at: invElement.updated_at
-        }).eq('id', invElement.id);
-        if (invErr) throw new Error(`Database error updating inventory item: ${invErr.message}`);
+        }).eq('id', invElement.id).then();
       }
     }
     
@@ -2328,12 +1914,11 @@ export const db = {
     }
     sale.total_amount = Math.max(0, sale.total_amount - refundAmount);
     if (isSupabaseConfigured && supabase) {
-      const { error: saleErr } = await supabase.schema(b).from('sales').update({
+      supabase.schema(b).from('sales').update({
         pending_amount: sale.pending_amount,
         paid_amount: sale.paid_amount,
         total_amount: sale.total_amount
-      }).eq('id', sale.id);
-      if (saleErr) throw new Error(`Database error updating sale: ${saleErr.message}`);
+      }).eq('id', sale.id).then();
     }
     
     const returnRec: ReturnRecord = {
@@ -2352,36 +1937,15 @@ export const db = {
     returns.unshift(returnRec);
     
     if (isSupabaseConfigured && supabase) {
-      const { error: returnErr } = await supabase.schema(b).from('returns').insert(returnRec);
-      if (returnErr) throw new Error(`Database error inserting return record: ${returnErr.message}`);
+      supabase.schema(b).from('returns').insert(returnRec).then();
     } else {
-      localStorage.setItem(`sparezy_schema_${b}_sale_items`, JSON.stringify(cache[b].sale_items));
-      localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(cache[b].sales));
+      localStorage.setItem(`sparezy_schema_${b}_sale_items`, JSON.stringify(saleItems));
+      localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(sales));
       localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
       localStorage.setItem(`sparezy_schema_${b}_returns`, JSON.stringify(returns));
     }
     
     db.logTransaction(user.id, user.name, 'Sale Return', 'Returns', `Processed return for billing ${saleId}: Quantity ${returnedQty} of ${sItem.part_no}`, oldSale, sale);
-
-    // Record ledger entry if sale has customer_id
-    if (sale.customer_id) {
-      try {
-        await db.createLedgerEntry({
-          customer_id: sale.customer_id,
-          brand,
-          tx_type: 'Return',
-          tx_id: returnRec.id,
-          description: `Return: ${returnedQty}x of ${sItem.part_no} (${sItem.part_name})`,
-          amount: -refundAmount, // Returns decrease outstanding (credit/negative)
-          payment_method: null,
-          reference_no: returnRec.id,
-          tx_date: new Date().toISOString().split('T')[0]
-        });
-      } catch (err) {
-        console.error("Error creating return ledger entry in processReturn:", err);
-      }
-    }
-
     db.notify();
     return returnRec;
   },
@@ -2427,7 +1991,6 @@ export const db = {
     user: User
   ): Promise<Purchase> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    await db.ensureLocalInventoryCacheForParts(brand, items.map(item => item.part_no));
     const listPurchases = cache[b].purchases;
     const purchaseItemsList = cache[b].purchase_items;
     const inventory = cache[b].inventory;
@@ -2567,125 +2130,16 @@ export const db = {
     return purchase;
   },
 
-  createPurchaseRequest: async (
-    brand: Brand,
-    partNo: string,
-    partName: string,
-    currentStock: number,
-    requestedQuantity: number,
-    note: string | null,
-    user: User
-  ): Promise<PurchaseRequest> => {
+  deletePurchase: (brand: Brand, purchaseId: string, user: User) => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    const list = cache[b].purchase_requests || [];
+    const listPurchases = cache[b].purchases;
+    const purchaseItemsList = cache[b].purchase_items;
+    const inventory = cache[b].inventory;
     
-    const requestRec: PurchaseRequest = {
-      id: uuid(),
-      part_no: partNo,
-      part_name: partName,
-      current_stock: currentStock,
-      requested_quantity: requestedQuantity,
-      note: note,
-      requester_email: user.email,
-      requester_name: user.name,
-      status: 'Pending',
-      created_at: new Date().toISOString()
-    };
-    
-    list.unshift(requestRec);
-    cache[b].purchase_requests = list;
-    
-    if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase.schema(b).from('purchase_requests').insert(requestRec);
-      if (error) {
-        console.warn("Failed to save purchase request in Supabase:", error.message);
-      }
-    } else {
-      localStorage.setItem(`sparezy_schema_${b}_purchase_requests`, JSON.stringify(list));
-    }
-    
-    db.logTransaction(user.id, user.name, 'Create Order Request', 'Order Requests', `Created order request for part ${partNo}`, null, requestRec);
-    db.notify();
-    return requestRec;
-  },
-
-  updatePurchaseRequestStatus: async (
-    brand: Brand,
-    requestId: string,
-    status: PurchaseRequestStatus,
-    user: User
-  ): Promise<void> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    const list = cache[b].purchase_requests || [];
-    const idx = list.findIndex(r => r.id === requestId);
-    if (idx > -1) {
-      const oldReq = { ...list[idx] };
-      list[idx].status = status;
-      cache[b].purchase_requests = list;
-      
-      if (isSupabaseConfigured && supabase) {
-        const { error } = await supabase.schema(b).from('purchase_requests').update({ status }).eq('id', requestId);
-        if (error) {
-          throw new Error(`Failed to update purchase request status in DB: ${error.message}`);
-        }
-      } else {
-        localStorage.setItem(`sparezy_schema_${b}_purchase_requests`, JSON.stringify(list));
-      }
-      
-      db.logTransaction(user.id, user.name, 'Update Order Request Status', 'Order Requests', `Updated order request status of part ${oldReq.part_no} to ${status}`, oldReq, list[idx]);
-      db.notify();
-    } else {
-      throw new Error("Purchase request not found");
-    }
-  },
-
-  fetchPurchaseRequests: async (brand: Brand): Promise<PurchaseRequest[]> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      const { data, error } = await supabase.schema(b).from('purchase_requests').select('*').order('created_at', { ascending: false });
-      if (error) {
-        console.warn("Failed to fetch purchase requests from Supabase:", error.message);
-        return cache[b].purchase_requests || [];
-      }
-      const processed = (data || []).map(scrubRow);
-      cache[b].purchase_requests = processed;
-      return processed;
-    } else {
-      const local = localStorage.getItem(`sparezy_schema_${b}_purchase_requests`);
-      if (local) {
-        cache[b].purchase_requests = JSON.parse(local);
-      }
-      return cache[b].purchase_requests || [];
-    }
-  },
-
-  deletePurchase: async (brand: Brand, purchaseId: string, user: User) => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    
-    // Lazy load purchase if not in cache
-    let deletedPurchase = cache[b].purchases.find(p => p.id === purchaseId);
-    if (!deletedPurchase && isSupabaseConfigured && supabase) {
-      const { data: dbPurchase } = await supabase.schema(b).from('purchases').select('id, brand, dealer_name, invoice_no, invoice_date, subtotal, dealer_discount_percentage, discount_amount, total_after_discount, payment_status, payment_method, notes, scan_source, created_by, created_at, updated_at').eq('id', purchaseId).single();
-      if (dbPurchase) {
-        deletedPurchase = scrubRow(dbPurchase);
-        cache[b].purchases.push(deletedPurchase);
-      }
-    }
+    const deletedPurchase = listPurchases.find(p => p.id === purchaseId);
     if (!deletedPurchase) throw new Error("Purchase not found");
     
-    // Lazy load purchase items if not in cache
-    let itemsRelated = cache[b].purchase_items.filter(pi => pi.purchase_id === purchaseId);
-    if (itemsRelated.length === 0 && isSupabaseConfigured && supabase) {
-      const { data: dbItems } = await supabase.schema(b).from('purchase_items').select('id, purchase_id, part_no, part_name, quantity, mrp, created_at').eq('purchase_id', purchaseId);
-      if (dbItems) {
-        itemsRelated = dbItems.map(scrubRow);
-        cache[b].purchase_items.push(...itemsRelated);
-      }
-    }
-    
-    // Load relevant inventory items
-    await db.ensureLocalInventoryCacheForParts(brand, itemsRelated.map(ri => ri.part_no));
-    const inventory = cache[b].inventory;
+    const itemsRelated = purchaseItemsList.filter(pi => pi.purchase_id === purchaseId);
     
     itemsRelated.forEach(ri => {
       const invElement = inventory.find(inv => inv.part_no.toLowerCase() === ri.part_no.toLowerCase());
@@ -2698,10 +2152,10 @@ export const db = {
       }
     });
     
-    const remainingPurchases = cache[b].purchases.filter(p => p.id !== purchaseId);
+    const remainingPurchases = listPurchases.filter(p => p.id !== purchaseId);
     cache[b].purchases = remainingPurchases;
     
-    const remainingItems = cache[b].purchase_items.filter(pi => pi.purchase_id !== purchaseId);
+    const remainingItems = purchaseItemsList.filter(pi => pi.purchase_id !== purchaseId);
     cache[b].purchase_items = remainingItems;
     
     if (isSupabaseConfigured && supabase) {
@@ -3164,1154 +2618,5 @@ export const db = {
     } else {
       throw new Error("Supabase is not configured. Live database transactions are required.");
     }
-  },
-
-  // Helper to dynamically load inventory items into cache when mutations require them
-  ensureLocalInventoryCacheForParts: async (brand: Brand, partNos: string[]): Promise<void> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (!isSupabaseConfigured || !supabase) return;
-    const partNosToFetch = partNos.filter(partNo => !cache[b].inventory.some(item => item.part_no.toLowerCase() === partNo.toLowerCase()));
-    if (partNosToFetch.length > 0) {
-      const { data } = await supabase.schema(b).from('inventory').select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at').in('part_no', partNosToFetch);
-      if (data) {
-        data.forEach(row => {
-          const item = scrubRow(row);
-          cache[b].inventory.push(item);
-        });
-      }
-    }
-  },
-
-  ensureInventoryLoaded: async (brand: Brand, force: boolean = false): Promise<InventoryItem[]> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (cache[b].inventory.length > 0 && !force) {
-      return cache[b].inventory;
-    }
-    if (isSupabaseConfigured && supabase) {
-      console.log(`[Lazy Sync] Dynamically downloading full inventory for ${brand}...`);
-      let bInv: any[] = [];
-      const { count, error: countErr } = await supabase
-        .schema(b)
-        .from('inventory')
-        .select('id', { count: 'exact', head: true });
-        
-      if (countErr) {
-        console.error(`[Lazy Sync Error] Failed to fetch inventory count for ${brand}:`, countErr);
-        throw new Error(`Failed to load inventory from Supabase: ${countErr.message} (Code: ${countErr.code})`);
-      }
-
-      const totalRows = count || 0;
-      if (totalRows > 0) {
-        const pageSize = 1000;
-        const pages = Math.ceil(totalRows / pageSize);
-        const rangePromises = [];
-        for (let i = 0; i < pages; i++) {
-          const from = i * pageSize;
-          const to = (i + 1) * pageSize - 1;
-          rangePromises.push(
-            supabase.schema(b).from('inventory')
-              .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at')
-              .range(from, to)
-          );
-        }
-        const rangeResults = await Promise.all(rangePromises);
-        for (const res of rangeResults) {
-          if (res.error) {
-            console.error(`[Lazy Sync Error] Range query failed:`, res.error);
-            throw new Error(`Failed to load a page of inventory: ${res.error.message}`);
-          }
-          if (res.data) {
-            bInv = bInv.concat(res.data);
-          }
-        }
-        cache[b].inventory = bInv.map(scrubRow);
-      }
-    }
-    return cache[b].inventory;
-  },
-
-  searchActiveParts: async (brand: Brand, query: string): Promise<InventoryItem[]> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      if (!query || query.trim().length < 2) return [];
-      const clean = query.trim();
-      const { data, error } = await supabase.schema(b).from('inventory')
-        .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at')
-        .eq('is_active', true)
-        .or(`part_no.ilike.%${clean}%,part_name.ilike.%${clean}%`)
-        .limit(20);
-      if (error) throw error;
-      return (data || []).map(scrubRow);
-    } else {
-      return cache[b].inventory.filter(item => 
-        item.is_active !== false && 
-        (item.part_no.toLowerCase().includes(query.toLowerCase()) || 
-         item.part_name.toLowerCase().includes(query.toLowerCase()))
-      );
-    }
-  },
-
-  fetchDashboardMetrics: async (brand: Brand): Promise<any> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      console.log(`[Dashboard Dynamic] Fetching aggregated RPC metrics for ${brand}...`);
-      
-      try {
-        const { data: rpcData, error: rpcErr } = await supabase.rpc('get_dashboard_metrics', { schema_name: b });
-        if (!rpcErr && rpcData) {
-          console.log(`[Dashboard Dynamic] Aggregated RPC metrics loaded successfully with 1 network trip.`);
-          return {
-            totalSku: Number(rpcData.totalSku) || 0,
-            totalQty: Number(rpcData.totalQty) || 0,
-            totalValuation: Number(rpcData.totalValuation) || 0,
-            totalSalesRevenue: Number(rpcData.totalSalesRevenue) || 0,
-            totalPaidRevenue: Number(rpcData.totalPaidRevenue) || 0,
-            totalPendingRevenue: Number(rpcData.totalPendingRevenue) || 0,
-            totalReturnsValuation: Number(rpcData.totalReturnsValuation) || 0,
-            returnsCount: Number(rpcData.returnsCount) || 0,
-            totalPurchasesValuation: Number(rpcData.totalPurchasesValuation) || 0,
-            purchasesCount: Number(rpcData.purchasesCount) || 0,
-            categorySales: rpcData.categorySales || {},
-            recentSales: (rpcData.recentSales || []).map(scrubRow),
-            lowStockItems: (rpcData.lowStockItems || []).map(scrubRow)
-          };
-        }
-        if (rpcErr) {
-          console.warn(`[Dashboard Dynamic] get_dashboard_metrics RPC failed: ${rpcErr.message}. Falling back to client-side aggregations...`);
-        }
-      } catch (e: any) {
-        console.warn(`[Dashboard Dynamic] RPC execution exception: ${e.message || e}. Falling back to client-side aggregations...`);
-      }
-
-      console.log(`[Dashboard Dynamic] Fetching lightweight fallback metrics for ${brand}...`);
-      
-      const [skuRes, qtyValRes, salesSummaryRes, recentSalesRes, returnsRes, purchasesRes, lowStockRes] = await Promise.all([
-        supabase.schema(b).from('inventory').select('id', { count: 'exact', head: true }).eq('is_active', true),
-        supabase.schema(b).from('inventory').select('quantity, mrp').eq('is_active', true),
-        supabase.schema(b).from('sales').select('total_amount, paid_amount, pending_amount, customer_category'),
-        supabase.schema(b).from('sales').select('id, customer_name, customer_category, sale_date, total_amount, payment_status').order('sale_date', { ascending: false }).limit(5),
-        supabase.schema(b).from('returns').select('refund_amount'),
-        supabase.schema(b).from('purchases').select('total_after_discount'),
-        supabase.schema(b).from('inventory').select('id, part_no, part_name, quantity, hsn, mrp').eq('is_active', true).lt('quantity', 15).order('quantity', { ascending: true }).limit(6)
-      ]);
-
-      const totalSku = skuRes.count || 0;
-      let totalQty = 0;
-      let totalValuation = 0;
-      if (qtyValRes.data) {
-        qtyValRes.data.forEach(it => {
-          totalQty += (it.quantity || 0);
-          totalValuation += ((it.quantity || 0) * (it.mrp || 0));
-        });
-      }
-
-      let totalSalesRevenue = 0;
-      let totalPaidRevenue = 0;
-      let totalPendingRevenue = 0;
-      const categorySales: Record<string, number> = {};
-      if (salesSummaryRes.data) {
-        salesSummaryRes.data.forEach(s => {
-          totalSalesRevenue += (s.total_amount || 0);
-          totalPaidRevenue += (s.paid_amount || 0);
-          totalPendingRevenue += (s.pending_amount || 0);
-          const cat = s.customer_category || 'Other';
-          categorySales[cat] = (categorySales[cat] || 0) + (s.total_amount || 0);
-        });
-      }
-
-      let totalReturnsValuation = 0;
-      const returnsCount = returnsRes.data?.length || 0;
-      if (returnsRes.data) {
-        returnsRes.data.forEach(r => {
-          totalReturnsValuation += (r.refund_amount || 0);
-        });
-      }
-
-      let totalPurchasesValuation = 0;
-      const purchasesCount = purchasesRes.data?.length || 0;
-      if (purchasesRes.data) {
-        purchasesRes.data.forEach(p => {
-          totalPurchasesValuation += (p.total_after_discount || 0);
-        });
-      }
-
-      return {
-        totalSku,
-        totalQty,
-        totalValuation,
-        totalSalesRevenue,
-        totalPaidRevenue,
-        totalPendingRevenue,
-        totalReturnsValuation,
-        returnsCount,
-        totalPurchasesValuation,
-        purchasesCount,
-        categorySales,
-        recentSales: (recentSalesRes.data || []).map(scrubRow),
-        lowStockItems: (lowStockRes.data || []).map(scrubRow)
-      };
-    } else {
-      // local fallback
-      const inv = cache[b].inventory.filter(item => item.is_active !== false);
-      const totalSku = inv.length;
-      const totalQty = inv.reduce((acc, curr) => acc + curr.quantity, 0);
-      const totalValuation = inv.reduce((acc, curr) => acc + (curr.quantity * curr.mrp), 0);
-      const sales = cache[b].sales;
-      const totalSalesRevenue = sales.reduce((acc, curr) => acc + curr.total_amount, 0);
-      const totalPaidRevenue = sales.reduce((acc, curr) => acc + curr.paid_amount, 0);
-      const totalPendingRevenue = sales.reduce((acc, curr) => acc + curr.pending_amount, 0);
-      const categorySales: Record<string, number> = {};
-      sales.forEach(s => {
-        categorySales[s.customer_category] = (categorySales[s.customer_category] || 0) + s.total_amount;
-      });
-      const returns = cache[b].returns;
-      const totalReturnsValuation = returns.reduce((acc, curr) => acc + curr.refund_amount, 0);
-      const purchases = cache[b].purchases;
-      const totalPurchasesValuation = purchases.reduce((acc, curr) => acc + curr.total_after_discount, 0);
-      const lowStockItems = inv.filter(item => item.quantity < 15).sort((a,b) => a.quantity - b.quantity);
-
-      return {
-        totalSku,
-        totalQty,
-        totalValuation,
-        totalSalesRevenue,
-        totalPaidRevenue,
-        totalPendingRevenue,
-        totalReturnsValuation,
-        returnsCount: returns.length,
-        totalPurchasesValuation,
-        purchasesCount: purchases.length,
-        categorySales,
-        recentSales: sales.slice(0, 5),
-        lowStockItems: lowStockItems.slice(0, 6)
-      };
-    }
-  },
-
-  fetchSalesPaginated: async (
-    brand: Brand,
-    search: string,
-    page: number,
-    limit: number,
-    category: string = 'All',
-    paymentStatus: string = 'All'
-  ): Promise<{ items: Sale[], totalCount: number }> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      let query = supabase.schema(b).from('sales')
-        .select('id, customer_id, customer_name, customer_category, sale_date, subtotal, discount_percentage, discount_amount, total_amount, payment_status, paid_amount, pending_amount, created_by, created_at', { count: 'exact' });
-      
-      if (category !== 'All') {
-        query = query.eq('customer_category', category);
-      }
-      if (paymentStatus !== 'All') {
-        query = query.eq('payment_status', paymentStatus);
-      }
-      if (search) {
-        query = query.or(`customer_name.ilike.%${search}%,id.ilike.%${search}%`);
-      }
-      
-      const from = (page - 1) * limit;
-      const to = page * limit - 1;
-      
-      const { data, count, error } = await query
-        .order('sale_date', { ascending: false })
-        .range(from, to);
-        
-      if (error) throw error;
-      
-      return {
-        items: (data || []).map(scrubRow),
-        totalCount: count || 0
-      };
-    } else {
-      let list = cache[b].sales;
-      if (category !== 'All') list = list.filter(s => s.customer_category === category);
-      if (paymentStatus !== 'All') list = list.filter(s => s.payment_status === paymentStatus);
-      if (search) {
-        list = list.filter(s => s.customer_name.toLowerCase().includes(search.toLowerCase()) || s.id.toLowerCase().includes(search.toLowerCase()));
-      }
-      const from = (page - 1) * limit;
-      return {
-        items: list.slice(from, from + limit),
-        totalCount: list.length
-      };
-    }
-  },
-
-  fetchSaleItemsForSale: async (brand: Brand, saleId: string): Promise<SaleItem[]> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      const { data, error } = await supabase.schema(b).from('sale_items')
-        .select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, discount_amount, final_amount, returned_quantity, refund_amount, created_at, updated_at')
-        .eq('sale_id', saleId);
-      if (error) throw error;
-      return (data || []).map(scrubRow);
-    } else {
-      return cache[b].sale_items.filter(item => item.sale_id === saleId);
-    }
-  },
-
-  fetchPurchasesPaginated: async (
-    brand: Brand,
-    search: string,
-    page: number,
-    limit: number
-  ): Promise<{ items: Purchase[], totalCount: number }> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      let query = supabase.schema(b).from('purchases')
-        .select('id, dealer_name, invoice_no, invoice_date, subtotal, dealer_discount_percentage, discount_amount, total_after_discount, scan_source, created_by, created_at', { count: 'exact' });
-      
-      if (search) {
-        query = query.or(`dealer_name.ilike.%${search}%,invoice_no.ilike.%${search}%`);
-      }
-      
-      const from = (page - 1) * limit;
-      const to = page * limit - 1;
-      
-      const { data, count, error } = await query
-        .order('created_at', { ascending: false })
-        .range(from, to);
-        
-      if (error) throw error;
-      
-      return {
-        items: (data || []).map(scrubRow),
-        totalCount: count || 0
-      };
-    } else {
-      let list = cache[b].purchases;
-      if (search) {
-        list = list.filter(p => p.dealer_name.toLowerCase().includes(search.toLowerCase()) || p.invoice_no.toLowerCase().includes(search.toLowerCase()));
-      }
-      const from = (page - 1) * limit;
-      return {
-        items: list.slice(from, from + limit),
-        totalCount: list.length
-      };
-    }
-  },
-
-  fetchPurchaseItemsForPurchase: async (brand: Brand, purchaseId: string): Promise<PurchaseItem[]> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      const { data, error } = await supabase.schema(b).from('purchase_items')
-        .select('id, purchase_id, part_no, part_name, quantity, mrp, created_at')
-        .eq('purchase_id', purchaseId);
-      if (error) throw error;
-      return (data || []).map(scrubRow);
-    } else {
-      return cache[b].purchase_items.filter(item => item.purchase_id === purchaseId);
-    }
-  },
-
-  fetchReturnsPaginated: async (
-    brand: Brand,
-    search: string,
-    page: number,
-    limit: number
-  ): Promise<{ items: ReturnRecord[], totalCount: number }> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      let query = supabase.schema(b).from('returns')
-        .select('id, sale_id, sale_item_id, customer_id, part_no, part_name, returned_quantity, refund_amount, return_date, created_by', { count: 'exact' });
-      
-      if (search) {
-        query = query.or(`part_no.ilike.%${search}%,part_name.ilike.%${search}%`);
-      }
-      
-      const from = (page - 1) * limit;
-      const to = page * limit - 1;
-      
-      const { data, count, error } = await query
-        .order('return_date', { ascending: false })
-        .range(from, to);
-        
-      if (error) throw error;
-      
-      return {
-        items: (data || []).map(scrubRow),
-        totalCount: count || 0
-      };
-    } else {
-      let list = cache[b].returns;
-      if (search) {
-        list = list.filter(r => r.part_no.toLowerCase().includes(search.toLowerCase()) || r.part_name.toLowerCase().includes(search.toLowerCase()));
-      }
-      const from = (page - 1) * limit;
-      return {
-        items: list.slice(from, from + limit),
-        totalCount: list.length
-      };
-    }
-  },
-
-  fetchReturnableSaleLines: async (brand: Brand): Promise<any[]> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      const { data: items, error: err } = await supabase
-        .schema(b)
-        .from('sale_items')
-        .select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, final_amount, returned_quantity, created_at');
-      if (err) throw err;
-      
-      const returnableItems = (items || []).filter(item => item.quantity - item.returned_quantity > 0);
-      const saleIds = Array.from(new Set(returnableItems.map(item => item.sale_id)));
-      
-      if (saleIds.length === 0) return [];
-
-      const { data: sales, error: saleErr } = await supabase
-        .schema(b)
-        .from('sales')
-        .select('id, customer_name, sale_date')
-        .in('id', saleIds);
-      if (saleErr) throw saleErr;
-      
-      const salesMap = new Map(sales?.map(s => [s.id, s]));
-      
-      const lines = returnableItems.map(item => {
-        const sale = salesMap.get(item.sale_id);
-        return {
-          id: item.id,
-          sale_id: item.sale_id,
-          customer_name: sale?.customer_name || 'Walk-in',
-          part_no: item.part_no,
-          part_name: item.part_name,
-          quantity: item.quantity,
-          mrp: item.mrp,
-          discount_percentage: item.discount_percentage,
-          final_amount: item.final_amount,
-          returned_quantity: item.returned_quantity,
-          sale_date: sale?.sale_date || item.created_at
-        };
-      });
-      return lines;
-    } else {
-      const lines: any[] = [];
-      cache[b].sale_items.forEach(item => {
-        const parent = cache[b].sales.find(s => s.id === item.sale_id);
-        if (parent && item.quantity - item.returned_quantity > 0) {
-          lines.push({
-            id: item.id,
-            sale_id: item.sale_id,
-            customer_name: parent.customer_name,
-            part_no: item.part_no,
-            part_name: item.part_name,
-            quantity: item.quantity,
-            mrp: item.mrp,
-            discount_percentage: item.discount_percentage,
-            final_amount: item.final_amount,
-            returned_quantity: item.returned_quantity,
-            sale_date: parent.sale_date
-          });
-        }
-      });
-      return lines;
-    }
-  },
-
-  checkExistingParts: async (brand: Brand, partNos: string[]): Promise<string[]> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      if (partNos.length === 0) return [];
-      const chunks = [];
-      const size = 100;
-      for (let i = 0; i < partNos.length; i += size) {
-        chunks.push(partNos.slice(i, i + size));
-      }
-      let foundPartNos: string[] = [];
-      for (const chunk of chunks) {
-        const { data } = await supabase.schema(b).from('inventory').select('part_no').in('part_no', chunk);
-        if (data) {
-          foundPartNos = foundPartNos.concat(data.map(d => d.part_no));
-        }
-      }
-      return foundPartNos;
-    } else {
-      const lowercaseSet = new Set(cache[b].inventory.map(item => item.part_no.toLowerCase()));
-      return partNos.filter(p => lowercaseSet.has(p.toLowerCase()));
-    }
-  },
-
-  fetchLedgerData: async (brand: Brand): Promise<any> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      console.log(`[Ledger Sync] Dynamically downloading lightweight ledger data...`);
-      const [salesRes, returnsRes, purchasesRes] = await Promise.all([
-        supabase.schema(b).from('sales').select('customer_id, customer_name, customer_category, total_amount, paid_amount, pending_amount, sale_date'),
-        supabase.schema(b).from('returns').select('customer_id, refund_amount, return_date'),
-        supabase.schema(b).from('purchases').select('dealer_name, total_after_discount, discount_amount, invoice_date')
-      ]);
-      return {
-        sales: salesRes.data || [],
-        returns: returnsRes.data || [],
-        purchases: purchasesRes.data || []
-      };
-    } else {
-      return {
-        sales: cache[b].sales,
-        returns: cache[b].returns,
-        purchases: cache[b].purchases
-      };
-    }
-  },
-
-  fetchReportsData: async (brand: Brand): Promise<any> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      console.log(`[Reports Sync] Dynamically downloading lightweight reports dataset...`);
-      const [sales, saleItems, returns, purchases, purchaseItems] = await Promise.all([
-        supabase.schema(b).from('sales').select('id, total_amount, paid_amount, pending_amount, sale_date'),
-        supabase.schema(b).from('sale_items').select('sale_id, part_no, quantity, mrp, discount_percentage, final_amount'),
-        supabase.schema(b).from('returns').select('refund_amount, return_date, returned_quantity, part_no'),
-        supabase.schema(b).from('purchases').select('id, dealer_discount_percentage, total_after_discount, invoice_date'),
-        supabase.schema(b).from('purchase_items').select('purchase_id, part_no, mrp, created_at')
-      ]);
-      return {
-        sales: (sales.data || []).map(scrubRow),
-        saleItems: (saleItems.data || []).map(scrubRow),
-        returns: (returns.data || []).map(scrubRow),
-        purchases: (purchases.data || []).map(scrubRow),
-        purchaseItems: (purchaseItems.data || []).map(scrubRow)
-      };
-    } else {
-      return {
-        sales: cache[b].sales,
-        saleItems: cache[b].sale_items,
-        returns: cache[b].returns,
-        purchases: cache[b].purchases,
-        purchaseItems: cache[b].purchase_items
-      };
-    }
-  },
-
-  fetchPartMovements: async (brand: Brand, partNo: string): Promise<any> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      const [saleItemsRes, purchaseItemsRes, returnsRes] = await Promise.all([
-        supabase.schema(b).from('sale_items')
-          .select('id, sale_id, quantity, mrp, final_amount, created_at, sales(customer_name, created_by, sale_date)')
-          .eq('part_no', partNo),
-        supabase.schema(b).from('purchase_items')
-          .select('id, purchase_id, quantity, mrp, created_at, purchases(dealer_name, created_by, invoice_date, invoice_no)')
-          .eq('part_no', partNo),
-        supabase.schema(b).from('returns')
-          .select('id, sale_id, returned_quantity, refund_amount, return_date, created_by')
-          .eq('part_no', partNo)
-      ]);
-         
-      const salesMovements = (saleItemsRes.data || []).map(item => {
-        const sale = item.sales as any;
-        const saleDate = sale?.sale_date || item.created_at;
-        return {
-          id: item.id,
-          type: 'sale' as const,
-          date: saleDate,
-          quantity: item.quantity,
-          mrp: item.mrp,
-          total: item.final_amount,
-          info: sale 
-            ? `Sold to ${sale.customer_name} (Invoice: ${item.sale_id.substring(0, 8).toUpperCase()})` 
-            : `Sale Record`,
-          referenceId: item.sale_id,
-          operator: sale?.created_by || 'Staff'
-        };
-      });
-       
-      const purchasesMovements = (purchaseItemsRes.data || []).map(item => {
-        const purchase = item.purchases as any;
-        const purchaseDate = purchase?.invoice_date || item.created_at;
-        return {
-          id: item.id,
-          type: 'purchase' as const,
-          date: purchaseDate,
-          quantity: item.quantity,
-          mrp: item.mrp,
-          total: item.quantity * item.mrp,
-          info: purchase 
-            ? `Inward Stock: ${purchase.dealer_name} (Inv: ${purchase.invoice_no || item.purchase_id.substring(0, 8).toUpperCase()})` 
-            : `Purchase Stock Inward`,
-          referenceId: item.purchase_id,
-          operator: purchase?.created_by || 'Staff'
-        };
-      });
-       
-      const returnsMovements = (returnsRes.data || []).map(item => {
-        return {
-          id: item.id,
-          type: 'return' as const,
-          date: item.return_date,
-          quantity: item.returned_quantity,
-          mrp: item.refund_amount / (item.returned_quantity || 1),
-          total: item.refund_amount,
-          info: `Returned by Customer (Ref Sale: ${item.sale_id.substring(0, 8).toUpperCase()})`,
-          referenceId: item.sale_id,
-          operator: item.created_by || 'Staff'
-        };
-      });
-       
-      const unified = [
-        ...salesMovements,
-        ...purchasesMovements,
-        ...returnsMovements
-      ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-       
-      return {
-        sales: salesMovements,
-        purchases: purchasesMovements,
-        returns: returnsMovements,
-        unified
-      };
-    } else {
-      const targetNo = partNo.trim().toLowerCase();
-      const salesMovements = cache[b].sale_items
-        .filter(item => item.part_no.trim().toLowerCase() === targetNo)
-        .map(item => {
-          const parentSale = cache[b].sales.find(s => s.id === item.sale_id);
-          const saleDate = parentSale?.sale_date || item.created_at;
-          return {
-            id: item.id,
-            type: 'sale' as const,
-            date: saleDate,
-            quantity: item.quantity,
-            mrp: item.mrp,
-            total: item.final_amount,
-            info: parentSale 
-              ? `Sold to ${parentSale.customer_name} (Invoice: ${parentSale.id.substring(0, 8).toUpperCase()})` 
-              : `Sale Record`,
-            referenceId: item.sale_id,
-            operator: parentSale?.created_by || 'Staff'
-          };
-        });
-
-      const purchasesMovements = cache[b].purchase_items
-        .filter(item => item.part_no.trim().toLowerCase() === targetNo)
-        .map(item => {
-          const parentPurchase = cache[b].purchases.find(p => p.id === item.purchase_id);
-          const purchaseDate = parentPurchase?.invoice_date || item.created_at;
-          return {
-            id: item.id,
-            type: 'purchase' as const,
-            date: purchaseDate,
-            quantity: item.quantity,
-            mrp: item.mrp,
-            total: item.quantity * item.mrp,
-            info: parentPurchase 
-              ? `Inward Stock: ${parentPurchase.dealer_name} (Inv: ${parentPurchase.invoice_no || item.purchase_id.substring(0, 8).toUpperCase()})` 
-              : `Purchase Stock Inward`,
-            referenceId: item.purchase_id,
-            operator: parentPurchase?.created_by || 'Staff'
-          };
-        });
-
-      const returnsMovements = cache[b].returns
-        .filter(item => item.part_no.trim().toLowerCase() === targetNo)
-        .map(item => {
-          return {
-            id: item.id,
-            type: 'return' as const,
-            date: item.return_date,
-            quantity: item.returned_quantity,
-            mrp: item.refund_amount / (item.returned_quantity || 1),
-            total: item.refund_amount,
-            info: `Returned by Customer (Ref Sale: ${item.sale_id.substring(0, 8).toUpperCase()})`,
-            referenceId: item.sale_id,
-            operator: item.created_by || 'Staff'
-          };
-        });
-
-      const unified = [
-        ...salesMovements,
-        ...purchasesMovements,
-        ...returnsMovements
-      ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-
-      return {
-        sales: salesMovements,
-        purchases: purchasesMovements,
-        returns: returnsMovements,
-        unified
-      };
-    }
-  },
-
-  fetchInventoryPaginated: async (
-    brand: Brand,
-    search: string,
-    page: number,
-    limit: number,
-    showArchived: boolean,
-    showLowStockOnly: boolean,
-    lowStockThreshold: number
-  ): Promise<{ items: InventoryItem[], totalCount: number }> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    if (isSupabaseConfigured && supabase) {
-      let query = supabase.schema(b).from('inventory')
-        .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at', { count: 'exact' });
-      
-      if (!showArchived) {
-        query = query.eq('is_active', true);
-      }
-      if (showLowStockOnly) {
-        query = query.lte('quantity', lowStockThreshold);
-      }
-      if (search) {
-        query = query.or(`part_no.ilike.%${search}%,part_name.ilike.%${search}%`);
-      }
-      
-      const from = (page - 1) * limit;
-      const to = page * limit - 1;
-      
-      const { data, count, error } = await query
-        .order('part_no', { ascending: true })
-        .range(from, to);
-        
-      if (error) throw error;
-      
-      return {
-        items: (data || []).map(scrubRow),
-        totalCount: count || 0
-      };
-    } else {
-      let list = cache[b].inventory;
-      if (!showArchived) list = list.filter(item => item.is_active !== false);
-      if (showLowStockOnly) list = list.filter(item => item.quantity <= lowStockThreshold);
-      if (search) {
-        list = list.filter(item => 
-          item.part_no.toLowerCase().includes(search.toLowerCase()) || 
-          item.part_name.toLowerCase().includes(search.toLowerCase())
-        );
-      }
-      const from = (page - 1) * limit;
-      return {
-        items: list.slice(from, from + limit),
-        totalCount: list.length
-      };
-    }
-  },
-
-  // --- VERSION 2: BRAND DISCOUNT SETTINGS ---
-  getBrandDiscountSettings: (): Record<Brand, number> => {
-    return {
-      Hyundai: cache.brand_discounts.Hyundai ?? 12.00,
-      Mahindra: cache.brand_discounts.Mahindra ?? 19.36
-    };
-  },
-
-  getBrandDiscount: (brand: Brand): number => {
-    const val = cache.brand_discounts[brand];
-    if (typeof val === 'number') return val;
-    return brand === 'Hyundai' ? 12.00 : 19.36;
-  },
-
-  updateBrandDiscount: async (brand: Brand, percent: number): Promise<void> => {
-    cache.brand_discounts[brand] = Number(percent);
-    localStorage.setItem(KEY_BRAND_DISCOUNTS, JSON.stringify(cache.brand_discounts));
-    if (isSupabaseConfigured && supabase) {
-      try {
-        await supabase.from('brand_discount_settings').upsert({
-          brand,
-          discount_percent: Number(percent),
-          updated_at: new Date().toISOString()
-        }, { onConflict: 'brand' });
-      } catch (err) {
-        console.warn("[Brand Discount Save Notice] Supabase table update optional fallback:", err);
-      }
-    }
-    db.notify();
-  },
-
-  // --- VERSION 2: PURCHASE BILLS & RECONCILIATION ---
-  getPurchaseBills: (brand?: Brand): PurchaseBill[] => {
-    let bills = [...cache.purchase_bills];
-    if (brand) {
-      bills = bills.filter(b => b.brand === brand);
-    }
-    return bills.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  },
-
-  getPurchaseBill: (billId: string): { bill: PurchaseBill | null; items: PurchaseBillItem[] } => {
-    const bill = cache.purchase_bills.find(b => b.id === billId) || null;
-    const items = cache.purchase_bill_items.filter(i => i.purchase_bill_id === billId);
-    return { bill, items };
-  },
-
-  getPurchaseBillItems: (_brand: Brand, billId: string): PurchaseBillItem[] => {
-    return cache.purchase_bill_items.filter(i => i.purchase_bill_id === billId);
-  },
-
-  createPurchaseBill: async (params: {
-    brand: Brand;
-    billNumber: string;
-    billDate: string;
-    supplierName: string;
-    scannedFileUrl?: string;
-    scannedThumbnailUrl?: string;
-    items: Array<{
-      part_no: string;
-      part_name: string;
-      quantity: number;
-      unit_price: number;
-      hsn?: string;
-    }>;
-    billStatedTotal?: number;
-    user?: User;
-  }): Promise<{ bill: PurchaseBill; items: PurchaseBillItem[] }> => {
-    const b = params.brand.toLowerCase() as 'hyundai' | 'mahindra';
-    const discountPercent = db.getBrandDiscount(params.brand);
-    
-    // Check match status against current brand inventory
-    const inventory = cache[b].inventory;
-    
-    let subtotal = 0;
-    const billId = uuid();
-    const billItems: PurchaseBillItem[] = [];
-
-    for (const rawItem of params.items) {
-      const lineTotal = Number(rawItem.quantity || 1) * Number(rawItem.unit_price || 0);
-      subtotal += lineTotal;
-
-      const cleanPartNo = (rawItem.part_no || '').trim().toUpperCase();
-      const existingPart = inventory.find(i => i.part_no.toUpperCase() === cleanPartNo);
-
-      let matchStatus: PartMatchStatus = 'new';
-      let matchedPartId: string | null = null;
-
-      if (existingPart) {
-        matchedPartId = existingPart.id;
-        matchStatus = existingPart.is_active ? 'matched' : 'archived';
-      }
-
-      const itemRec: PurchaseBillItem = {
-        id: uuid(),
-        purchase_bill_id: billId,
-        part_number_scanned: cleanPartNo || 'UNKNOWN-PART',
-        part_name_scanned: rawItem.part_name || cleanPartNo || 'Spare Part',
-        qty: Number(rawItem.quantity) || 1,
-        unit_price: Number(rawItem.unit_price) || 0,
-        match_status: matchStatus,
-        matched_part_id: matchedPartId,
-        resolved: matchStatus === 'matched',
-        resolution_action: matchStatus === 'matched' ? 'match' : undefined,
-        new_selling_price: Number(rawItem.unit_price) || 0,
-        new_category: 'General',
-        created_at: new Date().toISOString()
-      };
-
-      billItems.push(itemRec);
-    }
-
-    const discountAmount = subtotal * (discountPercent / 100);
-    const totalAfterDiscount = subtotal - discountAmount;
-    const statedTotal = typeof params.billStatedTotal === 'number' && params.billStatedTotal > 0 
-      ? params.billStatedTotal 
-      : totalAfterDiscount;
-
-    const newBill: PurchaseBill = {
-      id: billId,
-      brand: params.brand,
-      bill_number: params.billNumber || `BILL-${Date.now().toString().slice(-6)}`,
-      bill_date: params.billDate || new Date().toISOString().split('T')[0],
-      supplierName: params.supplierName || 'Auto Spares Supplier',
-      supplier_name: params.supplierName || 'Auto Spares Supplier',
-      scanned_file_url: params.scannedFileUrl,
-      scanned_thumbnail_url: params.scannedThumbnailUrl,
-      subtotal: Math.round(subtotal * 100) / 100,
-      discount_percent: discountPercent,
-      discount_amount: Math.round(discountAmount * 100) / 100,
-      total_after_discount: Math.round(totalAfterDiscount * 100) / 100,
-      bill_stated_total: Math.round(statedTotal * 100) / 100,
-      status: 'pending_review',
-      created_by: params.user?.name || 'Staff',
-      created_at: new Date().toISOString()
-    } as PurchaseBill;
-
-    // Cache locally
-    cache.purchase_bills.unshift(newBill);
-    cache.purchase_bill_items.push(...billItems);
-    localStorage.setItem(KEY_PURCHASE_BILLS, JSON.stringify(cache.purchase_bills));
-    localStorage.setItem(KEY_PURCHASE_BILL_ITEMS, JSON.stringify(cache.purchase_bill_items));
-
-    // Supabase persist if configured
-    if (isSupabaseConfigured && supabase) {
-      try {
-        await supabase.from('purchase_bills').insert({
-          id: newBill.id,
-          brand: newBill.brand,
-          bill_number: newBill.bill_number,
-          bill_date: newBill.bill_date,
-          supplier_name: newBill.supplier_name,
-          scanned_file_url: newBill.scanned_file_url,
-          scanned_thumbnail_url: newBill.scanned_thumbnail_url,
-          subtotal: newBill.subtotal,
-          discount_percent: newBill.discount_percent,
-          discount_amount: newBill.discount_amount,
-          total_after_discount: newBill.total_after_discount,
-          bill_stated_total: newBill.bill_stated_total,
-          status: newBill.status,
-          created_by: newBill.created_by,
-          created_at: newBill.created_at
-        });
-        await supabase.from('purchase_bill_items').insert(billItems);
-      } catch (err) {
-        console.warn("[Purchase Bills Sync] Supabase table insert optional fallback:", err);
-      }
-    }
-
-    db.notify();
-    return { bill: newBill, items: billItems };
-  },
-
-  confirmPurchaseBill: async (
-    billId: string,
-    itemResolutions: Array<{
-      itemId: string;
-      action: 'create' | 'reactivate' | 'match' | 'skip';
-      sellingPrice?: number;
-      category?: string;
-      partNo?: string;
-      partName?: string;
-      qty?: number;
-      unitPrice?: number;
-    }>,
-    user: User
-  ): Promise<void> => {
-    const billIdx = cache.purchase_bills.findIndex(b => b.id === billId);
-    if (billIdx === -1) throw new Error(`Purchase Bill ${billId} not found.`);
-    const bill = cache.purchase_bills[billIdx];
-    const b = bill.brand.toLowerCase() as 'hyundai' | 'mahindra';
-
-    // Retrieve bill items
-    const billItems = cache.purchase_bill_items.filter(i => i.purchase_bill_id === billId);
-
-    for (const res of itemResolutions) {
-      if (res.action === 'skip') continue;
-
-      const billItem = billItems.find(i => i.id === res.itemId);
-      const partNo = (res.partNo || billItem?.part_number_scanned || '').trim().toUpperCase();
-      const partName = res.partName || billItem?.part_name_scanned || partNo;
-      const qty = Number(res.qty ?? billItem?.qty ?? 1);
-      const unitPrice = Number(res.unitPrice ?? res.sellingPrice ?? billItem?.unit_price ?? 0);
-
-      if (!partNo) continue;
-
-      // Locate inventory part in brand schema
-      let invPart = cache[b].inventory.find(i => i.part_no.toUpperCase() === partNo);
-
-      if (invPart) {
-        // Matched or Reactivated
-        invPart.quantity += qty;
-        if (unitPrice > 0) invPart.mrp = unitPrice;
-        if (!invPart.is_active) {
-          invPart.is_active = true;
-          invPart.archived_at = null;
-        }
-        invPart.updated_at = new Date().toISOString();
-
-        if (isSupabaseConfigured && supabase) {
-          await supabase.schema(b).from('inventory').update({
-            quantity: invPart.quantity,
-            mrp: invPart.mrp,
-            is_active: invPart.is_active,
-            archived_at: invPart.archived_at,
-            updated_at: invPart.updated_at
-          }).eq('id', invPart.id);
-        }
-      } else {
-        // Create new part
-        const newPart: InventoryItem = {
-          id: uuid(),
-          part_no: partNo,
-          part_name: partName,
-          quantity: qty,
-          hsn: '8708',
-          mrp: unitPrice,
-          brand: bill.brand,
-          is_active: true,
-          archived_at: null,
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        };
-        cache[b].inventory.unshift(newPart);
-        invPart = newPart;
-
-        if (isSupabaseConfigured && supabase) {
-          await supabase.schema(b).from('inventory').insert(newPart);
-        }
-      }
-
-      // Record Stock Movement
-      await db.logStockMovement(
-        bill.brand,
-        invPart.id,
-        invPart.part_no,
-        invPart.part_name,
-        qty,
-        'purchase',
-        bill.id,
-        user
-      );
-
-      // Update bill item resolved status
-      if (billItem) {
-        billItem.resolved = true;
-        billItem.resolution_action = res.action;
-        billItem.matched_part_id = invPart.id;
-      }
-    }
-
-    // Mark bill as confirmed
-    bill.status = 'confirmed';
-    bill.confirmed_at = new Date().toISOString();
-
-    // Persist changes
-    localStorage.setItem(KEY_PURCHASE_BILLS, JSON.stringify(cache.purchase_bills));
-    localStorage.setItem(KEY_PURCHASE_BILL_ITEMS, JSON.stringify(cache.purchase_bill_items));
-    localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(cache[b].inventory));
-
-    if (isSupabaseConfigured && supabase) {
-      try {
-        await supabase.from('purchase_bills').update({
-          status: 'confirmed',
-          confirmed_at: bill.confirmed_at
-        }).eq('id', bill.id);
-      } catch (err) {
-        console.warn("[Purchase Bill Confirm] Supabase update notice:", err);
-      }
-    }
-
-    db.logTransaction(
-      user.id,
-      user.name,
-      'Confirm Purchase Bill',
-      'Inventory',
-      `Confirmed purchase bill #${bill.bill_number} from ${bill.supplier_name}. Updated stock and logged stock movements.`,
-      null,
-      bill
-    );
-
-    lastBrandFetchTime[b] = 0;
-    db.notify();
-  },
-
-  deletePurchaseBill: async (billId: string, user: User): Promise<void> => {
-    const bill = cache.purchase_bills.find(b => b.id === billId);
-    cache.purchase_bills = cache.purchase_bills.filter(b => b.id !== billId);
-    cache.purchase_bill_items = cache.purchase_bill_items.filter(i => i.purchase_bill_id !== billId);
-
-    localStorage.setItem(KEY_PURCHASE_BILLS, JSON.stringify(cache.purchase_bills));
-    localStorage.setItem(KEY_PURCHASE_BILL_ITEMS, JSON.stringify(cache.purchase_bill_items));
-
-    if (isSupabaseConfigured && supabase) {
-      try {
-        await supabase.from('purchase_bills').delete().eq('id', billId);
-        await supabase.from('purchase_bill_items').delete().eq('purchase_bill_id', billId);
-      } catch (err) {
-        console.warn("[Purchase Bill Delete] Supabase delete notice:", err);
-      }
-    }
-
-    if (bill) {
-      db.logTransaction(
-        user.id,
-        user.name,
-        'Delete Purchase Bill',
-        'Purchases',
-        `Deleted draft purchase bill #${bill.bill_number}`,
-        bill,
-        null
-      );
-    }
-    db.notify();
-  },
-
-  // --- VERSION 2: STOCK MOVEMENTS AUDIT ---
-  getStockMovements: (brand: Brand, partNo?: string): StockMovement[] => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    let movements = cache.stock_movements[b] || [];
-    if (partNo) {
-      movements = movements.filter(m => m.part_no.toUpperCase() === partNo.trim().toUpperCase());
-    }
-    return [...movements].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-  },
-
-  logStockMovement: async (
-    brand: Brand,
-    partId: string,
-    partNo: string,
-    partName: string,
-    changeQty: number,
-    reason: StockMovementReason,
-    refId: string | null,
-    user: User
-  ): Promise<StockMovement> => {
-    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    const movement: StockMovement = {
-      id: uuid(),
-      brand,
-      part_id: partId,
-      part_no: partNo,
-      part_name: partName,
-      change_qty: changeQty,
-      reason,
-      reference_id: refId,
-      created_by: user.name,
-      created_at: new Date().toISOString()
-    };
-
-    if (!cache.stock_movements[b]) {
-      cache.stock_movements[b] = [];
-    }
-    cache.stock_movements[b].unshift(movement);
-    localStorage.setItem(KEY_STOCK_MOVEMENTS, JSON.stringify(cache.stock_movements));
-
-    if (isSupabaseConfigured && supabase) {
-      try {
-        await supabase.schema(b).from('stock_movements').insert(movement);
-      } catch (err) {
-        console.warn("[Stock Movements Sync] Supabase table insert optional fallback:", err);
-      }
-    }
-
-    return movement;
-  },
-
-  // --- VERSION 2: KHATABOOK RUNNING BALANCE VIEW ---
-  getCustomerBalances: (filterTier?: 'all' | 'settled' | 'partial' | 'high_due'): CustomerBalanceView[] => {
-    const customers = cache.customers || [];
-    const balances: CustomerBalanceView[] = customers.map(c => {
-      const opening = Number(c.starting_outstanding || 0);
-      const totalSales = Number(c.total_sales || 0);
-      const totalPayments = Number(c.total_payments || 0);
-      const pendingBalance = opening + totalSales - totalPayments;
-
-      let tier: 'settled' | 'partial' | 'high_due' = 'settled';
-      if (pendingBalance >= 10000) {
-        tier = 'high_due';
-      } else if (pendingBalance > 0) {
-        tier = 'partial';
-      } else {
-        tier = 'settled';
-      }
-
-      return {
-        customer_id: c.id,
-        name: c.customer_name,
-        customer_type: c.customer_category,
-        phone: c.phone,
-        opening_balance: opening,
-        total_sales: totalSales,
-        total_paid_at_sale: 0,
-        total_payments: totalPayments,
-        pending_balance: pendingBalance,
-        status_tier: tier
-      };
-    });
-
-    if (filterTier && filterTier !== 'all') {
-      return balances.filter(b => b.status_tier === filterTier);
-    }
-    return balances;
   }
 };

@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Brand, User, Sale, SaleItem, Purchase, ReturnRecord, InventoryItem } from '../types';
+import { Brand, User, Sale, Purchase, ReturnRecord, InventoryItem } from '../types';
 import { db } from '../dbStore';
 import * as XLSX from 'xlsx';
 import { 
@@ -14,14 +14,8 @@ interface OwnerReportsModuleProps {
 }
 
 export default function OwnerReportsModule({ brand, user }: OwnerReportsModuleProps) {
-  const [reportsPayload, setReportsPayload] = useState<{
-    sales: Sale[];
-    saleItems: SaleItem[];
-    returns: ReturnRecord[];
-    purchases: Purchase[];
-    purchaseItems: any[];
-  } | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [, forceUpdate] = useState(0);
+  const [isLoading, setIsLoading] = useState(false);
   const [timeframe, setTimeframe] = useState<'Daily' | 'Monthly' | 'Yearly'>('Monthly');
   
   // Date filter selections
@@ -32,29 +26,10 @@ export default function OwnerReportsModule({ brand, user }: OwnerReportsModulePr
   const [defaultMarginPercent, setDefaultMarginPercent] = useState<number>(30); // 30% margin default
   const [showConfig, setShowConfig] = useState(false);
 
-  // Fetch reports data on brand or change triggers
-  useEffect(() => {
-    let active = true;
-    setIsLoading(true);
-    db.fetchReportsData(brand)
-      .then(data => {
-        if (active) {
-          setReportsPayload(data);
-          setIsLoading(false);
-        }
-      })
-      .catch(err => {
-        console.error(err);
-        if (active) setIsLoading(false);
-      });
-    return () => { active = false; };
-  }, [brand]);
-
   // Available years in dataset
   const availableYears = useMemo(() => {
-    if (!reportsPayload) return [new Date().getFullYear()];
-    const sales = reportsPayload.sales;
-    const purchases = reportsPayload.purchases;
+    const sales = db.getSales(brand);
+    const purchases = db.getPurchases(brand);
     const years = new Set<number>([new Date().getFullYear()]);
     
     sales.forEach(s => {
@@ -72,20 +47,15 @@ export default function OwnerReportsModule({ brand, user }: OwnerReportsModulePr
     });
     
     return Array.from(years).sort((a, b) => b - a);
-  }, [reportsPayload]);
+  }, [brand]);
 
   // Subscribe to db state updates
   useEffect(() => {
-    const unsubscribe = db.subscribe(async () => {
-      try {
-        const data = await db.fetchReportsData(brand);
-        setReportsPayload(data);
-      } catch (err) {
-        console.error(err);
-      }
+    const unsubscribe = db.subscribe(() => {
+      forceUpdate(prev => prev + 1);
     });
     return unsubscribe;
-  }, [brand]);
+  }, []);
 
   // Check role restriction
   if (user.role !== 'Owner') {
@@ -104,9 +74,8 @@ export default function OwnerReportsModule({ brand, user }: OwnerReportsModulePr
 
   // Cost calculation map: part_no -> latest purchase cost
   const partCostMap = useMemo(() => {
-    if (!reportsPayload) return new Map<string, number>();
-    const purchases = reportsPayload.purchases;
-    const purchaseItems = reportsPayload.purchaseItems;
+    const purchases = db.getPurchases(brand);
+    const purchaseItems = db.getPurchaseItems(brand);
 
     // Map each purchase ID to its dealer discount percentage
     const purchaseDiscountMap = new Map<string, number>();
@@ -129,7 +98,7 @@ export default function OwnerReportsModule({ brand, user }: OwnerReportsModulePr
     });
 
     return costMap;
-  }, [reportsPayload]);
+  }, [brand]);
 
   // Compute unit cost helper
   const getUnitCost = (partNo: string, mrp: number): number => {
@@ -143,11 +112,10 @@ export default function OwnerReportsModule({ brand, user }: OwnerReportsModulePr
 
   // Get data grouped by the selected timeframe
   const reportData = useMemo(() => {
-    if (!reportsPayload) return [];
-    const sales = reportsPayload.sales;
-    const saleItems = reportsPayload.saleItems;
-    const returns = reportsPayload.returns;
-    const purchases = reportsPayload.purchases;
+    const sales = db.getSales(brand);
+    const saleItems = db.getSaleItems(brand);
+    const returns = db.getReturns(brand);
+    const purchases = db.getPurchases(brand);
 
     // Group maps
     const groups: Record<string, {
@@ -418,16 +386,6 @@ export default function OwnerReportsModule({ brand, user }: OwnerReportsModulePr
     "January", "February", "March", "April", "May", "June", 
     "July", "August", "September", "October", "November", "December"
   ];
-
-  if (isLoading || !reportsPayload) {
-    return (
-      <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center shadow-sm max-w-lg mx-auto my-12 space-y-4">
-        <div className="w-10 h-10 border-4 border-indigo-600 border-t-transparent rounded-full animate-spin mx-auto" />
-        <p className="text-slate-600 font-bold text-sm">Aggregating lightweight financial logs...</p>
-        <p className="text-slate-400 text-xs">Computing profit margins, COGS, and return metrics safely.</p>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-6">

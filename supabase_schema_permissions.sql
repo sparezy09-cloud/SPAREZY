@@ -41,7 +41,3 @@ $$;
 
 GRANT EXECUTE ON FUNCTION public.current_schema() TO authenticated, anon;
 
--- Grant EXECUTE permission on public.get_dashboard_metrics to authenticated and anon
-GRANT EXECUTE ON FUNCTION public.get_dashboard_metrics(text) TO authenticated, anon;
-
-
