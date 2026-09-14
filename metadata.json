@@ -1,6 +1,6 @@
 {
   "name": "Remix: Remix: Sparezy MIS Dashboard",
-  "description": "Automobile Spare Parts MIS Dashboard for Hyundai and Mahindra brands. Integrated inventory tracking, sales slip builder, refunds, AI invoice processing, customer and dealer ledger exports, and role-based permissions.",
+  "description": "Automobile Spare Parts MIS Dashboard for Hyundai and Mahindra brands with egress bandwidth optimizations, dedicated Owner Transactions oversight tab for tracking all manager and owner activities, sales slips, purchases, and role-based permissions.",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

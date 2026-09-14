@@ -2725,6 +2725,17 @@ export const db = {
     await idbStore.clear('cache_partitions');
     await idbStore.clear('sync_metadata');
     console.log("[Egress Optimizer] Offline IndexedDB cache cleared.");
+  },
+
+  ensureAllBrandsLoaded: async (): Promise<void> => {
+    try {
+      await Promise.all([
+        db.loadBrandData('Hyundai'),
+        db.loadBrandData('Mahindra')
+      ]);
+    } catch (e) {
+      console.warn("Failed to preload all brand datasets:", e);
+    }
   }
 };
 

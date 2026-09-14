@@ -19,7 +19,7 @@ import SettingsModule from './components/SettingsModule';
 import { 
   CarFront, LayoutDashboard, Layers, ShoppingBag, RotateCcw, 
   FileText, FileSpreadsheet, Users, Terminal, Shield, LogOut, Menu, X, CheckCircle,
-  AlertTriangle, RefreshCw, Download
+  AlertTriangle, RefreshCw, Download, Receipt
 } from 'lucide-react';
 
 export default function App() {
@@ -348,7 +348,7 @@ export default function App() {
     { name: 'Purchases', icon: FileText },
     { name: 'Bulk Updates', icon: FileSpreadsheet, ownerOnly: true },
     { name: 'Customer & Dealer Ledgers', icon: Users },
-    { name: 'Transaction Records', icon: Terminal, ownerOnly: true },
+    { name: 'Owner Transactions', icon: Receipt, ownerOnly: true },
     { name: 'Settings / User Management', icon: Shield },
   ];
 
@@ -382,6 +382,7 @@ export default function App() {
         return <BulkUpdateModule brand={activeBrand} user={activeUser} />;
       case 'Customer & Dealer Ledgers':
         return <LedgerModule brand={activeBrand} user={activeUser} />;
+      case 'Owner Transactions':
       case 'Transaction Records':
         return <TransactionsModule brand={activeBrand} user={activeUser} />;
       case 'Settings / User Management':
