@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Brand, User } from '../types';
+import { Brand, User, isOwnerOrAdmin } from '../types';
 import { db } from '../dbStore';
 import { 
   TrendingUp, Layers, AlertCircle, ShoppingBag, 
@@ -237,7 +237,7 @@ export default function DashboardModule({ brand, user, onNavigateToModule }: Das
             </div>
           </div>
           <div className="mt-4">
-            {user.role === 'Manager' ? (
+            {!isOwnerOrAdmin(user.role) ? (
               <h3 className="text-base font-bold text-slate-400 tracking-tight py-1 inline-flex items-center gap-1">
                 <span>🔒 Restricted</span>
               </h3>

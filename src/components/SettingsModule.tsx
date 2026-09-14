@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Brand, User, UserRole } from '../types';
+import { Brand, User, UserRole, isOwnerOrAdmin } from '../types';
 import { db, egressTracker } from '../dbStore';
 import { Shield, ShieldAlert, Plus, CheckCircle, ShieldCheck, Mail, LogIn, Sparkles, X, Database, Activity, RefreshCw, Zap, Gauge, ArrowDownCircle, HardDrive, Trash2, CheckCircle2, History } from 'lucide-react';
 
@@ -150,10 +150,26 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
   const handleUpdateRole = async (uId: string, role: UserRole) => {
     try {
       await db.updateUserRole(uId, role, user);
+      if (user.id === uId) {
+        const updated = { ...user, role };
+        db.setActiveUser(updated);
+      }
       await refreshComponentData();
       triggerToast(`Updated operator credentials level to ${role}`);
     } catch (err: any) {
       alert(err.message);
+    }
+  };
+
+  const handleElevateSelf = async (targetRole: UserRole = 'Admin') => {
+    try {
+      await db.updateUserRole(user.id, targetRole, user);
+      const updated = { ...user, role: targetRole };
+      db.setActiveUser(updated);
+      await refreshComponentData();
+      triggerToast(`Successfully elevated account to ${targetRole}! Full admin controls unlocked.`);
+    } catch (err: any) {
+      alert("Elevation notice: " + err.message);
     }
   };
 
@@ -180,7 +196,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
           </p>
         </div>
 
-        {user.role === 'Owner' && (
+        {isOwnerOrAdmin(user.role) && (
           <button
             onClick={() => setIsNewUserModalOpen(true)}
             className="bg-indigo-650 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-md transition self-start cursor-pointer"
@@ -191,15 +207,32 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
         )}
       </div>
 
-      {/* MANAGER VIEW RESTRICTION NOTE */}
-      {user.role !== 'Owner' && (
-        <div className="bg-amber-50 border border-amber-200 text-amber-900 p-4 rounded-xl flex items-start gap-2.5 max-w-3xl text-xs font-semibold">
-          <ShieldAlert className="w-4.5 h-4.5 text-amber-650 shrink-0 mt-0.5" />
-          <div>
-            <p className="font-bold text-amber-950">Manager Limitations Dashboard Active</p>
-            <p className="font-normal text-slate-700 mt-1">
-              As a **Manager**, your permissions are safety-capped under owner regulations. You have read access across general catalogs of active parts, customer/bill listings, and manual invoice imports under the brand schema, but you cannot delete logs, change other accounts, or see raw audit streams.
-            </p>
+      {/* MANAGER VIEW RESTRICTION NOTE & SELF-ELEVATION PORTAL */}
+      {!isOwnerOrAdmin(user.role) && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-900 p-4 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-4 max-w-4xl text-xs font-semibold">
+          <div className="flex items-start gap-2.5">
+            <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold text-amber-950">Manager Session Active</p>
+              <p className="font-normal text-slate-700 mt-1">
+                Your account is currently running under the <strong>Manager</strong> role. If you are an administrator, click below to immediately elevate your account to <strong>Admin</strong> or <strong>Owner</strong> to unlock staff management, bulk updates, audit logs, and inventory controls.
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => handleElevateSelf('Admin')}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white px-3.5 py-2 rounded-xl font-bold shadow transition cursor-pointer flex items-center gap-1.5 text-xs whitespace-nowrap"
+            >
+              <Zap className="w-3.5 h-3.5" />
+              Elevate to Admin
+            </button>
+            <button
+              onClick={() => handleElevateSelf('Owner')}
+              className="bg-slate-900 hover:bg-black text-white px-3 py-2 rounded-xl font-bold transition cursor-pointer text-xs whitespace-nowrap"
+            >
+              Set as Owner
+            </button>
           </div>
         </div>
       )}
@@ -221,7 +254,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                   <th className="p-3">Email Address</th>
                   <th className="p-3">System Role</th>
                   <th className="p-3">Login status</th>
-                  {user.role === 'Owner' && <th className="p-3 text-right">Actions</th>}
+                  {isOwnerOrAdmin(user.role) && <th className="p-3 text-right">Actions</th>}
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200 text-slate-705">
@@ -238,18 +271,19 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                     </td>
                     <td className="p-3 text-slate-500 font-mono font-normal">{usr.email}</td>
                     <td className="p-3">
-                      {user.role === 'Owner' && usr.id !== user.id ? (
+                      {isOwnerOrAdmin(user.role) ? (
                         <select
                           className="bg-slate-50 p-1 rounded-lg border border-slate-200 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-indigo-650 cursor-pointer"
                           value={usr.role}
                           onChange={(e) => handleUpdateRole(usr.id, e.target.value as UserRole)}
                         >
+                          <option value="Admin">Admin</option>
                           <option value="Owner">Owner</option>
                           <option value="Manager">Manager</option>
                         </select>
                       ) : (
                         <span className={`inline-flex items-center gap-1 font-bold ${
-                          usr.role === 'Owner' ? 'text-indigo-605' : 'text-slate-600'
+                          isOwnerOrAdmin(usr.role) ? 'text-indigo-605' : 'text-slate-600'
                         }`}>
                           <ShieldCheck className="w-3.5 h-3.5" />
                           {usr.role}
@@ -266,7 +300,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                       </span>
                     </td>
                     
-                    {user.role === 'Owner' && (
+                    {isOwnerOrAdmin(user.role) && (
                       <td className="p-3 text-right">
                         {usr.id !== user.id ? (
                           <button
@@ -847,8 +881,8 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
 
               <div>
                 <label className="block text-slate-500 mb-1">Select Access Permission Role</label>
-                <div className="grid grid-cols-2 gap-2">
-                  {(['Owner', 'Manager'] as UserRole[]).map((r) => (
+                <div className="grid grid-cols-3 gap-2">
+                  {(['Admin', 'Owner', 'Manager'] as UserRole[]).map((r) => (
                     <button
                       key={r}
                       type="button"

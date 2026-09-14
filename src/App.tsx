@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { User, Brand } from './types';
+import { User, Brand, isOwnerOrAdmin } from './types';
 import { db } from './dbStore';
 import { supabase } from './lib/supabaseClient';
 
@@ -523,7 +523,7 @@ export default function App() {
         {/* Navigation list in slate-900 sidebar */}
         <nav className="flex-1 px-4 space-y-1 text-sm overflow-y-auto">
           {sidebarItems.map((item) => {
-            if (item.ownerOnly && activeUser.role !== 'Owner') return null;
+            if (item.ownerOnly && !isOwnerOrAdmin(activeUser.role)) return null;
             const Icon = item.icon;
             const isSelected = activeModule === item.name;
 
@@ -723,7 +723,7 @@ export default function App() {
             {/* Links list */}
             <nav className="flex-1 px-4 py-4 space-y-1 font-bold text-xs overflow-y-auto">
               {sidebarItems.map((item) => {
-                if (item.ownerOnly && activeUser.role !== 'Owner') return null;
+                if (item.ownerOnly && !isOwnerOrAdmin(activeUser.role)) return null;
                 const Icon = item.icon;
                 const isSelected = activeModule === item.name;
 

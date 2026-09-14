@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, Fragment } from 'react';
-import { Brand, User, UserRole, TransactionLog, Sale, Purchase, ReturnRecord, SaleItem, PurchaseItem } from '../types';
+import { Brand, User, UserRole, TransactionLog, Sale, Purchase, ReturnRecord, SaleItem, PurchaseItem, isOwnerOrAdmin } from '../types';
 import { db } from '../dbStore';
 import { 
   Terminal, ShieldAlert, Eye, EyeOff, Search, Filter, Download, 
@@ -110,6 +110,7 @@ export default function TransactionsModule({ brand, user }: TransactionsModulePr
     if (!nameOrId) return 'Manager';
     const clean = nameOrId.toLowerCase().trim();
     if (clean.includes('(owner)') || clean.includes('owner')) return 'Owner';
+    if (clean.includes('(admin)') || clean.includes('admin')) return 'Admin';
     if (clean.includes('(manager)') || clean.includes('manager')) return 'Manager';
 
     const match = userMap.get(clean);
@@ -419,8 +420,8 @@ export default function TransactionsModule({ brand, user }: TransactionsModulePr
     document.body.removeChild(link);
   };
 
-  // STRICT ACCESS DENIED SCREEN FOR NON-OWNER
-  if (user.role !== 'Owner') {
+  // STRICT ACCESS DENIED SCREEN FOR NON-OWNER / NON-ADMIN
+  if (!isOwnerOrAdmin(user.role)) {
     return (
       <div className="bg-rose-50 border border-rose-200 text-rose-800 p-8 rounded-3xl max-w-2xl mx-auto space-y-4 my-10 shadow-lg text-xs font-semibold">
         <div className="w-12 h-12 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center text-rose-600">
@@ -428,10 +429,10 @@ export default function TransactionsModule({ brand, user }: TransactionsModulePr
         </div>
         <div>
           <h3 className="text-lg font-bold text-rose-950 flex items-center gap-2">
-            Access Restricted &mdash; Owner Exclusive Portal
+            Access Restricted &mdash; Owner &amp; Admin Portal
           </h3>
           <p className="font-normal text-slate-600 text-xs mt-1.5 leading-relaxed">
-            The <strong>Owner Transactions</strong> tab is strictly guarded. It provides master managerial oversight into every website billing, inward purchase invoice, stock return, and database change performed by staff members across all dealership instances.
+            The <strong>Owner &amp; Admin Transactions</strong> tab is strictly guarded. It provides master managerial oversight into every website billing, inward purchase invoice, stock return, and database change performed by staff members across all dealership instances.
           </p>
         </div>
 

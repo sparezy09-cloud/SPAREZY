@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS public.users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     email TEXT UNIQUE NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('Owner', 'Manager')),
+    role TEXT NOT NULL CHECK (role IN ('Owner', 'Admin', 'Manager')),
     status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active', 'Disabled')),
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
 );

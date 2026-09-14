@@ -2,7 +2,13 @@
  * Sparezy MIS Dashboard - TypeScript Types and Schemas
  */
 
-export type UserRole = 'Owner' | 'Manager';
+export type UserRole = 'Owner' | 'Admin' | 'Manager';
+
+export function isOwnerOrAdmin(role?: UserRole | string | null): boolean {
+  if (!role) return false;
+  const r = role.trim().toLowerCase();
+  return r === 'owner' || r === 'admin';
+}
 export type UserStatus = 'Active' | 'Disabled';
 export type Brand = 'Hyundai' | 'Mahindra';
 export type CustomerCategory = 'Walk-in' | 'Mistri' | 'Retailer' | 'Garage';
