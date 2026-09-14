@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react';
 import { User, Brand } from './types';
 import { db } from './dbStore';
 import { supabase } from './lib/supabaseClient';
-import { safeLocalStorage, safeSessionStorage } from './storagePolyfill';
 
 // Modules components
 import BrandSelector from './components/BrandSelector';
@@ -87,7 +86,7 @@ export default function App() {
   useEffect(() => {
     const checkSessionAndInitialize = async () => {
       // If there is no active tab-bound session, clear the previous login to enforce logout-on-close
-      const isNewSession = !safeSessionStorage.getItem('sparezy_session_active');
+      const isNewSession = !sessionStorage.getItem('sparezy_session_active');
       let otherTabExists = false;
 
       if (isNewSession) {
@@ -126,7 +125,7 @@ export default function App() {
             }
           }
         }
-        safeSessionStorage.setItem('sparezy_session_active', 'true');
+        sessionStorage.setItem('sparezy_session_active', 'true');
       }
       
       // Bootstrap db keys and active brand on load
@@ -250,12 +249,12 @@ export default function App() {
     const KEY_LAST_ACTIVITY = 'sparezy_last_activity';
 
     // Seed the initial activity key if not set
-    if (!safeLocalStorage.getItem(KEY_LAST_ACTIVITY)) {
-      safeLocalStorage.setItem(KEY_LAST_ACTIVITY, Date.now().toString());
+    if (!localStorage.getItem(KEY_LAST_ACTIVITY)) {
+      localStorage.setItem(KEY_LAST_ACTIVITY, Date.now().toString());
     }
 
     const resetTimer = () => {
-      safeLocalStorage.setItem(KEY_LAST_ACTIVITY, Date.now().toString());
+      localStorage.setItem(KEY_LAST_ACTIVITY, Date.now().toString());
     };
 
     // Interaction events to monitor for main user activity
@@ -269,7 +268,7 @@ export default function App() {
 
     // Check every 5 seconds if the last logged activity across ALL system tabs is > 20 minutes
     const checkInterval = setInterval(() => {
-      const lastActivity = Number(safeLocalStorage.getItem(KEY_LAST_ACTIVITY) || Date.now());
+      const lastActivity = Number(localStorage.getItem(KEY_LAST_ACTIVITY) || Date.now());
       const idleTime = Date.now() - lastActivity;
       if (idleTime > 20 * 60 * 1000) {
         console.log("Inactivity logout triggered after 20 minutes of idle time.");
@@ -280,7 +279,7 @@ export default function App() {
     // Also check immediately when the user focuses/moves back to this window (since background tabs get suspended)
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        const lastActivity = Number(safeLocalStorage.getItem(KEY_LAST_ACTIVITY) || Date.now());
+        const lastActivity = Number(localStorage.getItem(KEY_LAST_ACTIVITY) || Date.now());
         const idleTime = Date.now() - lastActivity;
         if (idleTime > 20 * 60 * 1000) {
           console.log("Inactivity logout triggered on tab focus.");
@@ -350,7 +349,7 @@ export default function App() {
     { name: 'Bulk Updates', icon: FileSpreadsheet, ownerOnly: true },
     { name: 'Customer & Dealer Ledgers', icon: Users },
     { name: 'Transaction Records', icon: Terminal, ownerOnly: true },
-    { name: 'Settings / User Management', icon: Shield, ownerOnly: true },
+    { name: 'Settings / User Management', icon: Shield },
   ];
 
   const renderModuleContent = () => {
@@ -386,9 +385,6 @@ export default function App() {
       case 'Transaction Records':
         return <TransactionsModule brand={activeBrand} user={activeUser} />;
       case 'Settings / User Management':
-        if (activeUser.role !== 'Owner') {
-          return <DashboardModule brand={activeBrand} user={activeUser} onNavigateToModule={setActiveModule} />;
-        }
         return <SettingsModule brand={activeBrand} user={activeUser} />;
       default:
         return <DashboardModule brand={activeBrand} user={activeUser} onNavigateToModule={setActiveModule} />;
@@ -674,18 +670,14 @@ export default function App() {
                   <strong>Configuration Error [{key}]:</strong> {errMsg}
                 </span>
               </div>
-              {activeUser.role === 'Owner' ? (
-                <button
-                  onClick={() => {
-                    setActiveModule('Settings / User Management');
-                  }}
-                  className="text-indigo-600 hover:text-indigo-800 font-bold hover:underline cursor-pointer"
-                >
-                  Inspect Diagnostics &amp; Solution
-                </button>
-              ) : (
-                <span className="text-slate-400 italic">Please contact your Owner to configure credentials.</span>
-              )}
+              <button
+                onClick={() => {
+                  setActiveModule('Settings / User Management');
+                }}
+                className="text-indigo-600 hover:text-indigo-800 font-bold hover:underline cursor-pointer"
+              >
+                Inspect Diagnostics &amp; Solution
+              </button>
             </div>
           ))}
           <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-6">

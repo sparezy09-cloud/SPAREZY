@@ -1,5 +1,4 @@
 import { createClient } from '@supabase/supabase-js';
-import { safeSessionStorage } from '../storagePolyfill';
 
 const supabaseUrl = (import.meta as any).env?.VITE_SUPABASE_URL || '';
 const supabaseAnonKey = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY || '';
@@ -9,7 +8,7 @@ export const isSupabaseConfigured = !!(supabaseUrl && supabaseAnonKey);
 export const supabase = isSupabaseConfigured
   ? createClient(supabaseUrl, supabaseAnonKey, {
       auth: {
-        storage: safeSessionStorage,
+        storage: typeof window !== 'undefined' ? window.sessionStorage : undefined,
         autoRefreshToken: true,
         persistSession: true
       }
@@ -75,7 +74,7 @@ export async function testSupabaseConnection(selectedBrand: 'Hyundai' | 'Mahindr
 
   // 2. Test Inventory Read
   try {
-    const { data: invData, error: invError } = await supabase.schema(b).from('inventory').select('id').limit(1);
+    const { data: invData, error: invError } = await supabase.schema(b).from('inventory').select('*').limit(1);
     if (invError) {
       result.details!.inventoryReadOk = false;
       result.details!.inventoryReadMessage = "Inventory Read Error: " + invError.message;

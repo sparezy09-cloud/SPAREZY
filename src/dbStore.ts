@@ -1,13 +1,9 @@
 import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
-import { safeLocalStorage, safeSessionStorage } from './storagePolyfill';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
   ScanSource
 } from './types';
-
-const localStorage = safeLocalStorage;
-const sessionStorage = safeSessionStorage;
 
 // Storage keys for active preferences and local storage fallback
 const KEY_USERS = 'sparezy_public_users_fb';
@@ -15,7 +11,6 @@ const KEY_CUSTOMERS = 'sparezy_public_customers_fb';
 const KEY_LOGS = 'sparezy_public_logs_fb';
 const KEY_ACTIVE_USER = 'sparezy_active_user_fb';
 const KEY_ACTIVE_BRAND = 'sparezy_active_brand_fb';
-const KEY_LOCAL_PASSWORDS = 'sparezy_local_user_passwords_fb';
 
 // Safe LocalStorage wrapper to prevent quota/limit errors when database partitions grow large
 try {
@@ -443,7 +438,7 @@ export const db = {
           if (!profile && userEmail) {
             const { data: directProfile } = await supabase
               .from('users')
-              .select('id, name, email, role, status, created_at')
+              .select('*')
               .eq('email', userEmail.toLowerCase())
               .maybeSingle();
             if (directProfile) {
@@ -911,16 +906,7 @@ export const db = {
   },
 
   getUsers: (): User[] => {
-    try {
-      const passwords = safeParseJSON(localStorage.getItem(KEY_LOCAL_PASSWORDS)) || {};
-      return cache.users.map(u => ({
-        ...u,
-        password: passwords[u.id] || passwords[u.email.toLowerCase()] || u.password || ''
-      }));
-    } catch (e) {
-      console.warn("Failed to load local passwords map:", e);
-      return cache.users;
-    }
+    return cache.users;
   },
 
   fetchUsers: async (): Promise<User[]> => {
@@ -1027,61 +1013,6 @@ export const db = {
       
       db.logTransaction(currentEditor.id, currentEditor.name, 'Update Role', 'User Management', `Updated user ${user.name} role to ${role}`, oldVal, user);
       db.notify();
-    }
-  },
-
-  updateUserPassword: async (id: string, newPassword: string, currentEditor: User): Promise<void> => {
-    const user = cache.users.find(u => u.id === id);
-    if (user) {
-      const oldVal = { ...user };
-      
-      // Update locally in passwords store
-      try {
-        const passwords = safeParseJSON(localStorage.getItem(KEY_LOCAL_PASSWORDS)) || {};
-        passwords[user.id] = newPassword.trim();
-        passwords[user.email.toLowerCase()] = newPassword.trim();
-        localStorage.setItem(KEY_LOCAL_PASSWORDS, JSON.stringify(passwords));
-      } catch (e) {
-        console.warn("Failed to update user password locally:", e);
-      }
-
-      // Also set the in-memory user password property
-      user.password = newPassword.trim();
-
-      // If Supabase is configured and the user matches the active session (i.e., changing their own password via auth)
-      if (isSupabaseConfigured && supabase) {
-        try {
-          const sessionRes = await supabase.auth.getSession();
-          const session = sessionRes.data?.session;
-          if (session && session.user && session.user.id === id) {
-            const { error } = await supabase.auth.updateUser({ password: newPassword.trim() });
-            if (error) {
-              console.warn("Failed to update Supabase Auth password:", error.message);
-              throw new Error("Supabase Auth password update failed: " + error.message);
-            }
-          } else {
-            console.log("Client-side user is changing another operator's credentials. Password saved locally in local-sync ledger directory.");
-          }
-        } catch (err: any) {
-          console.warn("Supabase Auth password update failed/skipped:", err.message || err);
-        }
-      }
-
-      // Always save updated cache list locally so that state is persisted 
-      localStorage.setItem(KEY_USERS, JSON.stringify(cache.users));
-
-      db.logTransaction(
-        currentEditor.id, 
-        currentEditor.name, 
-        'Change Password', 
-        'User Management', 
-        `Changed password for user ${user.name} (ID: ${user.id})`, 
-        { id: user.id, email: user.email }, 
-        { id: user.id, email: user.email }
-      );
-      db.notify();
-    } else {
-      throw new Error("User profile not found in MIS database.");
     }
   },
 
@@ -1192,17 +1123,6 @@ export const db = {
       cache.users.push(newUser);
     }
     
-    if (password && password.trim()) {
-      try {
-        const passwords = safeParseJSON(localStorage.getItem(KEY_LOCAL_PASSWORDS)) || {};
-        passwords[newUser.id] = password.trim();
-        passwords[newUser.email.toLowerCase()] = password.trim();
-        localStorage.setItem(KEY_LOCAL_PASSWORDS, JSON.stringify(passwords));
-      } catch (e) {
-        console.warn("Failed to save user password locally:", e);
-      }
-    }
-
     localStorage.setItem(KEY_USERS, JSON.stringify(cache.users));
     
     db.logTransaction(currentEditor.id, currentEditor.name, 'Create User', 'User Management', `Created new user ${name} with ID ${newUser.id} and role ${role}`, null, newUser);
