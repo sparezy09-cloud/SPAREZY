@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Brand, User, UserRole } from '../types';
-import { db } from '../dbStore';
-import { Shield, ShieldAlert, Plus, CheckCircle, ShieldCheck, Mail, LogIn, Sparkles, X, Database, Activity, RefreshCw } from 'lucide-react';
+import { db, egressTracker } from '../dbStore';
+import { Shield, ShieldAlert, Plus, CheckCircle, ShieldCheck, Mail, LogIn, Sparkles, X, Database, Activity, RefreshCw, Zap, Gauge, ArrowDownCircle, HardDrive, Trash2, CheckCircle2, History } from 'lucide-react';
 
 interface SettingsModuleProps {
   brand: Brand;
@@ -22,6 +22,9 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
 
   const [testingConnection, setTestingConnection] = useState(false);
   const [testResult, setTestResult] = useState<any>(null);
+  const [egressMetrics, setEgressMetrics] = useState(() => egressTracker.getMetrics());
+  const [clearingCache, setClearingCache] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   const runDiagnostics = async () => {
     setTestingConnection(true);
@@ -56,10 +59,43 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
 
   React.useEffect(() => {
     refreshComponentData();
-    return db.subscribe(() => {
+    const unsubDb = db.subscribe(() => {
       setUsersList(db.getUsers());
+      setEgressMetrics(egressTracker.getMetrics());
     });
+    const unsubEgress = egressTracker.subscribe((metrics) => {
+      setEgressMetrics(metrics);
+    });
+    return () => {
+      unsubDb();
+      unsubEgress();
+    };
   }, []);
+
+  const handlePurgeOfflineCache = async () => {
+    setClearingCache(true);
+    try {
+      await db.clearOfflineCache();
+      triggerToast("Offline IndexedDB cache partitions cleared successfully!");
+      setEgressMetrics(egressTracker.getMetrics());
+    } catch (e: any) {
+      alert("Failed to clear offline cache: " + e.message);
+    } finally {
+      setClearingCache(false);
+    }
+  };
+
+  const handleLoadFullHistory = async () => {
+    setLoadingHistory(true);
+    try {
+      await db.loadAllHistory(brand);
+      triggerToast(`Complete historical records loaded for ${brand}!`);
+    } catch (e: any) {
+      alert("Failed to load historical records: " + e.message);
+    } finally {
+      setLoadingHistory(false);
+    }
+  };
 
   const triggerToast = (msg: string) => {
     setToastMessageLocal(msg);
@@ -604,6 +640,134 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
               </div>
             )}
             
+          </div>
+        </div>
+
+        {/* EGRESS & BANDWIDTH OPTIMIZATION DASHBOARD CARD */}
+        <div className="bg-slate-900 text-white rounded-2xl p-5 shadow-xl space-y-4 text-xs font-semibold border border-slate-800 lg:col-span-2">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-800 gap-2">
+            <div>
+              <h3 className="font-bold text-emerald-400 text-xs uppercase tracking-wider flex items-center gap-2">
+                <Zap className="w-4 h-4 text-emerald-400" />
+                Egress &amp; Bandwidth Optimization Engine
+              </h3>
+              <p className="text-[11px] text-slate-400 font-normal mt-0.5">
+                Active multi-layer telemetry monitoring bandwidth savings across database queries, API responses, and invoice uploads.
+              </p>
+            </div>
+            
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={handlePurgeOfflineCache}
+                disabled={clearingCache}
+                className="text-[10px] text-slate-300 hover:text-white font-bold flex items-center gap-1.5 bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg transition disabled:opacity-40 cursor-pointer border border-slate-700"
+                title="Clears local IndexedDB partitions so the app re-syncs fresh state"
+              >
+                <Trash2 className={`w-3.5 h-3.5 text-rose-400 ${clearingCache ? 'animate-spin' : ''}`} />
+                Purge Offline Cache
+              </button>
+
+              <button
+                type="button"
+                onClick={handleLoadFullHistory}
+                disabled={loadingHistory}
+                className="text-[10px] text-indigo-300 hover:text-white font-bold flex items-center gap-1.5 bg-indigo-950/80 hover:bg-indigo-900 px-3 py-1.5 rounded-lg transition disabled:opacity-40 cursor-pointer border border-indigo-800/40"
+                title="Fetches all legacy sales & purchases without window limits"
+              >
+                <History className={`w-3.5 h-3.5 text-indigo-400 ${loadingHistory ? 'animate-spin' : ''}`} />
+                Load Full History Archive
+              </button>
+            </div>
+          </div>
+
+          {/* Metric KPI Cards */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-left">
+            <div className="bg-slate-950/70 p-3 rounded-xl border border-emerald-500/20">
+              <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-black">
+                <span>Bandwidth Saved</span>
+                <ArrowDownCircle className="w-3.5 h-3.5 text-emerald-400" />
+              </div>
+              <p className="text-xl font-bold text-emerald-400 font-mono mt-1">
+                {egressTracker.formatBytes(egressMetrics.totalBytesSaved)}
+              </p>
+              <p className="text-[9px] text-slate-400 mt-0.5 font-normal">
+                {egressMetrics.savingsPercentage > 0 ? `${egressMetrics.savingsPercentage}% net egress cut` : 'Zero redundant transfers'}
+              </p>
+            </div>
+
+            <div className="bg-slate-950/70 p-3 rounded-xl border border-indigo-500/20">
+              <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-black">
+                <span>Zero-Network Hits</span>
+                <HardDrive className="w-3.5 h-3.5 text-indigo-400" />
+              </div>
+              <p className="text-xl font-bold text-indigo-300 font-mono mt-1">
+                {egressMetrics.cacheHits + egressMetrics.fullFetchesAvoided}
+              </p>
+              <p className="text-[9px] text-slate-400 mt-0.5 font-normal">
+                IndexedDB &amp; memory hits
+              </p>
+            </div>
+
+            <div className="bg-slate-950/70 p-3 rounded-xl border border-sky-500/20">
+              <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-black">
+                <span>Database Delta Syncs</span>
+                <RefreshCw className="w-3.5 h-3.5 text-sky-400" />
+              </div>
+              <p className="text-xl font-bold text-sky-300 font-mono mt-1">
+                {egressMetrics.deltaSyncsExecuted}
+              </p>
+              <p className="text-[9px] text-slate-400 mt-0.5 font-normal">
+                Avoided full inventory fetches
+              </p>
+            </div>
+
+            <div className="bg-slate-950/70 p-3 rounded-xl border border-purple-500/20">
+              <div className="flex items-center justify-between text-slate-400 text-[10px] uppercase font-black">
+                <span>Optimized Invoices</span>
+                <Gauge className="w-3.5 h-3.5 text-purple-400" />
+              </div>
+              <p className="text-xl font-bold text-purple-300 font-mono mt-1">
+                {egressMetrics.imagesCompressed}
+              </p>
+              <p className="text-[9px] text-slate-400 mt-0.5 font-normal">
+                Client-compressed scans
+              </p>
+            </div>
+          </div>
+
+          {/* Active Optimization Architecture Checklist */}
+          <div className="bg-slate-950/50 p-3.5 rounded-xl border border-white/5 space-y-2 text-[10px] font-normal text-slate-300">
+            <p className="font-bold text-white text-[10px] uppercase tracking-wider flex items-center gap-1">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+              Active Egress Optimization Layers
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-1 text-slate-300">
+              <div className="flex items-center gap-1.5 bg-slate-900/60 p-2 rounded-lg border border-white/5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"></span>
+                <span><strong>HTTP Gzip/Deflate:</strong> Server-side compression on all /api endpoints</span>
+              </div>
+              <div className="flex items-center gap-1.5 bg-slate-900/60 p-2 rounded-lg border border-white/5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"></span>
+                <span><strong>Delta Sync Engine:</strong> Only pulls parts modified after last sync timestamp</span>
+              </div>
+              <div className="flex items-center gap-1.5 bg-slate-900/60 p-2 rounded-lg border border-white/5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"></span>
+                <span><strong>IndexedDB Cache:</strong> Instant 0ms hydration with zero initial network egress</span>
+              </div>
+              <div className="flex items-center gap-1.5 bg-slate-900/60 p-2 rounded-lg border border-white/5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"></span>
+                <span><strong>Client Image Resizing:</strong> Invoice scans scaled to 1800px max (70-80% smaller)</span>
+              </div>
+              <div className="flex items-center gap-1.5 bg-slate-900/60 p-2 rounded-lg border border-white/5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"></span>
+                <span><strong>Windowed Pagination:</strong> 250 sales / 200 purchases limit to prevent data bloat</span>
+              </div>
+              <div className="flex items-center gap-1.5 bg-slate-900/60 p-2 rounded-lg border border-white/5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"></span>
+                <span><strong>Realtime Patching:</strong> Postgres changes update local state without full reload</span>
+              </div>
+            </div>
           </div>
         </div>
       </div>

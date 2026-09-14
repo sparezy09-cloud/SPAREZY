@@ -1,4 +1,6 @@
 import { supabase, isSupabaseConfigured } from './lib/supabaseClient';
+import { idbStore } from './lib/idbStore';
+import { egressTracker } from './lib/egressTracker';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
@@ -229,15 +231,18 @@ function handleRealtimePayload(schema: string, payload: any) {
     console.log(`📡 realtime: schema=${schema} table=${table} type=${eventType}`, payload);
 
     let targetArray: any[] | null = null;
+    let partitionKey = '';
     
     if (schema === 'public') {
-      if (table === 'users') targetArray = cache.users;
-      else if (table === 'customers') targetArray = cache.customers;
-      else if (table === 'transaction_logs') targetArray = cache.transaction_logs;
+      if (table === 'users') { targetArray = cache.users; partitionKey = 'public_users'; }
+      else if (table === 'customers') { targetArray = cache.customers; partitionKey = 'public_customers'; }
+      else if (table === 'transaction_logs') { targetArray = cache.transaction_logs; partitionKey = 'public_logs'; }
     } else if (schema === 'hyundai') {
       targetArray = (cache.hyundai as any)[table];
+      partitionKey = `hyundai_${table}`;
     } else if (schema === 'mahindra') {
       targetArray = (cache.mahindra as any)[table];
+      partitionKey = `mahindra_${table}`;
     }
 
     if (!targetArray) return;
@@ -262,6 +267,12 @@ function handleRealtimePayload(schema: string, payload: any) {
         targetArray.splice(idx, 1);
       }
     }
+
+    // Persist to offline IndexedDB partition
+    if (partitionKey) {
+      idbStore.set('cache_partitions', partitionKey, targetArray);
+    }
+    egressTracker.recordRealtimeDelta(250);
 
     db.notify();
   } finally {
@@ -335,19 +346,23 @@ export const db = {
           ]);
           if (usersRes.data) {
             cache.users = usersRes.data.map(scrubRow) as User[];
+            idbStore.set('cache_partitions', 'public_users', cache.users);
           }
           if (customersRes.data) {
             cache.customers = customersRes.data.map(scrubRow) as Customer[];
+            idbStore.set('cache_partitions', 'public_customers', cache.customers);
           }
           if (logsRes.data) {
             cache.transaction_logs = logsRes.data.map(scrubRow) as TransactionLog[];
+            idbStore.set('cache_partitions', 'public_logs', cache.transaction_logs);
           }
           lastPublicFetchTime = now;
         } catch (err) {
           console.error("[Refresh Engine] Error refreshing public tables:", err);
         }
       } else {
-        console.log("[Refresh Engine] Using cached public tables (active within 1m)");
+        console.log("[Refresh Engine] Using cached public tables (active within 5m)");
+        egressTracker.recordCacheHit();
       }
 
       if (brand) {
@@ -371,6 +386,24 @@ export const db = {
     try {
       initLocalFallback();
       
+      // Fast hydration from IndexedDB for zero-egress initial UI render
+      try {
+        const [cachedUsers, cachedCustomers, cachedLogs] = await Promise.all([
+          idbStore.get<User[]>('cache_partitions', 'public_users'),
+          idbStore.get<Customer[]>('cache_partitions', 'public_customers'),
+          idbStore.get<TransactionLog[]>('cache_partitions', 'public_logs')
+        ]);
+        if (cachedUsers && cachedUsers.length > 0) cache.users = cachedUsers;
+        if (cachedCustomers && cachedCustomers.length > 0) cache.customers = cachedCustomers;
+        if (cachedLogs && cachedLogs.length > 0) cache.transaction_logs = cachedLogs;
+        if (cachedUsers || cachedCustomers) {
+          egressTracker.recordCacheHit();
+          db.notify();
+        }
+      } catch (idbErr) {
+        console.warn("[Egress Hydration IDB Warning]:", idbErr);
+      }
+
       if (!isSupabaseConfigured || !supabase) {
         connectionStatus = 'failed';
         connectionError = 'VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are missing. Please add them inside environmental secrets in your workspace configuration settings.';
@@ -427,6 +460,11 @@ export const db = {
         cache.users = (usersData || []).map(scrubRow) as User[];
         cache.customers = (customersData || []).map(scrubRow) as Customer[];
         cache.transaction_logs = (logsData || []).map(scrubRow) as TransactionLog[];
+
+        // Asynchronously persist to IndexedDB
+        idbStore.set('cache_partitions', 'public_users', cache.users);
+        idbStore.set('cache_partitions', 'public_customers', cache.customers);
+        idbStore.set('cache_partitions', 'public_logs', cache.transaction_logs);
 
         // Check live Supabase Auth session from the parallel auth result
         const session = (sessionRes as any).data?.session;
@@ -572,11 +610,46 @@ export const db = {
       console.log(`[User Active Diagnostic] User email requested access: ${activeUser?.email || "No session email"}`);
       diagnosticStats.activeUserEmail = activeUser?.email || null;
 
+      // 0. ZERO-EGRESS HYDRATION: Hydrate active brand immediately from IndexedDB cache if in-memory list is empty
+      if (cache[b].inventory.length === 0) {
+        try {
+          const [cInv, cSales, cSaleItems, cReturns, cPurchases, cPItems, cBulk, cMrp] = await Promise.all([
+            idbStore.get<InventoryItem[]>('cache_partitions', `${b}_inventory`),
+            idbStore.get<Sale[]>('cache_partitions', `${b}_sales`),
+            idbStore.get<SaleItem[]>('cache_partitions', `${b}_sale_items`),
+            idbStore.get<ReturnRecord[]>('cache_partitions', `${b}_returns`),
+            idbStore.get<Purchase[]>('cache_partitions', `${b}_purchases`),
+            idbStore.get<PurchaseItem[]>('cache_partitions', `${b}_purchase_items`),
+            idbStore.get<BulkUpdateHistory[]>('cache_partitions', `${b}_bulk`),
+            idbStore.get<MRPHistory[]>('cache_partitions', `${b}_mrp`)
+          ]);
+          if (cInv && cInv.length > 0) cache[b].inventory = cInv;
+          if (cSales && cSales.length > 0) cache[b].sales = cSales;
+          if (cSaleItems && cSaleItems.length > 0) cache[b].sale_items = cSaleItems;
+          if (cReturns && cReturns.length > 0) cache[b].returns = cReturns;
+          if (cPurchases && cPurchases.length > 0) cache[b].purchases = cPurchases;
+          if (cPItems && cPItems.length > 0) cache[b].purchase_items = cPItems;
+          if (cBulk && cBulk.length > 0) cache[b].bulk_update_history = cBulk;
+          if (cMrp && cMrp.length > 0) cache[b].mrp_history = cMrp;
+
+          if (cInv && cInv.length > 0) {
+            diagnosticStats.inventoryTest = { success: true, error: null };
+            if (b === 'hyundai') diagnosticStats.hyundaiInventoryOk = true;
+            else diagnosticStats.mahindraInventoryOk = true;
+            egressTracker.recordCacheHit();
+            db.notify();
+          }
+        } catch (idbErr) {
+          console.warn("[Egress Hydration IDB Error]:", idbErr);
+        }
+      }
+
       const now = Date.now();
       const shouldFetchBrand = force || (now - lastBrandFetchTime[b] >= CACHE_STALE_MS);
 
       if (!shouldFetchBrand) {
-        console.log(`[Cache Engine] Using cached brand data for ${brand} (active within 1m)`);
+        console.log(`[Cache Engine] Using cached brand data for ${brand} (active within 5m)`);
+        egressTracker.recordCacheHit();
         
         // Ensure realtime subscription is active for the current brand even if cached
         if (isSupabaseConfigured && supabase) {
@@ -627,92 +700,150 @@ export const db = {
             activeBrandChannel = null;
           }
 
-          // 1. INVENTORY ACCESS CHECK - OPTIMIZED PARALLEL RANGE FETCH TO BYPASS POSTGREST 1000 ROW LIMIT
-          console.log(`[Query Diagnostic] Running inventory select for schema: ${b}`);
+          // 1. INVENTORY ACCESS CHECK - EGRESS-OPTIMIZED DELTA SYNC
+          console.log(`[Query Diagnostic] Running inventory query for schema: ${b}`);
           
           let bInv: any[] = [];
           let errInv: any = null;
-          
-          try {
-            const { count, error: countErr } = await supabase
-              .schema(b)
-              .from('inventory')
-              .select('id', { count: 'exact', head: true });
-              
-            if (countErr) {
-              errInv = countErr;
-            } else {
-              const totalRows = count || 0;
-              console.log(`[Optimized Sync] Found total ${totalRows} parts in '${b}.inventory'. Initiating parallel range downloads...`);
-              
-              if (totalRows === 0) {
-                bInv = [];
-              } else {
-                const pageSize = 1000;
-                const pages = Math.ceil(totalRows / pageSize);
-                const rangePromises = [];
-                
-                for (let i = 0; i < pages; i++) {
-                  const from = i * pageSize;
-                  const to = (i + 1) * pageSize - 1;
-                  rangePromises.push(
-                    supabase.schema(b).from('inventory')
-                      .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at')
-                      .range(from, to)
-                  );
-                }
-                
-                const rangeResults = await Promise.all(rangePromises);
-                for (const res of rangeResults) {
-                  if (res.error) {
-                    errInv = res.error;
-                    break;
+          let deltaSyncSuccess = false;
+
+          const lastSyncTimestamp = await idbStore.get<string>('sync_metadata', `${b}_inventory_synced_at`);
+
+          // Attempt Delta Sync if we already have parts cached in memory or IDB
+          if (!force && lastSyncTimestamp && cache[b].inventory.length > 0) {
+            console.log(`[Egress Optimizer] Executing Delta Sync for ${b}.inventory (fetching parts modified after ${lastSyncTimestamp})...`);
+            try {
+              const { data: deltaData, error: deltaErr } = await supabase
+                .schema(b)
+                .from('inventory')
+                .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at')
+                .gt('updated_at', lastSyncTimestamp);
+
+              if (!deltaErr && deltaData) {
+                deltaSyncSuccess = true;
+                if (deltaData.length > 0) {
+                  const deltaMap = new Map(deltaData.map(d => [d.id, scrubRow(d)]));
+                  const updatedInv = cache[b].inventory.map(item => deltaMap.get(item.id) || item);
+                  const existingIds = new Set(cache[b].inventory.map(item => item.id));
+                  for (const d of deltaData) {
+                    if (!existingIds.has(d.id)) {
+                      updatedInv.unshift(scrubRow(d));
+                    }
                   }
-                  if (res.data) {
-                    bInv = bInv.concat(res.data);
+                  cache[b].inventory = updatedInv;
+                  const estimatedFullBytes = (updatedInv.length || 500) * 220;
+                  const deltaBytes = deltaData.length * 220;
+                  egressTracker.recordDatabaseDeltaSync(estimatedFullBytes, deltaBytes, deltaData.length, updatedInv.length);
+                  console.log(`[Egress Optimizer] Delta sync applied: ${deltaData.length} modified parts. Egress saved: ~${egressTracker.formatBytes(estimatedFullBytes - deltaBytes)}`);
+                } else {
+                  const estimatedFullBytes = cache[b].inventory.length * 220;
+                  egressTracker.recordAvoidedFullFetch(estimatedFullBytes);
+                  console.log(`[Egress Optimizer] 0 parts modified since last sync. Full download skipped! Saved: ~${egressTracker.formatBytes(estimatedFullBytes)}`);
+                }
+
+                const syncNow = new Date().toISOString();
+                idbStore.set('sync_metadata', `${b}_inventory_synced_at`, syncNow);
+                idbStore.set('cache_partitions', `${b}_inventory`, cache[b].inventory);
+                diagnosticStats.inventoryTest = { success: true, error: null };
+                if (b === 'hyundai') {
+                  diagnosticStats.hyundaiInventoryOk = true;
+                  diagnosticStats.hyundaiInventoryError = null;
+                } else {
+                  diagnosticStats.mahindraInventoryOk = true;
+                  diagnosticStats.mahindraInventoryError = null;
+                }
+                clearSchemaError(b, 'inventory');
+              }
+            } catch (deltaExc) {
+              console.warn("[Egress Optimizer] Delta sync failed, falling back to full range query:", deltaExc);
+            }
+          }
+
+          // Fallback to full range download if delta sync was not applicable or failed
+          if (!deltaSyncSuccess) {
+            try {
+              const { count, error: countErr } = await supabase
+                .schema(b)
+                .from('inventory')
+                .select('id', { count: 'exact', head: true });
+                
+              if (countErr) {
+                errInv = countErr;
+              } else {
+                const totalRows = count || 0;
+                console.log(`[Optimized Sync] Found total ${totalRows} parts in '${b}.inventory'. Initiating parallel range downloads...`);
+                
+                if (totalRows === 0) {
+                  bInv = [];
+                } else {
+                  const pageSize = 1000;
+                  const pages = Math.ceil(totalRows / pageSize);
+                  const rangePromises = [];
+                  
+                  for (let i = 0; i < pages; i++) {
+                    const from = i * pageSize;
+                    const to = (i + 1) * pageSize - 1;
+                    rangePromises.push(
+                      supabase.schema(b).from('inventory')
+                        .select('id, part_no, part_name, quantity, hsn, mrp, brand, is_active, archived_at, created_at, updated_at')
+                        .range(from, to)
+                    );
+                  }
+                  
+                  const rangeResults = await Promise.all(rangePromises);
+                  for (const res of rangeResults) {
+                    if (res.error) {
+                      errInv = res.error;
+                      break;
+                    }
+                    if (res.data) {
+                      bInv = bInv.concat(res.data);
+                    }
                   }
                 }
               }
+            } catch (fetchExc: any) {
+              errInv = fetchExc;
             }
-          } catch (fetchExc: any) {
-            errInv = fetchExc;
+
+            if (errInv) {
+              const category = getErrorCategory(errInv.code, errInv.message);
+              console.error(`❌ [${category}] Schema: ${b}, Table: inventory, Error: ${errInv.message}`, errInv);
+              reportSupabaseError(b, 'inventory', 'select', errInv.message, errInv.code);
+              diagnosticStats.inventoryTest = { success: false, error: errInv.message };
+              
+              if (b === 'hyundai') {
+                diagnosticStats.hyundaiInventoryOk = false;
+                diagnosticStats.hyundaiInventoryError = errInv.message;
+              } else {
+                diagnosticStats.mahindraInventoryOk = false;
+                diagnosticStats.mahindraInventoryError = errInv.message;
+              }
+              cache[b].inventory = [];
+            } else {
+              console.log(`✅ [Query Result] Schema: ${b}, Table: inventory, Count: ${bInv?.length || 0}`);
+              diagnosticStats.inventoryTest = { success: true, error: null };
+              
+              if (b === 'hyundai') {
+                diagnosticStats.hyundaiInventoryOk = true;
+                diagnosticStats.hyundaiInventoryError = null;
+              } else {
+                diagnosticStats.mahindraInventoryOk = true;
+                diagnosticStats.mahindraInventoryError = null;
+              }
+              clearSchemaError(b, 'inventory');
+              cache[b].inventory = (bInv || []).map(scrubRow);
+              idbStore.set('cache_partitions', `${b}_inventory`, cache[b].inventory);
+              idbStore.set('sync_metadata', `${b}_inventory_synced_at`, new Date().toISOString());
+            }
           }
 
-          if (errInv) {
-            const category = getErrorCategory(errInv.code, errInv.message);
-            console.error(`❌ [${category}] Schema: ${b}, Table: inventory, Error: ${errInv.message}`, errInv);
-            reportSupabaseError(b, 'inventory', 'select', errInv.message, errInv.code);
-            diagnosticStats.inventoryTest = { success: false, error: errInv.message };
-            
-            if (b === 'hyundai') {
-              diagnosticStats.hyundaiInventoryOk = false;
-              diagnosticStats.hyundaiInventoryError = errInv.message;
-            } else {
-              diagnosticStats.mahindraInventoryOk = false;
-              diagnosticStats.mahindraInventoryError = errInv.message;
-            }
-            // Do not use local fallback data if query fails
-            cache[b].inventory = [];
-          } else {
-            console.log(`✅ [Query Result] Schema: ${b}, Table: inventory, Count: ${bInv?.length || 0}`);
-            diagnosticStats.inventoryTest = { success: true, error: null };
-            
-            if (b === 'hyundai') {
-              diagnosticStats.hyundaiInventoryOk = true;
-              diagnosticStats.hyundaiInventoryError = null;
-            } else {
-              diagnosticStats.mahindraInventoryOk = true;
-              diagnosticStats.mahindraInventoryError = null;
-            }
-            clearSchemaError(b, 'inventory');
-            cache[b].inventory = (bInv || []).map(scrubRow);
-          }
-
-          // 2. SALES ACCESS CHECK
+          // 2. SALES ACCESS CHECK (Egress bounded query to active working window)
           console.log(`[Query Diagnostic] Running sales select for schema: ${b}`);
           const { data: bSales, error: errSales } = await supabase.schema(b).from('sales')
             .select('id, customer_id, customer_name, customer_category, sale_date, subtotal, discount_percentage, discount_amount, total_amount, payment_status, paid_amount, pending_amount, created_by, created_at')
-            .order('created_at', { ascending: false });
+            .order('created_at', { ascending: false })
+            .limit(250);
           if (errSales) {
             const category = getErrorCategory(errSales.code, errSales.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: sales, Error: ${errSales.message}`, errSales);
@@ -724,12 +855,23 @@ export const db = {
             diagnosticStats.salesTest = { success: true, error: null };
             clearSchemaError(b, 'sales');
             cache[b].sales = (bSales || []).map(scrubRow);
+            idbStore.set('cache_partitions', `${b}_sales`, cache[b].sales);
           }
 
-          // 3. SALE ITEMS ACCESS CHECK
+          // 3. SALE ITEMS ACCESS CHECK (Egress bounded to active/recent sales)
           console.log(`[Query Diagnostic] Running sale_items select for schema: ${b}`);
-          const { data: bSaleItems, error: errSalesItems } = await supabase.schema(b).from('sale_items')
-            .select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, final_amount, returned_quantity, created_at');
+          const recentSaleIds = (bSales || []).map(s => s.id);
+          let bSaleItems: any[] = [];
+          let errSalesItems: any = null;
+          
+          if (recentSaleIds.length > 0) {
+            const { data: sItemsData, error: sItemsErr } = await supabase.schema(b).from('sale_items')
+              .select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, final_amount, returned_quantity, created_at')
+              .in('sale_id', recentSaleIds.slice(0, 150));
+            bSaleItems = sItemsData || [];
+            errSalesItems = sItemsErr;
+          }
+
           if (errSalesItems) {
             const category = getErrorCategory(errSalesItems.code, errSalesItems.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: sale_items, Error: ${errSalesItems.message}`, errSalesItems);
@@ -739,13 +881,15 @@ export const db = {
             console.log(`✅ [Query Result] Schema: ${b}, Table: sale_items, Count: ${bSaleItems?.length || 0}`);
             clearSchemaError(b, 'sale_items');
             cache[b].sale_items = (bSaleItems || []).map(scrubRow);
+            idbStore.set('cache_partitions', `${b}_sale_items`, cache[b].sale_items);
           }
 
-          // 4. RETURNS ACCESS CHECK
+          // 4. RETURNS ACCESS CHECK (Egress bounded)
           console.log(`[Query Diagnostic] Running returns select for schema: ${b}`);
           const { data: bReturns, error: errReturns } = await supabase.schema(b).from('returns')
             .select('id, sale_id, sale_item_id, customer_id, part_no, part_name, returned_quantity, refund_amount, return_date, created_by')
-            .order('return_date', { ascending: false });
+            .order('return_date', { ascending: false })
+            .limit(200);
           if (errReturns) {
             const category = getErrorCategory(errReturns.code, errReturns.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: returns, Error: ${errReturns.message}`, errReturns);
@@ -755,9 +899,10 @@ export const db = {
             console.log(`✅ [Query Result] Schema: ${b}, Table: returns, Count: ${bReturns?.length || 0}`);
             clearSchemaError(b, 'returns');
             cache[b].returns = (bReturns || []).map(scrubRow);
+            idbStore.set('cache_partitions', `${b}_returns`, cache[b].returns);
           }
 
-          // 4b. RETURNS DIAGNOCTICS ACCESS CHECK (Requirement 5)
+          // 4b. RETURNS DIAGNOSTICS ACCESS CHECK
           console.log(`[Query Diagnostic] Running returns diagnostic select for schema: ${b}`);
           const { error: errReturnsDiag } = await supabase
             .schema(b)
@@ -771,11 +916,12 @@ export const db = {
             diagnosticStats.returnsTest = { success: true, error: null };
           }
 
-          // 5. PURCHASES ACCESS CHECK
+          // 5. PURCHASES ACCESS CHECK (Egress bounded)
           console.log(`[Query Diagnostic] Running purchases select for schema: ${b}`);
           const { data: bPurchases, error: errPurchases } = await supabase.schema(b).from('purchases')
             .select('id, dealer_name, invoice_no, invoice_date, subtotal, dealer_discount_percentage, discount_amount, total_after_discount, scan_source, created_by, created_at')
-            .order('created_at', { ascending: false });
+            .order('created_at', { ascending: false })
+            .limit(200);
           if (errPurchases) {
             const category = getErrorCategory(errPurchases.code, errPurchases.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: purchases, Error: ${errPurchases.message}`, errPurchases);
@@ -787,12 +933,23 @@ export const db = {
             diagnosticStats.purchaseTest = { success: true, error: null };
             clearSchemaError(b, 'purchases');
             cache[b].purchases = (bPurchases || []).map(scrubRow);
+            idbStore.set('cache_partitions', `${b}_purchases`, cache[b].purchases);
           }
 
-          // 6. PURCHASE ITEMS ACCESS CHECK
+          // 6. PURCHASE ITEMS ACCESS CHECK (Egress bounded to active/recent purchases)
           console.log(`[Query Diagnostic] Running purchase_items select for schema: ${b}`);
-          const { data: bPItems, error: errPItems } = await supabase.schema(b).from('purchase_items')
-            .select('id, purchase_id, part_no, part_name, hsn, quantity, mrp, is_new_part, matched_inventory, created_at');
+          const recentPurchaseIds = (bPurchases || []).map(p => p.id);
+          let bPItems: any[] = [];
+          let errPItems: any = null;
+
+          if (recentPurchaseIds.length > 0) {
+            const { data: pItemsData, error: pItemsErr } = await supabase.schema(b).from('purchase_items')
+              .select('id, purchase_id, part_no, part_name, hsn, quantity, mrp, is_new_part, matched_inventory, created_at')
+              .in('purchase_id', recentPurchaseIds.slice(0, 150));
+            bPItems = pItemsData || [];
+            errPItems = pItemsErr;
+          }
+
           if (errPItems) {
             const category = getErrorCategory(errPItems.code, errPItems.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: purchase_items, Error: ${errPItems.message}`, errPItems);
@@ -802,13 +959,15 @@ export const db = {
             console.log(`✅ [Query Result] Schema: ${b}, Table: purchase_items, Count: ${bPItems?.length || 0}`);
             clearSchemaError(b, 'purchase_items');
             cache[b].purchase_items = (bPItems || []).map(scrubRow);
+            idbStore.set('cache_partitions', `${b}_purchase_items`, cache[b].purchase_items);
           }
 
-          // 7. BULK UPDATE HISTORY ACCESS CHECK
+          // 7. BULK UPDATE HISTORY ACCESS CHECK (Egress bounded)
           console.log(`[Query Diagnostic] Running bulk_update_history select for schema: ${b}`);
           const { data: bBulk, error: errBulk } = await supabase.schema(b).from('bulk_update_history')
             .select('id, update_type, file_name, total_rows, success_rows, failed_rows, created_by, created_at, can_undo')
-            .order('created_at', { ascending: false });
+            .order('created_at', { ascending: false })
+            .limit(50);
           if (errBulk) {
             const category = getErrorCategory(errBulk.code, errBulk.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: bulk_update_history, Error: ${errBulk.message}`, errBulk);
@@ -820,13 +979,15 @@ export const db = {
             diagnosticStats.bulkUpdateHistoryTest = { success: true, error: null };
             clearSchemaError(b, 'bulk_update_history');
             cache[b].bulk_update_history = (bBulk || []).map(scrubRow);
+            idbStore.set('cache_partitions', `${b}_bulk`, cache[b].bulk_update_history);
           }
 
-          // 8. MRP HISTORY ACCESS CHECK
+          // 8. MRP HISTORY ACCESS CHECK (Egress bounded)
           console.log(`[Query Diagnostic] Running mrp_history select for schema: ${b}`);
           const { data: bMrp, error: errMrp } = await supabase.schema(b).from('mrp_history')
             .select('id, part_no, old_mrp, new_mrp, changed_by, changed_at')
-            .order('changed_at', { ascending: false });
+            .order('changed_at', { ascending: false })
+            .limit(150);
           if (errMrp) {
             const category = getErrorCategory(errMrp.code, errMrp.message);
             console.error(`❌ [${category}] Schema: ${b}, Table: mrp_history, Error: ${errMrp.message}`, errMrp);
@@ -838,6 +999,7 @@ export const db = {
             diagnosticStats.mrpHistoryTest = { success: true, error: null };
             clearSchemaError(b, 'mrp_history');
             cache[b].mrp_history = (bMrp || []).map(scrubRow);
+            idbStore.set('cache_partitions', `${b}_mrp`, cache[b].mrp_history);
           }
 
           // Subscribing specifically to this active brand's schema channels
@@ -2538,5 +2700,34 @@ export const db = {
     } else {
       throw new Error("Supabase is not configured. Live database transactions are required.");
     }
+  },
+
+  // Egress optimization helpers
+  loadAllHistory: async (brand: Brand): Promise<void> => {
+    if (!isSupabaseConfigured || !supabase) return;
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    console.log(`[Egress Optimizer] Loading complete historical archive for ${brand}...`);
+    const [salesRes, purchasesRes, returnsRes] = await Promise.all([
+      supabase.schema(b).from('sales').select('*').order('created_at', { ascending: false }),
+      supabase.schema(b).from('purchases').select('*').order('created_at', { ascending: false }),
+      supabase.schema(b).from('returns').select('*').order('return_date', { ascending: false })
+    ]);
+    if (salesRes.data) cache[b].sales = salesRes.data.map(scrubRow);
+    if (purchasesRes.data) cache[b].purchases = purchasesRes.data.map(scrubRow);
+    if (returnsRes.data) cache[b].returns = returnsRes.data.map(scrubRow);
+    idbStore.set('cache_partitions', `${b}_sales`, cache[b].sales);
+    idbStore.set('cache_partitions', `${b}_purchases`, cache[b].purchases);
+    idbStore.set('cache_partitions', `${b}_returns`, cache[b].returns);
+    db.notify();
+  },
+
+  clearOfflineCache: async (): Promise<void> => {
+    await idbStore.clear('cache_partitions');
+    await idbStore.clear('sync_metadata');
+    console.log("[Egress Optimizer] Offline IndexedDB cache cleared.");
   }
 };
+
+export { egressTracker } from './lib/egressTracker';
+export { idbStore } from './lib/idbStore';
+

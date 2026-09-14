@@ -1,10 +1,17 @@
 import express from "express";
+import compression from "compression";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 
 dotenv.config();
 
 const app = express();
+
+// Enable gzip/deflate compression for all HTTP responses
+app.use(compression({
+  level: 6,
+  threshold: 512
+}));
 
 // Set up limit constraints
 app.use(express.json({ limit: "50mb" }));

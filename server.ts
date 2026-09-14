@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import compression from "compression";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 
@@ -7,6 +8,18 @@ dotenv.config();
 
 const app = express();
 const PORT = 3000;
+
+// Enable gzip/deflate compression for all HTTP responses to minimize egress data transfer
+app.use(compression({
+  level: 6,
+  threshold: 512, // Compress anything larger than 512 bytes
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) {
+      return false;
+    }
+    return compression.filter(req, res);
+  }
+}));
 
 // Increase limits to allow uploading raw base64 invoices/images
 app.use(express.json({ limit: "50mb" }));
@@ -275,7 +288,18 @@ async function bootServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, {
+      maxAge: "1d",
+      setHeaders: (res, filePath) => {
+        if (filePath.match(/\.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2)$/)) {
+          // Long-term immutable caching for hashed production assets to minimize egress
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        } else if (filePath.endsWith("index.html")) {
+          // HTML entry point: revalidate to get latest builds without wasting payload
+          res.setHeader("Cache-Control", "public, max-age=0, must-revalidate");
+        }
+      }
+    }));
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });

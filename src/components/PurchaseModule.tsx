@@ -1,9 +1,10 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Brand, User, ScanSource, Purchase, PurchaseItem, InventoryItem } from '../types';
 import { db } from '../dbStore';
+import { optimizeFileForEgress } from '../lib/imageOptimizer';
 import { 
   FileText, UploadCloud, Search, Calendar, CheckSquare, Sparkles, 
-  Trash2, Plus, X, Eye, FileSpreadsheet, ShieldAlert, BadgeInfo 
+  Trash2, Plus, X, Eye, FileSpreadsheet, ShieldAlert, BadgeInfo, Zap
 } from 'lucide-react';
 
 interface PurchaseModuleProps {
@@ -240,7 +241,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
     }, 1800);
   };
 
-  // Real scan processor with integrated fallback
+  // Real scan processor with integrated egress optimization & fallback
   const handleStartMultiAIScan = async () => {
     if (uploadedFiles.length === 0) {
       alert("No bills or pages selected for scanning. Please upload some files first.");
@@ -250,26 +251,27 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
     setScannedFilesLoaded(false);
 
     try {
-      const filesEncryptedPromises = uploadedFiles.map(item => {
-        return new Promise<{ fileBase64: string; mimeType: string; name: string }>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = (e) => {
-            const resultSrc = e.target?.result as string;
-            if (!resultSrc) {
-              reject(new Error(`Could not load context of file: ${item.file.name}`));
-              return;
-            }
-            const commaIdx = resultSrc.indexOf(',');
-            const fileBase64 = commaIdx > -1 ? resultSrc.substring(commaIdx + 1) : resultSrc;
-            const mimeType = item.file.type || "image/jpeg";
-            resolve({ fileBase64, mimeType, name: item.file.name });
-          };
-          reader.onerror = () => reject(new Error(`Error reading file: ${item.file.name}`));
-          reader.readAsDataURL(item.file);
-        });
-      });
+      console.log(`[Egress Optimizer] Pre-compressing ${uploadedFiles.length} file(s) on client before transmission...`);
+      const optimizationResults = await Promise.all(
+        uploadedFiles.map(item => optimizeFileForEgress(item.file, 1800, 0.82))
+      );
 
-      const processedFilesList = await Promise.all(filesEncryptedPromises);
+      const totalOriginalBytes = optimizationResults.reduce((acc, r) => acc + r.originalSize, 0);
+      const totalOptimizedBytes = optimizationResults.reduce((acc, r) => acc + r.optimizedSize, 0);
+      const egressSavedPct = totalOriginalBytes > 0 
+        ? Math.round(((totalOriginalBytes - totalOptimizedBytes) / totalOriginalBytes) * 100)
+        : 0;
+
+      if (egressSavedPct > 0) {
+        console.log(`[Egress Optimizer] Payload compressed: ${(totalOriginalBytes / (1024 * 1024)).toFixed(2)} MB -> ${(totalOptimizedBytes / (1024 * 1024)).toFixed(2)} MB (${egressSavedPct}% network egress saved)`);
+        triggerToast(`⚡ Egress Optimized: Reduced upload by ${egressSavedPct}% (~${((totalOriginalBytes - totalOptimizedBytes) / 1024).toFixed(0)} KB saved)`);
+      }
+
+      const processedFilesList = optimizationResults.map(r => ({
+        fileBase64: r.fileBase64,
+        mimeType: r.mimeType,
+        name: r.name
+      }));
 
       const requestHeaders = {
         "Content-Type": "application/json"
