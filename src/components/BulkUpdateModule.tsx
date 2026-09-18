@@ -23,6 +23,8 @@ interface ParsedBulkMRPRow {
 
 interface ParsedBulkStockRow {
   part_no: string;
+  part_name?: string;
+  hsn?: string;
   quantity: number;
   matched: boolean;
   current_qty?: number;
@@ -197,15 +199,23 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
             if (keys.length === 0) continue;
 
             const partKey = keys.find(k => 
-              /^(part[_\-\s]?no|part[_\-\s]?number|sku|item[_\-\s]?code|part_number|partno|part\s*no\.?)$/i.test(k.trim())
+              /^(part[_\-\s.]?no|part[_\-\s.]?number|sku|item[_\-\s.]?code|part_number|partno|part\s*no\.?)$/i.test(k.trim())
             ) || keys.find(k => /part/i.test(k.trim())) || keys[0];
 
+            const nameKey = keys.find(k => 
+              /^(part[_\-\s.]?name|item[_\-\s.]?name|partname|part\s*name|name|description|desc)$/i.test(k.trim())
+            );
+
+            const hsnKey = keys.find(k => 
+              /^(hsn|hsn[_\-\s.]?code|hsncode|hsn_code|hsn\s*code)$/i.test(k.trim())
+            );
+
             const qtyKey = keys.find(k => 
-              /^(quantity|qty|stock|count|new[_\-\s]?qty|new[_\-\s]?quantity|quantity_to_set|units|pcs|quantity\s*level)$/i.test(k.trim())
+              /^(quantity|qty|stock|count|new[_\-\s.]?qty|new[_\-\s.]?quantity|quantity_to_set|units|pcs|quantity\s*level)$/i.test(k.trim())
             );
 
             if (!qtyKey) {
-              throw new Error("Quantity column not detected. Please make sure your sheet has a 'Quantity' or 'Qty' column with valid header values.");
+              throw new Error("Quantity column not detected. Please make sure your sheet has a 'QUANTITY' or 'Qty' column with valid header values.");
             }
 
             const partNoVal = String(row[partKey] || '').trim().toUpperCase();
@@ -220,10 +230,15 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
               throw new Error(`Row ${i + 2}: Invalid Quantity value "${qtyValRaw}" for part "${partNoVal}". Quantity must be a non-negative integer.`);
             }
 
+            const partName = nameKey ? String(row[nameKey] || '').trim() : undefined;
+            const hsn = hsnKey ? String(row[hsnKey] || '').trim() : undefined;
+
             const existingItem = inventoryMap.get(partNoVal);
 
             parsed.push({
               part_no: partNoVal,
+              part_name: partName || existingItem?.part_name || 'New Spares Part',
+              hsn: hsn || existingItem?.hsn || '',
               quantity: qtyNum,
               matched: !!existingItem,
               current_qty: existingItem?.quantity
@@ -265,24 +280,26 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
       if (updateType === 'MRP') {
         filename = `${brand.toLowerCase()}_mrp_price_samples.xlsx`;
         data = brand === 'Hyundai' ? [
-          { 'Part No': 'HY-10023', 'Part Name': 'Hyundai Elite i20 Front Brake Pads', 'HSN': '87089900', 'MRP': 2600 },
-          { 'Part No': 'HY-20150', 'Part Name': 'Hyundai Grand i10 Air Filter', 'HSN': '87089900', 'MRP': 480 },
-          { 'Part No': 'HY-40992', 'Part Name': 'Hyundai Creta Oil Filter', 'HSN': '87089900', 'MRP': 320 }
+          { 'PART NO.': 'HY-10023', 'PART NAME': 'Hyundai Elite i20 Front Brake Pads', 'HSN': '87089900', 'MRP': 2600 },
+          { 'PART NO.': 'HY-20150', 'PART NAME': 'Hyundai Grand i10 Air Filter', 'HSN': '87089900', 'MRP': 480 },
+          { 'PART NO.': 'HY-40992', 'PART NAME': 'Hyundai Creta Oil Filter', 'HSN': '87089900', 'MRP': 320 }
         ] : [
-          { 'Part No': 'MA-10201', 'Part Name': 'Mahindra Scorpio S11 Front Brake Rotor', 'HSN': '87089900', 'MRP': 3600 },
-          { 'Part No': 'MA-20199', 'Part Name': 'Mahindra Thar Diesel Fuel Filter', 'HSN': '87089900', 'MRP': 1950 },
-          { 'Part No': 'MA-80024', 'Part Name': 'Mahindra Thar Cabin Air Pollen Filter', 'HSN': '87089900', 'MRP': 550 }
+          { 'PART NO.': 'MA-10201', 'PART NAME': 'Mahindra Scorpio S11 Front Brake Rotor', 'HSN': '87089900', 'MRP': 3600 },
+          { 'PART NO.': 'MA-20199', 'PART NAME': 'Mahindra Thar Diesel Fuel Filter', 'HSN': '87089900', 'MRP': 1950 },
+          { 'PART NO.': 'MA-80024', 'PART NAME': 'Mahindra Thar Cabin Air Pollen Filter', 'HSN': '87089900', 'MRP': 550 }
         ];
       } else {
-        filename = `${brand.toLowerCase()}_stock_levels_samples.xlsx`;
+        filename = `${brand.toLowerCase()}_inventory_stock_overwrite_samples.xlsx`;
         data = brand === 'Hyundai' ? [
-          { 'Part No': 'HY-10023', 'Quantity': 60 },
-          { 'Part No': 'HY-20150', 'Quantity': 150 },
-          { 'Part No': 'HY-30440', 'Quantity': 20 }
+          { 'PART NO.': 'HY-10023', 'PART NAME': 'Hyundai Elite i20 Front Brake Pads', 'HSN': '87089900', 'QUANTITY': 60 },
+          { 'PART NO.': 'HY-20150', 'PART NAME': 'Hyundai Grand i10 Air Filter', 'HSN': '87089900', 'QUANTITY': 150 },
+          { 'PART NO.': 'HY-40992', 'PART NAME': 'Hyundai Creta Oil Filter', 'HSN': '87089900', 'QUANTITY': 85 },
+          { 'PART NO.': 'HY-NEW01', 'PART NAME': 'Hyundai Verna Spark Plug (Sample New Part)', 'HSN': '85111000', 'QUANTITY': 40 }
         ] : [
-          { 'Part No': 'MA-10201', 'Quantity': 35 },
-          { 'Part No': 'MA-20199', 'Quantity': 65 },
-          { 'Part No': 'MA-30310', 'Quantity': 100 }
+          { 'PART NO.': 'MA-10201', 'PART NAME': 'Mahindra Scorpio S11 Front Brake Rotor', 'HSN': '87089900', 'QUANTITY': 35 },
+          { 'PART NO.': 'MA-20199', 'PART NAME': 'Mahindra Thar Diesel Fuel Filter', 'HSN': '87089900', 'QUANTITY': 65 },
+          { 'PART NO.': 'MA-80024', 'PART NAME': 'Mahindra Thar Cabin Air Pollen Filter', 'HSN': '87089900', 'QUANTITY': 50 },
+          { 'PART NO.': 'MA-NEW01', 'PART NAME': 'Mahindra Thar Headlamp Bulb (Sample New Part)', 'HSN': '85392120', 'QUANTITY': 30 }
         ];
       }
 
@@ -319,6 +336,8 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
 
         const payload = parsedStocks.map(row => ({
           part_no: row.part_no,
+          part_name: row.part_name,
+          hsn: row.hsn,
           quantity: row.quantity
         }));
 
@@ -361,12 +380,13 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
   const previewSummary = useMemo(() => {
     if (updateType === 'MRP') {
       const succ = parsedMRPs.length; 
-      const failed = 0; // matching code inserts unmatched too
-      return { total: parsedMRPs.length, success: succ, failed };
+      const matched = parsedMRPs.filter(r => r.matched).length;
+      const newParts = parsedMRPs.filter(r => !r.matched).length;
+      return { total: parsedMRPs.length, matched, newParts, success: succ, failed: 0 };
     } else {
-      const succ = parsedStocks.filter(r => r.matched).length;
-      const failed = parsedStocks.filter(r => !r.matched).length;
-      return { total: parsedStocks.length, success: succ, failed };
+      const matched = parsedStocks.filter(r => r.matched).length;
+      const newParts = parsedStocks.filter(r => !r.matched).length;
+      return { total: parsedStocks.length, matched, newParts, success: parsedStocks.length, failed: 0 };
     }
   }, [updateType, parsedMRPs, parsedStocks]);
 
@@ -461,7 +481,7 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
                 </p>
                 <p className="text-[10px] text-slate-450 mt-1">Supports Excel (.xlsx, .xls) and CSV</p>
                 <p className="text-[9px] text-indigo-650 font-bold mt-1.5 bg-indigo-50 px-2 py-0.5 rounded">
-                  Mode: {updateType === 'MRP' ? 'MRP Price Sheet' : 'Stock Levels Overwrite'}
+                  Mode: {updateType === 'MRP' ? 'MRP Price Sheet (PART NO., PART NAME, HSN, MRP)' : 'Stock Levels Overwrite (PART NO., PART NAME, HSN, QUANTITY)'}
                 </p>
               </div>
 
@@ -474,9 +494,14 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
                   </h4>
                   <p className="text-[11px] text-slate-550 leading-relaxed mt-1.5">
                     Download a pre-formatted Excel workbook containing correct headers: <span className="font-bold font-mono text-[9.5px] bg-white px-1.5 py-0.5 rounded border border-emerald-200 text-emerald-800">
-                      {updateType === 'MRP' ? 'Part No, Part Name, HSN, MRP' : 'Part No, Quantity'}
+                      {updateType === 'MRP' ? 'PART NO., PART NAME, HSN, MRP' : 'PART NO., PART NAME, HSN, QUANTITY'}
                     </span>. You can edit this sample file and drop it here to sync instantly.
                   </p>
+                  {updateType === 'Stock' && (
+                    <p className="text-[10.5px] text-emerald-800 mt-2 font-medium bg-emerald-100/60 px-2 py-1 rounded-lg">
+                      ✨ <strong>Auto-Add New Parts:</strong> Any new part present in the Excel sheet will automatically be created and added to your inventory!
+                    </p>
+                  )}
                 </div>
 
                 <button
@@ -509,14 +534,14 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
 
                 <div className="flex gap-2 text-[10px] font-bold">
                   <span className="bg-indigo-50 text-indigo-700 px-2 py-1 rounded">
-                    Rows: {previewSummary.total}
+                    Total Rows: {previewSummary.total}
                   </span>
                   <span className="bg-emerald-50 text-emerald-700 px-2 py-1 rounded">
-                    Correct matched: {previewSummary.success}
+                    Existing Parts: {previewSummary.matched}
                   </span>
-                  {previewSummary.failed > 0 && (
-                    <span className="bg-red-50 text-red-700 px-2 py-1 rounded">
-                      Unmatched actions: {previewSummary.failed}
+                  {previewSummary.newParts > 0 && (
+                    <span className="bg-blue-50 text-blue-700 px-2 py-1 rounded">
+                      + New Parts (Will Add): {previewSummary.newParts}
                     </span>
                   )}
                 </div>
@@ -529,16 +554,18 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
                     {updateType === 'MRP' ? (
                       <tr>
                         <th className="p-3">Status</th>
-                        <th className="p-3">Part No</th>
+                        <th className="p-3">Part No.</th>
                         <th className="p-3">Part Name</th>
                         <th className="p-3 text-right">Old MRP</th>
-                        <th className="p-3 text-right">New MRP (Overrite)</th>
+                        <th className="p-3 text-right">New MRP (Overwrite)</th>
                       </tr>
                     ) : (
                       <tr>
                         <th className="p-3">Status</th>
-                        <th className="p-3">Part No</th>
-                        <th className="p-3 text-center">Old Qty</th>
+                        <th className="p-3">Part No.</th>
+                        <th className="p-3">Part Name</th>
+                        <th className="p-3">HSN</th>
+                        <th className="p-3 text-center">Current Qty</th>
                         <th className="p-3 text-center">New Qty (Overwrite)</th>
                       </tr>
                     )}
@@ -551,7 +578,7 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
                             <span className={`inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold ${
                               row.matched ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
                             }`}>
-                              {row.matched ? 'Index Matched' : 'New Spares Part'}
+                              {row.matched ? 'Existing Part' : '+ New Spares Part'}
                             </span>
                           </td>
                           <td className="p-3 font-mono font-bold">{row.part_no}</td>
@@ -565,15 +592,19 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
                         <tr key={row.part_no} className="hover:bg-slate-50/50">
                           <td className="p-3">
                             <span className={`inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                              row.matched ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'
+                              row.matched ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'
                             }`}>
-                              {row.matched ? 'Part Found' : 'Error/New'}
+                              {row.matched ? 'Existing Part' : '+ New Part (Will Add)'}
                             </span>
                           </td>
-                          <td className="p-3 font-mono font-bold">{row.part_no}</td>
-                          <td className="p-3 text-center text-slate-400">{row.current_qty ?? '-'} units</td>
-                          <td className="p-3 text-center font-bold text-indigo-705">
-                            <span className={row.matched ? 'text-indigo-700' : 'text-red-500'}>
+                          <td className="p-3 font-mono font-bold text-slate-900">{row.part_no}</td>
+                          <td className="p-3 text-slate-600">{row.part_name || '-'}</td>
+                          <td className="p-3 font-mono text-slate-500 text-[11px]">{row.hsn || '-'}</td>
+                          <td className="p-3 text-center text-slate-400">
+                            {row.current_qty !== undefined ? `${row.current_qty} units` : '-'}
+                          </td>
+                          <td className="p-3 text-center font-bold">
+                            <span className={row.matched ? 'text-indigo-700' : 'text-blue-700'}>
                               {row.quantity} units
                             </span>
                           </td>
