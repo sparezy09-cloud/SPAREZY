@@ -22,8 +22,10 @@ import AttendanceModule from './components/AttendanceModule';
 import { 
   CarFront, LayoutDashboard, Layers, ShoppingBag, RotateCcw, 
   FileText, FileSpreadsheet, Users, Terminal, Shield, LogOut, Menu, X, CheckCircle,
-  AlertTriangle, RefreshCw, Download, Receipt, ClipboardList, CalendarCheck, History
+  AlertTriangle, RefreshCw, Download, Receipt, ClipboardList, CalendarCheck, History,
+  Wrench
 } from 'lucide-react';
+import { SupabasePermissionsFixModal } from './components/SupabasePermissionsFixModal';
 
 export default function App() {
   const [connectionStatus, setConnectionStatus] = useState<'checking' | 'connected' | 'failed'>('checking');
@@ -31,6 +33,7 @@ export default function App() {
   const [dbError, setDbError] = useState<{ schema: string; table: string; operation: string; message: string } | null>(null);
   const [schemaErrors, setSchemaErrors] = useState<Record<string, string>>({});
   const [realtimeStatus, setRealtimeStatus] = useState<'Checking' | 'Connected' | 'Disabled' | 'Failed'>('Checking');
+  const [isPermissionsFixModalOpen, setIsPermissionsFixModalOpen] = useState(false);
 
   // Brand selection
   const [activeBrand, setActiveBrand] = useState<Brand | null>(null);
@@ -685,24 +688,57 @@ export default function App() {
 
         {/* 3. WORKING MODULE BOX BODY WITH HIDDEN OVERFLOW FOR GEOMETRIC DISCIPLINE */}
         <main className="flex-1 w-full overflow-y-auto bg-[#F8FAFC]">
-          {Object.entries(schemaErrors).map(([key, errMsg]) => (
-            <div key={key} className="bg-rose-50 border-b border-rose-200 px-6 sm:px-8 py-3 flex items-center justify-between text-xs text-rose-800">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
-                <span>
-                  <strong>Configuration Error [{key}]:</strong> {errMsg}
-                </span>
+          {Object.keys(schemaErrors).length > 0 && (
+            <div className="bg-gradient-to-r from-rose-50 via-rose-100/70 to-indigo-50 border-b border-rose-200 px-6 sm:px-8 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs text-rose-950 shadow-sm">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-6 h-6 rounded-lg bg-rose-200/80 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-3.5 h-3.5 text-rose-700" />
+                </div>
+                <div className="leading-tight">
+                  <span className="font-bold text-rose-900">
+                    Database Permission Notice ({Object.keys(schemaErrors).length} tables affected):
+                  </span>{' '}
+                  <span className="text-slate-700 text-[11px]">
+                    Supabase PostgreSQL table permissions / RLS denied for {activeBrand || 'Hyundai'} schema ({Object.keys(schemaErrors).slice(0, 3).map(k => k.split('.')[1] || k).join(', ')}{Object.keys(schemaErrors).length > 3 ? '...' : ''}).
+                  </span>
+                </div>
               </div>
-              <button
-                onClick={() => {
-                  setActiveModule('Settings / User Management');
-                }}
-                className="text-indigo-600 hover:text-indigo-800 font-bold hover:underline cursor-pointer"
-              >
-                Inspect Diagnostics &amp; Solution
-              </button>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setIsPermissionsFixModalOpen(true)}
+                  className="bg-rose-600 hover:bg-rose-700 text-white font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 shadow-sm transition cursor-pointer"
+                >
+                  <Wrench className="w-3.5 h-3.5" />
+                  Fix Permissions (1-Click SQL)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveModule('Settings / User Management');
+                  }}
+                  className="text-indigo-700 hover:text-indigo-900 bg-white/80 border border-slate-200 font-semibold px-2.5 py-1.5 rounded-lg text-xs hover:bg-white transition cursor-pointer"
+                >
+                  Diagnostics
+                </button>
+                <button
+                  type="button"
+                  onClick={() => db.clearAllSchemaErrors()}
+                  className="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-white/60 transition cursor-pointer"
+                  title="Dismiss warning"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
-          ))}
+          )}
+
+          <SupabasePermissionsFixModal
+            isOpen={isPermissionsFixModalOpen}
+            onClose={() => setIsPermissionsFixModalOpen(false)}
+            schemaErrors={schemaErrors}
+            selectedBrand={activeBrand || 'Hyundai'}
+          />
           <div className="p-6 md:p-8 max-w-7xl mx-auto space-y-6">
             {renderModuleContent()}
           </div>

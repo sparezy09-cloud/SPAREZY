@@ -111,23 +111,35 @@ let activeSchemaErrors: Record<string, string> = {};
 
 export function getErrorCategory(code?: string, message?: string): string {
   const msg = (message || '').toLowerCase();
+  const c = String(code || '').toLowerCase();
   
-  if (code === '42501' || msg.includes('permission') || msg.includes('row-level security') || msg.includes('rls')) {
+  if (
+    c === '42501' || 
+    c === '401' || 
+    c === '403' || 
+    c === 'pgrst301' || 
+    msg.includes('permission') || 
+    msg.includes('row-level security') || 
+    msg.includes('rls') || 
+    msg.includes('access denied') || 
+    msg.includes('not permitted') || 
+    msg.includes('forbidden')
+  ) {
     return 'Permission/RLS error';
   }
-  if (code === '42703' || msg.includes('column') && msg.includes('does not exist')) {
+  if (c === '42703' || msg.includes('column') && msg.includes('does not exist')) {
     return 'Database column mismatch: column does not exist';
   }
-  if (code === '42P01' || msg.includes('relation') && msg.includes('does not exist')) {
+  if (c === '42p01' || msg.includes('relation') && msg.includes('does not exist')) {
     return 'Missing table';
   }
-  if (code === 'PGRST106' || msg.includes('schema') && msg.includes('not exposed')) {
+  if (c === 'pgrst106' || msg.includes('schema') && msg.includes('not exposed')) {
     return 'Schema not exposed';
   }
-  if (code === '23505' || msg.includes('duplicate key') || msg.includes('already exists')) {
+  if (c === '23505' || msg.includes('duplicate key') || msg.includes('already exists')) {
     return 'Duplicate value';
   }
-  if (code === '23503' || msg.includes('foreign key constraint')) {
+  if (c === '23503' || msg.includes('foreign key constraint')) {
     return 'Foreign key error';
   }
   return 'Database operation error';
@@ -153,14 +165,15 @@ let diagnosticStats = {
   realtimeStatus: (isSupabaseConfigured ? 'Checking' : 'Disabled') as 'Checking' | 'Connected' | 'Disabled' | 'Failed',
 };
 
-export function reportSupabaseError(schema: string, table: string, operation: string, message: string, code?: string) {
-  const category = getErrorCategory(code, message);
+export function reportSupabaseError(schema: string, table: string, operation: string, message?: string, code?: string) {
+  const cleanMsg = (message && message.trim()) || 'Permission denied or database access error';
+  const category = getErrorCategory(code, cleanMsg);
   
-  let mappedMessage = message;
+  let mappedMessage = cleanMsg;
   if (category === 'Database column mismatch: column does not exist') {
-    mappedMessage = `Database column mismatch: column does not exist (Original: ${message})`;
+    mappedMessage = `Database column mismatch: column does not exist (Original: ${cleanMsg})`;
   } else {
-    mappedMessage = `${category}: ${message}`;
+    mappedMessage = `${category}: ${cleanMsg}`;
   }
 
   const errPayload = { schema, table, operation, message: mappedMessage };
@@ -187,6 +200,12 @@ export function clearSchemaError(schema: string, table: string) {
       lastError = null;
     }
   }
+}
+
+export function clearAllSchemaErrors() {
+  activeSchemaErrors = {};
+  lastError = null;
+  db.notify();
 }
 
 // Initialize fallback structures in localStorage to protect against missing credentials
@@ -332,6 +351,7 @@ export const db = {
     db.notify();
   },
   getActiveSchemaErrors: () => activeSchemaErrors,
+  clearAllSchemaErrors: () => clearAllSchemaErrors(),
   getDiagnostics: () => diagnosticStats,
   isSupabaseConfigured: () => isSupabaseConfigured,
   isInventoryAccessSuccessful: (brand: Brand): boolean => {
@@ -888,19 +908,20 @@ export const db = {
             }
 
             if (errInv) {
-              const category = getErrorCategory(errInv.code, errInv.message);
-              console.error(`❌ [${category}] Schema: ${b}, Table: inventory, Error: ${errInv.message}`, errInv);
-              reportSupabaseError(b, 'inventory', 'select', errInv.message, errInv.code);
-              diagnosticStats.inventoryTest = { success: false, error: errInv.message };
+              const errMessage = errInv.message || errInv.details || errInv.hint || 'Permission denied for table inventory';
+              const category = getErrorCategory(errInv.code, errMessage);
+              console.error(`❌ [${category}] Schema: ${b}, Table: inventory, Error: ${errMessage}`, errInv);
+              reportSupabaseError(b, 'inventory', 'select', errMessage, errInv.code);
+              diagnosticStats.inventoryTest = { success: false, error: errMessage };
               
               if (b === 'hyundai') {
                 diagnosticStats.hyundaiInventoryOk = false;
-                diagnosticStats.hyundaiInventoryError = errInv.message;
+                diagnosticStats.hyundaiInventoryError = errMessage;
               } else {
                 diagnosticStats.mahindraInventoryOk = false;
-                diagnosticStats.mahindraInventoryError = errInv.message;
+                diagnosticStats.mahindraInventoryError = errMessage;
               }
-              cache[b].inventory = [];
+              if (!cache[b].inventory) cache[b].inventory = [];
             } else {
               console.log(`✅ [Query Result] Schema: ${b}, Table: inventory, Count: ${bInv?.length || 0}`);
               diagnosticStats.inventoryTest = { success: true, error: null };
@@ -926,11 +947,12 @@ export const db = {
             .order('created_at', { ascending: false })
             .limit(250);
           if (errSales) {
-            const category = getErrorCategory(errSales.code, errSales.message);
-            console.error(`❌ [${category}] Schema: ${b}, Table: sales, Error: ${errSales.message}`, errSales);
-            reportSupabaseError(b, 'sales', 'select', errSales.message, errSales.code);
-            diagnosticStats.salesTest = { success: false, error: errSales.message };
-            cache[b].sales = [];
+            const errMessage = errSales.message || errSales.details || errSales.hint || 'Permission denied for table sales';
+            const category = getErrorCategory(errSales.code, errMessage);
+            console.error(`❌ [${category}] Schema: ${b}, Table: sales, Error: ${errMessage}`, errSales);
+            reportSupabaseError(b, 'sales', 'select', errMessage, errSales.code);
+            diagnosticStats.salesTest = { success: false, error: errMessage };
+            if (!cache[b].sales) cache[b].sales = [];
           } else {
             console.log(`✅ [Query Result] Schema: ${b}, Table: sales, Count: ${bSales?.length || 0}`);
             diagnosticStats.salesTest = { success: true, error: null };
@@ -954,10 +976,11 @@ export const db = {
           }
 
           if (errSalesItems) {
-            const category = getErrorCategory(errSalesItems.code, errSalesItems.message);
-            console.error(`❌ [${category}] Schema: ${b}, Table: sale_items, Error: ${errSalesItems.message}`, errSalesItems);
-            reportSupabaseError(b, 'sale_items', 'select', errSalesItems.message, errSalesItems.code);
-            cache[b].sale_items = [];
+            const errMessage = errSalesItems.message || errSalesItems.details || errSalesItems.hint || 'Permission denied for table sale_items';
+            const category = getErrorCategory(errSalesItems.code, errMessage);
+            console.error(`❌ [${category}] Schema: ${b}, Table: sale_items, Error: ${errMessage}`, errSalesItems);
+            reportSupabaseError(b, 'sale_items', 'select', errMessage, errSalesItems.code);
+            if (!cache[b].sale_items) cache[b].sale_items = [];
           } else {
             console.log(`✅ [Query Result] Schema: ${b}, Table: sale_items, Count: ${bSaleItems?.length || 0}`);
             clearSchemaError(b, 'sale_items');
@@ -972,10 +995,11 @@ export const db = {
             .order('return_date', { ascending: false })
             .limit(200);
           if (errReturns) {
-            const category = getErrorCategory(errReturns.code, errReturns.message);
-            console.error(`❌ [${category}] Schema: ${b}, Table: returns, Error: ${errReturns.message}`, errReturns);
-            reportSupabaseError(b, 'returns', 'select', errReturns.message, errReturns.code);
-            cache[b].returns = [];
+            const errMessage = errReturns.message || errReturns.details || errReturns.hint || 'Permission denied for table returns';
+            const category = getErrorCategory(errReturns.code, errMessage);
+            console.error(`❌ [${category}] Schema: ${b}, Table: returns, Error: ${errMessage}`, errReturns);
+            reportSupabaseError(b, 'returns', 'select', errMessage, errReturns.code);
+            if (!cache[b].returns) cache[b].returns = [];
           } else {
             console.log(`✅ [Query Result] Schema: ${b}, Table: returns, Count: ${bReturns?.length || 0}`);
             clearSchemaError(b, 'returns');
@@ -1004,11 +1028,12 @@ export const db = {
             .order('created_at', { ascending: false })
             .limit(200);
           if (errPurchases) {
-            const category = getErrorCategory(errPurchases.code, errPurchases.message);
-            console.error(`❌ [${category}] Schema: ${b}, Table: purchases, Error: ${errPurchases.message}`, errPurchases);
-            reportSupabaseError(b, 'purchases', 'select', errPurchases.message, errPurchases.code);
-            diagnosticStats.purchaseTest = { success: false, error: errPurchases.message };
-            cache[b].purchases = [];
+            const errMessage = errPurchases.message || errPurchases.details || errPurchases.hint || 'Permission denied for table purchases';
+            const category = getErrorCategory(errPurchases.code, errMessage);
+            console.error(`❌ [${category}] Schema: ${b}, Table: purchases, Error: ${errMessage}`, errPurchases);
+            reportSupabaseError(b, 'purchases', 'select', errMessage, errPurchases.code);
+            diagnosticStats.purchaseTest = { success: false, error: errMessage };
+            if (!cache[b].purchases) cache[b].purchases = [];
           } else {
             console.log(`✅ [Query Result] Schema: ${b}, Table: purchases, Count: ${bPurchases?.length || 0}`);
             diagnosticStats.purchaseTest = { success: true, error: null };
@@ -1032,10 +1057,11 @@ export const db = {
           }
 
           if (errPItems) {
-            const category = getErrorCategory(errPItems.code, errPItems.message);
-            console.error(`❌ [${category}] Schema: ${b}, Table: purchase_items, Error: ${errPItems.message}`, errPItems);
-            reportSupabaseError(b, 'purchase_items', 'select', errPItems.message, errPItems.code);
-            cache[b].purchase_items = [];
+            const errMessage = errPItems.message || errPItems.details || errPItems.hint || 'Permission denied for table purchase_items';
+            const category = getErrorCategory(errPItems.code, errMessage);
+            console.error(`❌ [${category}] Schema: ${b}, Table: purchase_items, Error: ${errMessage}`, errPItems);
+            reportSupabaseError(b, 'purchase_items', 'select', errMessage, errPItems.code);
+            if (!cache[b].purchase_items) cache[b].purchase_items = [];
           } else {
             console.log(`✅ [Query Result] Schema: ${b}, Table: purchase_items, Count: ${bPItems?.length || 0}`);
             clearSchemaError(b, 'purchase_items');
@@ -1050,11 +1076,12 @@ export const db = {
             .order('created_at', { ascending: false })
             .limit(50);
           if (errBulk) {
-            const category = getErrorCategory(errBulk.code, errBulk.message);
-            console.error(`❌ [${category}] Schema: ${b}, Table: bulk_update_history, Error: ${errBulk.message}`, errBulk);
-            reportSupabaseError(b, 'bulk_update_history', 'select', errBulk.message, errBulk.code);
-            diagnosticStats.bulkUpdateHistoryTest = { success: false, error: errBulk.message };
-            cache[b].bulk_update_history = [];
+            const errMessage = errBulk.message || errBulk.details || errBulk.hint || 'Permission denied for table bulk_update_history';
+            const category = getErrorCategory(errBulk.code, errMessage);
+            console.error(`❌ [${category}] Schema: ${b}, Table: bulk_update_history, Error: ${errMessage}`, errBulk);
+            reportSupabaseError(b, 'bulk_update_history', 'select', errMessage, errBulk.code);
+            diagnosticStats.bulkUpdateHistoryTest = { success: false, error: errMessage };
+            if (!cache[b].bulk_update_history) cache[b].bulk_update_history = [];
           } else {
             console.log(`✅ [Query Result] Schema: ${b}, Table: bulk_update_history, Count: ${bBulk?.length || 0}`);
             diagnosticStats.bulkUpdateHistoryTest = { success: true, error: null };
@@ -1070,11 +1097,12 @@ export const db = {
             .order('changed_at', { ascending: false })
             .limit(150);
           if (errMrp) {
-            const category = getErrorCategory(errMrp.code, errMrp.message);
-            console.error(`❌ [${category}] Schema: ${b}, Table: mrp_history, Error: ${errMrp.message}`, errMrp);
-            reportSupabaseError(b, 'mrp_history', 'select', errMrp.message, errMrp.code);
-            diagnosticStats.mrpHistoryTest = { success: false, error: errMrp.message };
-            cache[b].mrp_history = [];
+            const errMessage = errMrp.message || errMrp.details || errMrp.hint || 'Permission denied for table mrp_history';
+            const category = getErrorCategory(errMrp.code, errMessage);
+            console.error(`❌ [${category}] Schema: ${b}, Table: mrp_history, Error: ${errMessage}`, errMrp);
+            reportSupabaseError(b, 'mrp_history', 'select', errMessage, errMrp.code);
+            diagnosticStats.mrpHistoryTest = { success: false, error: errMessage };
+            if (!cache[b].mrp_history) cache[b].mrp_history = [];
           } else {
             console.log(`✅ [Query Result] Schema: ${b}, Table: mrp_history, Count: ${bMrp?.length || 0}`);
             diagnosticStats.mrpHistoryTest = { success: true, error: null };

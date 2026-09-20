@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Brand, User, UserRole, isOwnerOrAdmin } from '../types';
 import { db, egressTracker } from '../dbStore';
-import { Shield, ShieldAlert, Plus, CheckCircle, ShieldCheck, Mail, LogIn, Sparkles, X, Database, Activity, RefreshCw, Zap, Gauge, ArrowDownCircle, HardDrive, Trash2, CheckCircle2, History } from 'lucide-react';
+import { Shield, ShieldAlert, Plus, CheckCircle, ShieldCheck, Mail, LogIn, Sparkles, X, Database, Activity, RefreshCw, Zap, Gauge, ArrowDownCircle, HardDrive, Trash2, CheckCircle2, History, Wrench, Copy } from 'lucide-react';
+import { SupabasePermissionsFixModal, SUPABASE_FIX_SQL } from './SupabasePermissionsFixModal';
 
 interface SettingsModuleProps {
   brand: Brand;
@@ -13,6 +14,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
   
   // Create state
   const [isNewUserModalOpen, setIsNewUserModalOpen] = useState(false);
+  const [isPermissionsFixModalOpen, setIsPermissionsFixModalOpen] = useState(false);
   const [formName, setFormName] = useState('');
   const [formEmail, setFormEmail] = useState('');
   const [formUserId, setFormUserId] = useState('');
@@ -363,29 +365,39 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
 
         {/* Supabase Connection test card */}
         <div className="bg-slate-900 text-white rounded-2xl p-5 shadow-xl space-y-4 text-xs font-semibold border border-slate-800">
-          <div className="flex justify-between items-center pb-2 border-b border-slate-800">
+          <div className="flex flex-wrap justify-between items-center pb-2 border-b border-slate-800 gap-2">
             <h3 className="font-bold text-indigo-400 text-xs uppercase tracking-wider flex items-center gap-1.5">
               <Activity className="w-4 h-4 text-indigo-400 animate-pulse" />
               Live Database Integration Diagnostics
             </h3>
-            <button
-              onClick={async () => {
-                setTestingConnection(true);
-                try {
-                  await db.loadBrandData(brand);
-                  setToastMessageLocal("Diagnostics re-run successfully!");
-                } catch (e) {
-                  // error logged automatically
-                } finally {
-                  setTestingConnection(false);
-                }
-              }}
-              disabled={testingConnection}
-              className="text-[10px] text-indigo-400 hover:text-indigo-300 font-bold flex items-center gap-1 bg-slate-800 hover:bg-slate-750 px-2.5 py-1 rounded-lg transition disabled:opacity-40 cursor-pointer"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${testingConnection ? 'animate-spin' : ''}`} />
-              Re-run Tests
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsPermissionsFixModalOpen(true)}
+                className="text-[10px] text-rose-300 hover:text-white font-bold flex items-center gap-1 bg-rose-950/80 hover:bg-rose-900 border border-rose-800/40 px-2.5 py-1 rounded-lg transition cursor-pointer"
+              >
+                <Wrench className="w-3.5 h-3.5 text-rose-400" />
+                Fix Permissions (SQL)
+              </button>
+              <button
+                onClick={async () => {
+                  setTestingConnection(true);
+                  try {
+                    await db.loadBrandData(brand);
+                    setToastMessageLocal("Diagnostics re-run successfully!");
+                  } catch (e) {
+                    // error logged automatically
+                  } finally {
+                    setTestingConnection(false);
+                  }
+                }}
+                disabled={testingConnection}
+                className="text-[10px] text-indigo-400 hover:text-indigo-300 font-bold flex items-center gap-1 bg-slate-800 hover:bg-slate-750 px-2.5 py-1 rounded-lg transition disabled:opacity-40 cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${testingConnection ? 'animate-spin' : ''}`} />
+                Re-run Tests
+              </button>
+            </div>
           </div>
 
           <div className="space-y-4 font-normal text-slate-300 leading-relaxed text-[11px]">
@@ -920,6 +932,13 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
           </div>
         </div>
       )}
+
+      <SupabasePermissionsFixModal
+        isOpen={isPermissionsFixModalOpen}
+        onClose={() => setIsPermissionsFixModalOpen(false)}
+        schemaErrors={db.getActiveSchemaErrors()}
+        selectedBrand={brand}
+      />
 
     </div>
   );
