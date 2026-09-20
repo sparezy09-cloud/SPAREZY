@@ -1192,6 +1192,10 @@ export const db = {
     return cache.transaction_logs;
   },
 
+  getTransactionLogs: (): TransactionLog[] => {
+    return cache.transaction_logs;
+  },
+
   logTransaction: (
     userId: string, userName: string, actionType: string, moduleName: string, 
     description: string, oldData: any = null, newData: any = null
@@ -1534,9 +1538,14 @@ export const db = {
     entry: Omit<CustomerLedgerEntry, 'id' | 'created_at'>,
     user?: User
   ): Promise<CustomerLedgerEntry> => {
+    const activeUser = user || db.getActiveUser();
+    const userId = activeUser ? activeUser.id : 'system';
+    const userName = activeUser ? activeUser.name : (entry.created_by || 'System');
+
     const newEntry: CustomerLedgerEntry = {
       ...entry,
       id: uuid(),
+      created_by: userName,
       created_at: new Date().toISOString()
     };
     cache.customer_ledger.unshift(newEntry);
@@ -1549,6 +1558,16 @@ export const db = {
     } else {
       localStorage.setItem(KEY_LEDGER, JSON.stringify(cache.customer_ledger));
     }
+
+    db.logTransaction(
+      userId,
+      userName,
+      'Ledger Entry',
+      'Customer Ledger',
+      `Recorded ${entry.entry_type} for ${entry.customer_name} (Debit: ₹${entry.debit || 0}, Credit: ₹${entry.credit || 0})`,
+      null,
+      newEntry
+    );
 
     db.notify();
     return newEntry;

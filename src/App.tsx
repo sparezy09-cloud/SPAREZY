@@ -13,6 +13,7 @@ import PurchaseModule from './components/PurchaseModule';
 import BulkUpdateModule from './components/BulkUpdateModule';
 import LedgerModule from './components/LedgerModule';
 import TransactionsModule from './components/TransactionsModule';
+import AuditTrail from './components/AuditTrail';
 import SettingsModule from './components/SettingsModule';
 import OrderRequestsModule from './components/OrderRequestsModule';
 import AttendanceModule from './components/AttendanceModule';
@@ -21,7 +22,7 @@ import AttendanceModule from './components/AttendanceModule';
 import { 
   CarFront, LayoutDashboard, Layers, ShoppingBag, RotateCcw, 
   FileText, FileSpreadsheet, Users, Terminal, Shield, LogOut, Menu, X, CheckCircle,
-  AlertTriangle, RefreshCw, Download, Receipt, ClipboardList, CalendarCheck
+  AlertTriangle, RefreshCw, Download, Receipt, ClipboardList, CalendarCheck, History
 } from 'lucide-react';
 
 export default function App() {
@@ -356,6 +357,7 @@ export default function App() {
     { name: 'Order Requests', icon: ClipboardList },
     { name: 'Bulk Updates', icon: FileSpreadsheet, ownerOnly: true },
     { name: 'Customer & Dealer Ledgers', icon: Users },
+    { name: 'Audit Trail', icon: History, ownerOnly: true },
     { name: 'Owner Transactions', icon: Receipt, ownerOnly: true },
     { name: 'Staff Attendance', icon: CalendarCheck },
     { name: 'Settings / User Management', icon: Shield },
@@ -375,6 +377,8 @@ export default function App() {
                 setActiveModule('Customer & Dealer Ledgers');
               } else if (mod === 'Sale POS') {
                 setActiveModule('Sales');
+              } else if (mod === 'Audit' || mod === 'Audit Trail') {
+                setActiveModule('Audit Trail');
               } else {
                 setActiveModule(mod);
               }
@@ -396,6 +400,8 @@ export default function App() {
         return <BulkUpdateModule brand={activeBrand} user={activeUser} />;
       case 'Customer & Dealer Ledgers':
         return <LedgerModule brand={activeBrand} user={activeUser} />;
+      case 'Audit Trail':
+        return <AuditTrail brand={activeBrand} user={activeUser} />;
       case 'Owner Transactions':
       case 'Transaction Records':
         return <TransactionsModule brand={activeBrand} user={activeUser} />;
