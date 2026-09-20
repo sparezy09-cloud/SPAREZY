@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Brand, User, OrderRequest, isOwnerOrAdmin } from '../types';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { Brand, User, OrderRequest, InventoryItem, isOwnerOrAdmin } from '../types';
 import { db } from '../dbStore';
 import { 
   ClipboardList, Plus, Search, CheckCircle2, XCircle, 
   Clock, AlertTriangle, Truck, Eye, RefreshCw, Filter, 
-  ChevronRight, ArrowRight, UserCheck, PackageCheck
+  ChevronRight, ArrowRight, UserCheck, PackageCheck, Zap, Sparkles, Check
 } from 'lucide-react';
 
 interface OrderRequestsModuleProps {
@@ -18,6 +18,19 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
   const [statusFilter, setStatusFilter] = useState<string>('All');
   const [urgencyFilter, setUrgencyFilter] = useState<string>('All');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Fast Handy Order Request Bar (Search -> Add -> Quantity -> Next)
+  const [fastSearch, setFastSearch] = useState('');
+  const [selectedPart, setSelectedPart] = useState<InventoryItem | null>(null);
+  const [fastPartName, setFastPartName] = useState('');
+  const [fastQuantity, setFastQuantity] = useState<number>(1);
+  const [fastReason, setFastReason] = useState<'Out of Stock' | 'Customer Demand' | 'Regular Reorder' | 'Emergency'>('Out of Stock');
+  const [fastUrgency, setFastUrgency] = useState<'Low' | 'Medium' | 'High' | 'Critical'>('Medium');
+  const [fastCustomer, setFastCustomer] = useState('');
+  const [fastNotes, setFastNotes] = useState('');
+  const [showFastDetails, setShowFastDetails] = useState(false);
+  const [isFastSearchFocused, setIsFastSearchFocused] = useState(false);
+  const fastSearchInputRef = useRef<HTMLInputElement>(null);
 
   // Modal for new request
   const [isNewModalOpen, setIsNewModalOpen] = useState(false);
@@ -50,10 +63,82 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
     setTimeout(() => setToastMessage(null), 3000);
   };
 
+  // Inventory list for fast search and auto-complete
+  const inventoryList = useMemo(() => db.getInventory(brand, true), [brand, requests]);
+
+  // Fast search suggestions
+  const fastSearchResults = useMemo(() => {
+    const q = fastSearch.trim().toLowerCase();
+    if (!q) return [];
+    return inventoryList.filter(item => 
+      item.part_no.toLowerCase().includes(q) || 
+      item.part_name.toLowerCase().includes(q)
+    ).slice(0, 8);
+  }, [fastSearch, inventoryList]);
+
+  // Fast Add Handler (search -> add -> qty -> next)
+  const handleFastAddPart = (targetPart?: InventoryItem, customQty?: number) => {
+    const partToAdd = targetPart || selectedPart;
+    const qty = customQty ?? fastQuantity;
+
+    let partNo = partToAdd ? partToAdd.part_no : fastSearch.trim().toUpperCase();
+    let partName = partToAdd ? partToAdd.part_name : fastPartName.trim();
+
+    if (!partNo) {
+      alert("Please enter or select a part number.");
+      fastSearchInputRef.current?.focus();
+      return;
+    }
+
+    if (!partName) {
+      const existing = inventoryList.find(i => i.part_no.toLowerCase() === partNo.toLowerCase());
+      if (existing) {
+        partName = existing.part_name;
+      } else {
+        const inputName = prompt(`Enter part description/name for "${partNo}":`);
+        if (!inputName || !inputName.trim()) return;
+        partName = inputName.trim();
+      }
+    }
+
+    if (qty <= 0) {
+      alert("Please enter a valid quantity of 1 or more.");
+      return;
+    }
+
+    try {
+      db.createOrderRequest({
+        brand,
+        part_no: partNo,
+        part_name: partName,
+        quantity: qty,
+        reason: fastReason,
+        urgency: fastUrgency,
+        customer_name: fastCustomer.trim() || undefined,
+        notes: fastNotes.trim() || undefined
+      }, user);
+
+      triggerToast(`✓ Added ${qty}x ${partNo} to Order Requests! Ready for next part.`);
+
+      // Reset fast inputs and focus back to search immediately for the next part!
+      setFastSearch('');
+      setSelectedPart(null);
+      setFastPartName('');
+      setFastQuantity(1);
+      setIsFastSearchFocused(false);
+
+      setTimeout(() => {
+        fastSearchInputRef.current?.focus();
+      }, 60);
+    } catch (err: any) {
+      alert(err.message || "Failed to add order request");
+    }
+  };
+
   // Pre-fill part name from inventory if user types a known part_no
   const handlePartNoChange = (partNo: string) => {
     setFormPartNo(partNo);
-    const existing = db.getInventory(brand).find(
+    const existing = inventoryList.find(
       i => i.part_no.toLowerCase().trim() === partNo.toLowerCase().trim()
     );
     if (existing && !formPartName) {
@@ -97,6 +182,41 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
       setFormCustomerName('');
       setFormCustomerPhone('');
       setFormNotes('');
+    } catch (err: any) {
+      alert(err.message || "Failed to submit order request");
+    }
+  };
+
+  const handleCreateAndNext = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formPartNo.trim() || !formPartName.trim()) {
+      alert("Please enter both Part Number and Part Name.");
+      return;
+    }
+    if (formQuantity <= 0) {
+      alert("Please enter a valid quantity of 1 or more.");
+      return;
+    }
+
+    try {
+      db.createOrderRequest({
+        brand,
+        part_no: formPartNo.trim().toUpperCase(),
+        part_name: formPartName.trim(),
+        quantity: formQuantity,
+        reason: formReason,
+        urgency: formUrgency,
+        customer_name: formCustomerName.trim() || undefined,
+        customer_phone: formCustomerPhone.trim() || undefined,
+        notes: formNotes.trim() || undefined
+      }, user);
+
+      triggerToast(`✓ Added ${formQuantity}x ${formPartNo.toUpperCase()}! Ready for next part.`);
+
+      // Reset form for next part and keep modal open
+      setFormPartNo('');
+      setFormPartName('');
+      setFormQuantity(1);
     } catch (err: any) {
       alert(err.message || "Failed to submit order request");
     }
@@ -224,6 +344,249 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
           <p className="text-2xl font-black text-slate-900 mt-1">{stats.rejected}</p>
           <span className="text-[10px] text-slate-400">Not approved</span>
         </div>
+      </div>
+
+      {/* Quick Fast-Add Order Request Bar (Search -> Add -> Quantity -> Next) */}
+      <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white p-4 sm:p-5 rounded-2xl shadow-md border border-indigo-800/40">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 mb-3 border-b border-indigo-800/40">
+          <div className="flex items-center gap-2.5">
+            <span className="p-1.5 bg-indigo-500/20 text-indigo-300 rounded-xl border border-indigo-400/30 shrink-0">
+              <Zap className="w-4 h-4 text-amber-400" />
+            </span>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-sm font-bold tracking-tight text-white">
+                  Quick Order Request Bar
+                </h2>
+                <span className="text-[10px] font-semibold text-indigo-300 bg-indigo-500/20 border border-indigo-400/20 px-2 py-0.5 rounded-full">
+                  Search &rarr; Set Qty &rarr; Add &rarr; Next
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Quickly search any part in {brand}, set quantity, and add to request in seconds.
+              </p>
+            </div>
+          </div>
+          
+          <button
+            type="button"
+            onClick={() => setShowFastDetails(!showFastDetails)}
+            className="text-[11px] font-semibold text-indigo-300 hover:text-white flex items-center gap-1 cursor-pointer transition self-start sm:self-auto px-2.5 py-1 rounded-lg hover:bg-white/10"
+          >
+            <span>{showFastDetails ? 'Hide Options' : 'More Options (Reason / Urgency / Customer)'}</span>
+          </button>
+        </div>
+
+        {/* Inputs row */}
+        <div className="flex flex-col md:flex-row items-stretch md:items-center gap-3 relative">
+          
+          {/* Search Part Input with live dropdown */}
+          <div className="relative flex-1">
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                ref={fastSearchInputRef}
+                type="text"
+                value={fastSearch}
+                onFocus={() => setIsFastSearchFocused(true)}
+                onChange={(e) => {
+                  setFastSearch(e.target.value);
+                  setSelectedPart(null);
+                  setIsFastSearchFocused(true);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    if (fastSearchResults.length > 0 && !selectedPart) {
+                      handleFastAddPart(fastSearchResults[0]);
+                    } else {
+                      handleFastAddPart();
+                    }
+                  }
+                }}
+                placeholder="Search part number or name (e.g. 58101, filter, brake, clutch...)"
+                className="w-full pl-10 pr-28 py-2.5 bg-slate-800/90 border border-indigo-700/60 rounded-xl text-xs text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent font-medium shadow-inner"
+              />
+              {selectedPart ? (
+                <span className="absolute right-2.5 top-1/2 -translate-y-1/2 px-2 py-0.5 text-[10px] font-bold font-mono bg-indigo-500/30 text-indigo-200 border border-indigo-400/40 rounded flex items-center gap-1">
+                  Stock: {selectedPart.quantity}
+                </span>
+              ) : fastSearch.trim() ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFastSearch('');
+                    setSelectedPart(null);
+                    fastSearchInputRef.current?.focus();
+                  }}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white text-xs cursor-pointer p-1"
+                >
+                  ✕
+                </button>
+              ) : null}
+            </div>
+
+            {/* Live Autocomplete Results Dropdown */}
+            {isFastSearchFocused && fastSearch.trim().length > 0 && (
+              <div 
+                className="absolute left-0 right-0 top-full mt-1.5 bg-slate-900 border border-indigo-700/80 rounded-xl shadow-2xl z-40 overflow-hidden text-xs max-h-72 overflow-y-auto divide-y divide-slate-800"
+              >
+                {fastSearchResults.map((part) => (
+                  <div
+                    key={part.id}
+                    className="p-2.5 hover:bg-indigo-900/50 flex items-center justify-between gap-3 transition cursor-pointer group"
+                    onClick={() => {
+                      setSelectedPart(part);
+                      setFastSearch(part.part_no);
+                      setFastPartName(part.part_name);
+                      setIsFastSearchFocused(false);
+                    }}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-bold text-indigo-300 group-hover:text-indigo-200">
+                          {part.part_no}
+                        </span>
+                        {part.quantity <= 0 ? (
+                          <span className="px-1.5 py-0.5 text-[9px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30 rounded">
+                            0 in Stock
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 text-[9px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded">
+                            {part.quantity} in stock
+                          </span>
+                        )}
+                        {part.hsn && (
+                          <span className="text-[9px] font-mono text-slate-400">
+                            HSN: {part.hsn}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-300 truncate mt-0.5">
+                        {part.part_name}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3 shrink-0">
+                      <span className="font-mono font-bold text-white text-xs">
+                        ₹{part.mrp.toLocaleString('en-IN')}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleFastAddPart(part);
+                        }}
+                        className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer shadow-xs"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>Add</span>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+
+                {fastSearchResults.length === 0 && (
+                  <div className="p-3 text-slate-300 text-xs flex items-center justify-between">
+                    <span>Part "{fastSearch}" not in local catalog. You can still order it!</span>
+                    <button
+                      type="button"
+                      onClick={() => handleFastAddPart()}
+                      className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[11px] font-bold transition cursor-pointer"
+                    >
+                      + Add "{fastSearch}"
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Quantity Controls */}
+          <div className="flex items-center justify-between sm:justify-start gap-1.5 bg-slate-800/90 border border-indigo-700/60 rounded-xl p-1 shrink-0">
+            <span className="text-[11px] font-bold text-indigo-300 px-2">Qty:</span>
+            <button
+              type="button"
+              onClick={() => setFastQuantity(q => Math.max(1, q - 1))}
+              className="w-7 h-7 flex items-center justify-center bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-bold transition cursor-pointer text-sm"
+            >
+              -
+            </button>
+            <input
+              type="number"
+              min="1"
+              value={fastQuantity}
+              onChange={(e) => setFastQuantity(Math.max(1, parseInt(e.target.value) || 1))}
+              className="w-14 text-center font-mono font-bold text-white bg-transparent border-0 focus:outline-none text-xs"
+            />
+            <button
+              type="button"
+              onClick={() => setFastQuantity(q => q + 1)}
+              className="w-7 h-7 flex items-center justify-center bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-bold transition cursor-pointer text-sm"
+            >
+              +
+            </button>
+          </div>
+
+          {/* Main Add Button */}
+          <button
+            type="button"
+            onClick={() => handleFastAddPart()}
+            disabled={!fastSearch.trim() && !selectedPart}
+            className={`px-5 py-2.5 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer shadow-sm shrink-0 ${
+              fastSearch.trim() || selectedPart
+                ? 'bg-indigo-600 hover:bg-indigo-500 text-white'
+                : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
+            }`}
+          >
+            <Plus className="w-4 h-4" />
+            <span>+ Add to Request</span>
+          </button>
+        </div>
+
+        {/* Expandable Optional Details */}
+        {showFastDetails && (
+          <div className="mt-3 pt-3 border-t border-indigo-800/50 grid grid-cols-1 sm:grid-cols-3 gap-3 animate-in fade-in duration-150">
+            <div>
+              <label className="block text-[10px] font-bold text-indigo-300 uppercase mb-1">Reason</label>
+              <select
+                value={fastReason}
+                onChange={(e) => setFastReason(e.target.value as any)}
+                className="w-full px-2.5 py-1.5 bg-slate-800 border border-indigo-700/60 rounded-lg text-xs text-white focus:outline-none"
+              >
+                <option value="Out of Stock">Out of Stock</option>
+                <option value="Customer Demand">Customer Demand</option>
+                <option value="Regular Reorder">Regular Reorder</option>
+                <option value="Emergency">Emergency</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-bold text-indigo-300 uppercase mb-1">Urgency</label>
+              <select
+                value={fastUrgency}
+                onChange={(e) => setFastUrgency(e.target.value as any)}
+                className="w-full px-2.5 py-1.5 bg-slate-800 border border-indigo-700/60 rounded-lg text-xs text-white focus:outline-none"
+              >
+                <option value="Low">Low (Replenish)</option>
+                <option value="Medium">Medium (Regular)</option>
+                <option value="High">High (Customer Waiting)</option>
+                <option value="Critical">Critical (Vehicle Down)</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-bold text-indigo-300 uppercase mb-1">Customer / Notes (opt)</label>
+              <input
+                type="text"
+                placeholder="e.g. John Doe, urgent brake repair"
+                value={fastCustomer}
+                onChange={(e) => setFastCustomer(e.target.value)}
+                className="w-full px-2.5 py-1.5 bg-slate-800 border border-indigo-700/60 rounded-lg text-xs text-white placeholder:text-slate-500 focus:outline-none"
+              />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Filters and Search Bar */}
@@ -537,20 +900,30 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                 />
               </div>
 
-              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setIsNewModalOpen(false)}
-                  className="px-4 py-2 border border-slate-200 rounded-xl font-bold text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+                  className="px-4 py-2 border border-slate-200 rounded-xl font-bold text-slate-600 hover:bg-slate-50 transition cursor-pointer text-xs"
                 >
                   Cancel
                 </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold transition cursor-pointer shadow-sm"
-                >
-                  Submit Order Request
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleCreateAndNext}
+                    className="px-4 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-xl font-bold transition cursor-pointer text-xs flex items-center gap-1"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Save & Next Part
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold transition cursor-pointer shadow-sm text-xs"
+                  >
+                    Submit & Close
+                  </button>
+                </div>
               </div>
             </form>
           </div>

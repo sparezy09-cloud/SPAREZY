@@ -5,8 +5,13 @@ import * as XLSX from 'xlsx';
 import { 
   Search, EyeOff, Archive, CheckCircle2, Pencil, 
   Trash2, Plus, ArrowLeft, ArrowRight, X, Layers, Download, FileSpreadsheet,
-  AlertTriangle, History, Calendar, Lock, Eye
+  AlertTriangle, History, Calendar, Lock, Eye, Filter, ArrowDownAZ, ArrowUpAZ, 
+  ArrowDown10, ArrowUp10, RotateCcw, Check, ArrowUpDown, ArrowUp, ArrowDown,
+  ClipboardPlus
 } from 'lucide-react';
+
+export type SortColumn = 'part_no' | 'part_name' | 'quantity' | 'mrp' | null;
+export type SortDirection = 'asc' | 'desc' | 'default';
 
 interface InventoryModuleProps {
   brand: Brand;
@@ -40,6 +45,15 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
   const [viewingPartDetails, setViewingPartDetails] = useState<InventoryItem | null>(null);
   const [movementTab, setMovementTab] = useState<'all' | 'sales' | 'purchases' | 'returns'>('all');
 
+  // Quick Order Request from Inventory
+  const [orderRequestingItem, setOrderRequestingItem] = useState<InventoryItem | null>(null);
+  const [orderRequestQuantity, setOrderRequestQuantity] = useState<number>(1);
+  const [orderRequestReason, setOrderRequestReason] = useState<'Out of Stock' | 'Customer Demand' | 'Regular Reorder' | 'Emergency'>('Out of Stock');
+  const [orderRequestUrgency, setOrderRequestUrgency] = useState<'Low' | 'Medium' | 'High' | 'Critical'>('Medium');
+  const [orderRequestCustomer, setOrderRequestCustomer] = useState<string>('');
+  const [orderRequestCustomerPhone, setOrderRequestCustomerPhone] = useState<string>('');
+  const [orderRequestNotes, setOrderRequestNotes] = useState<string>('');
+
   // Form Fields for Manual Create/Edit
   const [formPartNo, setFormPartNo] = useState('');
   const [formPartName, setFormPartName] = useState('');
@@ -53,6 +67,186 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
   const [lowStockThreshold, setLowStockThreshold] = useState(5);
   const [inventoryList, setInventoryList] = useState<InventoryItem[]>(() => db.getInventory(brand, false));
 
+  // Column Filters State & Dropdown Management
+  const [activeFilterDropdown, setActiveFilterDropdown] = useState<null | 'partNo' | 'partName' | 'quantity' | 'mrp'>(null);
+  
+  // Multi-state Column Sorting: asc -> desc -> default (coordinated with filtering)
+  const [sortColumn, setSortColumn] = useState<SortColumn>(null);
+  const [sortDirection, setSortDirection] = useState<SortDirection>('default');
+
+  const [columnFilters, setColumnFilters] = useState<{
+    partNoText: string;
+    partNoStatus: 'all' | 'active' | 'archived';
+    partNameText: string;
+    sortByName: 'none' | 'asc' | 'desc';
+    quantityPreset: 'all' | 'in_stock' | 'out_of_stock' | 'low_stock' | 'high_stock' | 'custom';
+    minQuantity: string;
+    maxQuantity: string;
+    sortByQuantity: 'none' | 'asc' | 'desc';
+    hsnText: string;
+    hsnStatus: 'all' | 'has_hsn' | 'no_hsn';
+    selectedHsns: string[];
+    pricePreset: 'all' | 'under_500' | '500_2000' | '2000_10000' | 'above_10000' | 'custom';
+    minPrice: string;
+    maxPrice: string;
+    sortByPrice: 'none' | 'asc' | 'desc';
+  }>({
+    partNoText: '',
+    partNoStatus: 'all',
+    partNameText: '',
+    sortByName: 'none',
+    quantityPreset: 'all',
+    minQuantity: '',
+    maxQuantity: '',
+    sortByQuantity: 'none',
+    hsnText: '',
+    hsnStatus: 'all',
+    selectedHsns: [],
+    pricePreset: 'all',
+    minPrice: '',
+    maxPrice: '',
+    sortByPrice: 'none',
+  });
+
+  // Cycle multi-state sorting: default -> asc -> desc -> default
+  const handleToggleSort = (col: SortColumn) => {
+    if (sortColumn !== col || sortDirection === 'default') {
+      setSortColumn(col);
+      setSortDirection('asc');
+      setColumnFilters(p => ({
+        ...p,
+        sortByName: col === 'part_name' ? 'asc' : 'none',
+        sortByQuantity: col === 'quantity' ? 'asc' : 'none',
+        sortByPrice: col === 'mrp' ? 'asc' : 'none',
+      }));
+    } else if (sortDirection === 'asc') {
+      setSortDirection('desc');
+      setColumnFilters(p => ({
+        ...p,
+        sortByName: col === 'part_name' ? 'desc' : 'none',
+        sortByQuantity: col === 'quantity' ? 'desc' : 'none',
+        sortByPrice: col === 'mrp' ? 'desc' : 'none',
+      }));
+    } else {
+      // desc -> default (clear sort)
+      setSortDirection('default');
+      setSortColumn(null);
+      setColumnFilters(p => ({
+        ...p,
+        sortByName: 'none',
+        sortByQuantity: 'none',
+        sortByPrice: 'none',
+      }));
+    }
+  };
+
+  // Set explicit sort from dropdown menu
+  const handleSetSort = (col: SortColumn, dir: 'none' | 'asc' | 'desc') => {
+    if (dir === 'none') {
+      if (sortColumn === col) {
+        setSortColumn(null);
+        setSortDirection('default');
+      }
+      setColumnFilters(p => ({
+        ...p,
+        sortByName: col === 'part_name' ? 'none' : p.sortByName,
+        sortByQuantity: col === 'quantity' ? 'none' : p.sortByQuantity,
+        sortByPrice: col === 'mrp' ? 'none' : p.sortByPrice,
+      }));
+    } else {
+      setSortColumn(col);
+      setSortDirection(dir);
+      setColumnFilters(p => ({
+        ...p,
+        sortByName: col === 'part_name' ? dir : 'none',
+        sortByQuantity: col === 'quantity' ? dir : 'none',
+        sortByPrice: col === 'mrp' ? dir : 'none',
+      }));
+    }
+  };
+
+  const clearColumnFilters = () => {
+    setSortColumn(null);
+    setSortDirection('default');
+    setColumnFilters({
+      partNoText: '',
+      partNoStatus: 'all',
+      partNameText: '',
+      sortByName: 'none',
+      quantityPreset: 'all',
+      minQuantity: '',
+      maxQuantity: '',
+      sortByQuantity: 'none',
+      hsnText: '',
+      hsnStatus: 'all',
+      selectedHsns: [],
+      pricePreset: 'all',
+      minPrice: '',
+      maxPrice: '',
+      sortByPrice: 'none',
+    });
+  };
+
+  const isPartNoFiltered = columnFilters.partNoText.trim() !== '' || columnFilters.partNoStatus !== 'all' || (sortColumn === 'part_no' && sortDirection !== 'default');
+  const isPartNameFiltered = columnFilters.partNameText.trim() !== '' || (sortColumn === 'part_name' && sortDirection !== 'default');
+  const isQuantityFiltered = columnFilters.quantityPreset !== 'all' || columnFilters.minQuantity !== '' || columnFilters.maxQuantity !== '' || (sortColumn === 'quantity' && sortDirection !== 'default');
+  const isHsnFiltered = columnFilters.hsnText.trim() !== '' || columnFilters.hsnStatus !== 'all' || columnFilters.selectedHsns.length > 0 || (sortColumn === 'hsn' && sortDirection !== 'default');
+  const isPriceFiltered = columnFilters.pricePreset !== 'all' || columnFilters.minPrice !== '' || columnFilters.maxPrice !== '' || (sortColumn === 'mrp' && sortDirection !== 'default');
+
+  // Render header sort status indicator
+  const renderSortIndicator = (col: SortColumn, type: 'alpha' | 'numeric' = 'alpha') => {
+    const isThisColActive = sortColumn === col && sortDirection !== 'default';
+    if (!isThisColActive) {
+      return (
+        <span className="p-0.5 rounded text-slate-300 group-hover/col:text-slate-500 transition-colors shrink-0" title="Click to sort Ascending">
+          <ArrowUpDown className="w-3 h-3" />
+        </span>
+      );
+    }
+
+    if (sortDirection === 'asc') {
+      return (
+        <span 
+          className="inline-flex items-center gap-0.5 bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded text-[9px] font-bold shadow-2xs shrink-0"
+          title="Sorted Ascending (Click to sort Descending)"
+        >
+          <span>{type === 'alpha' ? 'A-Z' : 'Low-High'}</span>
+          <ArrowUp className="w-2.5 h-2.5" />
+        </span>
+      );
+    }
+
+    return (
+      <span 
+        className="inline-flex items-center gap-0.5 bg-indigo-100 text-indigo-700 px-1.5 py-0.5 rounded text-[9px] font-bold shadow-2xs shrink-0"
+        title="Sorted Descending (Click to return to Default order)"
+      >
+        <span>{type === 'alpha' ? 'Z-A' : 'High-Low'}</span>
+        <ArrowDown className="w-2.5 h-2.5" />
+      </span>
+    );
+  };
+
+  const totalActiveColumnFilters = 
+    (isPartNoFiltered ? 1 : 0) + 
+    (isPartNameFiltered ? 1 : 0) + 
+    (isQuantityFiltered ? 1 : 0) + 
+    (isPriceFiltered ? 1 : 0);
+
+  // Available unique HSN codes for quick selection in filter dropdown
+  const availableHsnCodes = useMemo(() => {
+    const codesMap = new Map<string, number>();
+    inventoryList.forEach(item => {
+      if (item.hsn && item.hsn.trim()) {
+        const code = item.hsn.trim();
+        codesMap.set(code, (codesMap.get(code) || 0) + 1);
+      }
+    });
+    return Array.from(codesMap.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+  }, [inventoryList]);
+
   const refreshList = () => {
     setInventoryList(db.getInventory(brand, showArchived));
   };
@@ -62,31 +256,118 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
     return db.subscribe(refreshList);
   }, [brand, showArchived]);
 
-  // Clean selections whenever filters/search text updates
+  // Clean selections whenever filters/search text/sort updates
   React.useEffect(() => {
     setSelectedIds([]);
     setSelectionMode('current_page');
     setBulkError(null);
-  }, [search, brand, showLowStockOnly]);
+    setCurrentPage(1);
+  }, [search, brand, showLowStockOnly, columnFilters, sortColumn, sortDirection]);
 
   const triggerToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 3000);
   };
 
-  // 1. Filtrations
+  // 1. Filtrations & Sorting
   const filteredList = useMemo(() => {
-    return inventoryList.filter(item => {
+    let result = inventoryList.filter(item => {
+      // Global quick search
       const matchesSearch = item.part_no.toLowerCase().includes(search.toLowerCase()) || 
                             item.part_name.toLowerCase().includes(search.toLowerCase());
       if (!matchesSearch) return false;
 
-      if (showLowStockOnly) {
-        return item.quantity <= lowStockThreshold;
+      // Global low stock toggle
+      if (showLowStockOnly && item.quantity > lowStockThreshold) {
+        return false;
       }
+
+      // Column: Part No
+      if (columnFilters.partNoText.trim()) {
+        if (!item.part_no.toLowerCase().includes(columnFilters.partNoText.trim().toLowerCase())) {
+          return false;
+        }
+      }
+      if (columnFilters.partNoStatus === 'active' && item.is_active === false) {
+        return false;
+      }
+      if (columnFilters.partNoStatus === 'archived' && item.is_active !== false) {
+        return false;
+      }
+
+      // Column: Part Name
+      if (columnFilters.partNameText.trim()) {
+        if (!item.part_name.toLowerCase().includes(columnFilters.partNameText.trim().toLowerCase())) {
+          return false;
+        }
+      }
+
+      // Column: Quantity in Stock
+      if (columnFilters.quantityPreset === 'in_stock' && item.quantity <= 0) return false;
+      if (columnFilters.quantityPreset === 'out_of_stock' && item.quantity > 0) return false;
+      if (columnFilters.quantityPreset === 'low_stock' && item.quantity > lowStockThreshold) return false;
+      if (columnFilters.quantityPreset === 'high_stock' && item.quantity < 50) return false;
+      if (columnFilters.minQuantity !== '') {
+        const minQ = parseFloat(columnFilters.minQuantity);
+        if (!isNaN(minQ) && item.quantity < minQ) return false;
+      }
+      if (columnFilters.maxQuantity !== '') {
+        const maxQ = parseFloat(columnFilters.maxQuantity);
+        if (!isNaN(maxQ) && item.quantity > maxQ) return false;
+      }
+
+      // Column: HSN Code
+      if (columnFilters.hsnStatus === 'has_hsn' && (!item.hsn || !item.hsn.trim())) return false;
+      if (columnFilters.hsnStatus === 'no_hsn' && item.hsn && item.hsn.trim()) return false;
+      if (columnFilters.hsnText.trim()) {
+        if (!item.hsn || !item.hsn.toLowerCase().includes(columnFilters.hsnText.trim().toLowerCase())) {
+          return false;
+        }
+      }
+      if (columnFilters.selectedHsns.length > 0) {
+        if (!item.hsn || !columnFilters.selectedHsns.includes(item.hsn.trim())) {
+          return false;
+        }
+      }
+
+      // Column: MRP
+      if (columnFilters.pricePreset === 'under_500' && item.mrp >= 500) return false;
+      if (columnFilters.pricePreset === '500_2000' && (item.mrp < 500 || item.mrp > 2000)) return false;
+      if (columnFilters.pricePreset === '2000_10000' && (item.mrp < 2000 || item.mrp > 10000)) return false;
+      if (columnFilters.pricePreset === 'above_10000' && item.mrp <= 10000) return false;
+      if (columnFilters.minPrice !== '') {
+        const minP = parseFloat(columnFilters.minPrice);
+        if (!isNaN(minP) && item.mrp < minP) return false;
+      }
+      if (columnFilters.maxPrice !== '') {
+        const maxP = parseFloat(columnFilters.maxPrice);
+        if (!isNaN(maxP) && item.mrp > maxP) return false;
+      }
+
       return true;
     });
-  }, [inventoryList, search, showLowStockOnly, lowStockThreshold]);
+
+    // Multi-state Column Sorting (Coordinates with existing filter criteria)
+    if (sortColumn && sortDirection !== 'default') {
+      result = [...result].sort((a, b) => {
+        let diff = 0;
+        if (sortColumn === 'part_no') {
+          diff = a.part_no.localeCompare(b.part_no, undefined, { numeric: true, sensitivity: 'base' });
+        } else if (sortColumn === 'part_name') {
+          diff = a.part_name.localeCompare(b.part_name, undefined, { numeric: true, sensitivity: 'base' });
+        } else if (sortColumn === 'quantity') {
+          diff = a.quantity - b.quantity;
+        } else if (sortColumn === 'hsn') {
+          diff = (a.hsn || '').localeCompare(b.hsn || '', undefined, { numeric: true, sensitivity: 'base' });
+        } else if (sortColumn === 'mrp') {
+          diff = a.mrp - b.mrp;
+        }
+        return sortDirection === 'asc' ? diff : -diff;
+      });
+    }
+
+    return result;
+  }, [inventoryList, search, showLowStockOnly, lowStockThreshold, columnFilters, sortColumn, sortDirection]);
 
   // Part Movement calculator for the details popup
   const partMovements = useMemo(() => {
@@ -257,6 +538,43 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
         setIsBulkProcessing(false);
         setBulkProgress(0);
       }
+    }
+  };
+
+  // Direct Order Request from Inventory Row
+  const handleOpenOrderRequestModal = (item: InventoryItem) => {
+    setOrderRequestingItem(item);
+    setOrderRequestQuantity(item.quantity <= 0 ? 5 : 1);
+    setOrderRequestReason(item.quantity <= 0 ? 'Out of Stock' : 'Regular Reorder');
+    setOrderRequestUrgency(item.quantity <= 0 ? 'High' : 'Medium');
+    setOrderRequestCustomer('');
+    setOrderRequestCustomerPhone('');
+    setOrderRequestNotes('');
+  };
+
+  const handleConfirmOrderRequest = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!orderRequestingItem) return;
+    if (orderRequestQuantity <= 0) {
+      alert("Please enter a valid quantity of 1 or more.");
+      return;
+    }
+    try {
+      db.createOrderRequest({
+        brand,
+        part_no: orderRequestingItem.part_no,
+        part_name: orderRequestingItem.part_name,
+        quantity: orderRequestQuantity,
+        reason: orderRequestReason,
+        urgency: orderRequestUrgency,
+        customer_name: orderRequestCustomer.trim() || undefined,
+        customer_phone: orderRequestCustomerPhone.trim() || undefined,
+        notes: orderRequestNotes.trim() || undefined,
+      }, user);
+      triggerToast(`✓ Added ${orderRequestQuantity}x ${orderRequestingItem.part_no} to Order Requests!`);
+      setOrderRequestingItem(null);
+    } catch (err: any) {
+      alert(err.message || "Failed to create order request");
     }
   };
 
@@ -726,11 +1044,112 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
         </div>
       )}
 
+      {/* Active Column Filters Bar */}
+      {totalActiveColumnFilters > 0 && (
+        <div className="flex items-center gap-2 flex-wrap text-xs bg-indigo-50/80 border border-indigo-200/90 rounded-2xl px-4 py-2.5 text-indigo-950 shadow-xs animate-in fade-in duration-150">
+          <span className="font-bold text-[11px] text-indigo-900 flex items-center gap-1.5 shrink-0">
+            <Filter className="w-3.5 h-3.5 text-indigo-600 fill-indigo-600" />
+            <span>{totalActiveColumnFilters} Column {totalActiveColumnFilters === 1 ? 'Filter' : 'Filters'} Active:</span>
+          </span>
+          {isPartNoFiltered && (
+            <span className="inline-flex items-center gap-1.5 bg-white border border-indigo-200 text-indigo-900 rounded-lg px-2.5 py-1 text-[11px] font-medium shadow-2xs">
+              <span>Part No: <strong>{columnFilters.partNoText || (columnFilters.partNoStatus !== 'all' ? columnFilters.partNoStatus : '') || (sortColumn === 'part_no' ? (sortDirection === 'asc' ? 'A-Z' : 'Z-A') : '')}</strong></span>
+              <button 
+                type="button" 
+                onClick={() => {
+                  setColumnFilters(p => ({ ...p, partNoText: '', partNoStatus: 'all' }));
+                  if (sortColumn === 'part_no') {
+                    setSortColumn(null);
+                    setSortDirection('default');
+                  }
+                }} 
+                className="text-slate-400 hover:text-rose-600 font-bold ml-0.5 cursor-pointer"
+                title="Remove filter"
+              >
+                ✕
+              </button>
+            </span>
+          )}
+          {isPartNameFiltered && (
+            <span className="inline-flex items-center gap-1.5 bg-white border border-indigo-200 text-indigo-900 rounded-lg px-2.5 py-1 text-[11px] font-medium shadow-2xs">
+              <span>Part Name: <strong>{columnFilters.partNameText || (sortColumn === 'part_name' ? (sortDirection === 'asc' ? 'A-Z' : 'Z-A') : '')}</strong></span>
+              <button 
+                type="button" 
+                onClick={() => {
+                  setColumnFilters(p => ({ ...p, partNameText: '', sortByName: 'none' }));
+                  if (sortColumn === 'part_name') {
+                    setSortColumn(null);
+                    setSortDirection('default');
+                  }
+                }} 
+                className="text-slate-400 hover:text-rose-600 font-bold ml-0.5 cursor-pointer"
+                title="Remove filter"
+              >
+                ✕
+              </button>
+            </span>
+          )}
+          {isQuantityFiltered && (
+            <span className="inline-flex items-center gap-1.5 bg-white border border-indigo-200 text-indigo-900 rounded-lg px-2.5 py-1 text-[11px] font-medium shadow-2xs">
+              <span>Qty: <strong>{columnFilters.quantityPreset !== 'all' ? columnFilters.quantityPreset.replace('_', ' ') : columnFilters.minQuantity || columnFilters.maxQuantity ? `${columnFilters.minQuantity || '0'}–${columnFilters.maxQuantity || '∞'}` : ''}{sortColumn === 'quantity' ? ` (${sortDirection === 'asc' ? 'Low-High' : 'High-Low'})` : ''}</strong></span>
+              <button 
+                type="button" 
+                onClick={() => {
+                  setColumnFilters(p => ({ ...p, quantityPreset: 'all', minQuantity: '', maxQuantity: '', sortByQuantity: 'none' }));
+                  if (sortColumn === 'quantity') {
+                    setSortColumn(null);
+                    setSortDirection('default');
+                  }
+                }} 
+                className="text-slate-400 hover:text-rose-600 font-bold ml-0.5 cursor-pointer"
+                title="Remove filter"
+              >
+                ✕
+              </button>
+            </span>
+          )}
+          {isPriceFiltered && (
+            <span className="inline-flex items-center gap-1.5 bg-white border border-indigo-200 text-indigo-900 rounded-lg px-2.5 py-1 text-[11px] font-medium shadow-2xs">
+              <span>MRP: <strong>{columnFilters.pricePreset !== 'all' ? columnFilters.pricePreset.replace('_', ' ') : columnFilters.minPrice || columnFilters.maxPrice ? `₹${columnFilters.minPrice || '0'}–₹${columnFilters.maxPrice || '∞'}` : ''}{sortColumn === 'mrp' ? ` (${sortDirection === 'asc' ? 'Low-High' : 'High-Low'})` : ''}</strong></span>
+              <button 
+                type="button" 
+                onClick={() => {
+                  setColumnFilters(p => ({ ...p, pricePreset: 'all', minPrice: '', maxPrice: '', sortByPrice: 'none' }));
+                  if (sortColumn === 'mrp') {
+                    setSortColumn(null);
+                    setSortDirection('default');
+                  }
+                }} 
+                className="text-slate-400 hover:text-rose-600 font-bold ml-0.5 cursor-pointer"
+                title="Remove filter"
+              >
+                ✕
+              </button>
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={clearColumnFilters}
+            className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 ml-auto hover:underline cursor-pointer flex items-center gap-1 shrink-0"
+          >
+            <RotateCcw className="w-3 h-3" /> Clear All Filters
+          </button>
+        </div>
+      )}
+
       {/* Main Parts Table */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm relative">
+        {/* Backdrop for closing active dropdown on click outside */}
+        {activeFilterDropdown !== null && (
+          <div 
+            className="fixed inset-0 z-20 cursor-default" 
+            onClick={() => setActiveFilterDropdown(null)} 
+          />
+        )}
+
+        <div className="overflow-x-auto min-h-[380px]">
           <table className="min-w-full divide-y divide-slate-200 text-left text-xs">
-            <thead className="bg-slate-50 text-slate-500 uppercase font-semibold text-[10px] tracking-wider">
+            <thead className="bg-slate-50 text-slate-600 uppercase font-semibold text-[10px] tracking-wider relative z-20">
               <tr>
                 {!isReadOnly && (
                   <th className="p-4 w-12 text-center">
@@ -742,11 +1161,758 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                     />
                   </th>
                 )}
-                <th className="p-4">Part No</th>
-                <th className="p-4">Part Name</th>
-                <th className="p-4">Quantity in Stock</th>
-                <th className="p-4">HSN Code</th>
-                <th className="p-4">MRP (INR)</th>
+
+                {/* Column 1: Part No */}
+                <th 
+                  className={`p-3.5 relative select-none transition-colors group/col cursor-pointer ${
+                    sortColumn === 'part_no' && sortDirection !== 'default'
+                      ? 'bg-indigo-50/80 text-indigo-900'
+                      : 'hover:bg-slate-100/80 text-slate-700'
+                  }`}
+                  onClick={() => handleToggleSort('part_no')}
+                  title={`Sort by Part No: currently ${sortColumn === 'part_no' ? sortDirection : 'default'}. Click to toggle Ascending → Descending → Default.`}
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <div className="flex items-center gap-1.5 font-bold group-hover/col:text-indigo-600 transition-colors">
+                      <span>Part No</span>
+                      {renderSortIndicator('part_no', 'alpha')}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveFilterDropdown(prev => prev === 'partNo' ? null : 'partNo');
+                      }}
+                      className={`p-1 rounded-md transition-colors cursor-pointer flex items-center justify-center ${
+                        isPartNoFiltered 
+                          ? 'bg-indigo-600 text-white shadow-xs' 
+                          : 'text-slate-400 hover:text-indigo-600 hover:bg-slate-200/80'
+                      }`}
+                      title={isPartNoFiltered ? 'Filter active on Part No' : 'Filter by Part No'}
+                    >
+                      <Filter className={`w-3 h-3 ${isPartNoFiltered ? 'fill-white' : ''}`} />
+                    </button>
+                  </div>
+
+                  {activeFilterDropdown === 'partNo' && (
+                    <div 
+                      onClick={(e) => e.stopPropagation()} 
+                      className="absolute left-0 top-full mt-2 w-72 bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 text-xs font-normal normal-case text-slate-700 z-30 space-y-3 animate-in fade-in zoom-in-95 duration-100"
+                    >
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                        <span className="font-bold text-slate-900 text-xs">Filter Part Number</span>
+                        {isPartNoFiltered && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setColumnFilters(p => ({ ...p, partNoText: '', partNoStatus: 'all' }));
+                              if (sortColumn === 'part_no') {
+                                setSortColumn(null);
+                                setSortDirection('default');
+                              }
+                            }}
+                            className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 cursor-pointer"
+                          >
+                            <RotateCcw className="w-3 h-3" /> Reset
+                          </button>
+                        )}
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">Search Part Number</label>
+                        <div className="relative">
+                          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                          <input
+                            type="text"
+                            placeholder="e.g. 58101, MOBIS..."
+                            value={columnFilters.partNoText}
+                            onChange={(e) => setColumnFilters(p => ({ ...p, partNoText: e.target.value }))}
+                            className="w-full pl-8 pr-3 py-1.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                            autoFocus
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">Part Status</label>
+                        <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl">
+                          {(['all', 'active', 'archived'] as const).map(st => (
+                            <button
+                              key={st}
+                              type="button"
+                              onClick={() => setColumnFilters(p => ({ ...p, partNoStatus: st }))}
+                              className={`py-1 rounded-lg text-[11px] font-bold capitalize transition cursor-pointer ${
+                                columnFilters.partNoStatus === st
+                                  ? 'bg-white text-indigo-600 shadow-xs'
+                                  : 'text-slate-500 hover:text-slate-800'
+                              }`}
+                            >
+                              {st}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">Sort Part Number</label>
+                        <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl">
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('part_no', 'none')}
+                            className={`py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                              sortColumn === 'part_no' && sortDirection !== 'default'
+                                ? 'text-slate-500 hover:text-slate-800'
+                                : 'bg-white text-indigo-600 shadow-xs'
+                            }`}
+                          >
+                            Default
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('part_no', 'asc')}
+                            className={`py-1 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
+                              sortColumn === 'part_no' && sortDirection === 'asc'
+                                ? 'bg-white text-indigo-600 shadow-xs'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            <ArrowDownAZ className="w-3 h-3" /> A-Z
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('part_no', 'desc')}
+                            className={`py-1 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
+                              sortColumn === 'part_no' && sortDirection === 'desc'
+                                ? 'bg-white text-indigo-600 shadow-xs'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            <ArrowUpAZ className="w-3 h-3" /> Z-A
+                          </button>
+                        </div>
+                      </div>
+                      <div className="pt-2 border-t border-slate-100 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => setActiveFilterDropdown(null)}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-1 rounded-lg text-xs cursor-pointer shadow-xs"
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </th>
+
+                {/* Column 2: Part Name */}
+                <th 
+                  className={`p-3.5 relative select-none transition-colors group/col cursor-pointer ${
+                    sortColumn === 'part_name' && sortDirection !== 'default'
+                      ? 'bg-indigo-50/80 text-indigo-900'
+                      : 'hover:bg-slate-100/80 text-slate-700'
+                  }`}
+                  onClick={() => handleToggleSort('part_name')}
+                  title={`Sort by Part Name: currently ${sortColumn === 'part_name' ? sortDirection : 'default'}. Click to toggle Ascending → Descending → Default.`}
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <div className="flex items-center gap-1.5 font-bold group-hover/col:text-indigo-600 transition-colors">
+                      <span>Part Name</span>
+                      {renderSortIndicator('part_name', 'alpha')}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveFilterDropdown(prev => prev === 'partName' ? null : 'partName');
+                      }}
+                      className={`p-1 rounded-md transition-colors cursor-pointer flex items-center justify-center ${
+                        isPartNameFiltered 
+                          ? 'bg-indigo-600 text-white shadow-xs' 
+                          : 'text-slate-400 hover:text-indigo-600 hover:bg-slate-200/80'
+                      }`}
+                      title={isPartNameFiltered ? 'Filter active on Part Name' : 'Filter by Part Name'}
+                    >
+                      <Filter className={`w-3 h-3 ${isPartNameFiltered ? 'fill-white' : ''}`} />
+                    </button>
+                  </div>
+
+                  {activeFilterDropdown === 'partName' && (
+                    <div 
+                      onClick={(e) => e.stopPropagation()} 
+                      className="absolute left-0 top-full mt-2 w-72 bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 text-xs font-normal normal-case text-slate-700 z-30 space-y-3 animate-in fade-in zoom-in-95 duration-100"
+                    >
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                        <span className="font-bold text-slate-900 text-xs">Filter Part Name</span>
+                        {isPartNameFiltered && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setColumnFilters(p => ({ ...p, partNameText: '', sortByName: 'none' }));
+                              if (sortColumn === 'part_name') {
+                                setSortColumn(null);
+                                setSortDirection('default');
+                              }
+                            }}
+                            className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 cursor-pointer"
+                          >
+                            <RotateCcw className="w-3 h-3" /> Reset
+                          </button>
+                        )}
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">Search Keywords</label>
+                        <div className="relative">
+                          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                          <input
+                            type="text"
+                            placeholder="e.g. Brake Pad, Filter..."
+                            value={columnFilters.partNameText}
+                            onChange={(e) => setColumnFilters(p => ({ ...p, partNameText: e.target.value }))}
+                            className="w-full pl-8 pr-3 py-1.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                            autoFocus
+                          />
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">Alphabetical Sort</label>
+                        <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl">
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('part_name', 'none')}
+                            className={`py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                              sortColumn === 'part_name' && sortDirection !== 'default'
+                                ? 'text-slate-500 hover:text-slate-800'
+                                : 'bg-white text-indigo-600 shadow-xs'
+                            }`}
+                          >
+                            Default
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('part_name', 'asc')}
+                            className={`py-1 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
+                              sortColumn === 'part_name' && sortDirection === 'asc'
+                                ? 'bg-white text-indigo-600 shadow-xs'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            <ArrowDownAZ className="w-3 h-3" /> A-Z
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('part_name', 'desc')}
+                            className={`py-1 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
+                              sortColumn === 'part_name' && sortDirection === 'desc'
+                                ? 'bg-white text-indigo-600 shadow-xs'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            <ArrowUpAZ className="w-3 h-3" /> Z-A
+                          </button>
+                        </div>
+                      </div>
+                      <div className="pt-2 border-t border-slate-100 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => setActiveFilterDropdown(null)}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-1 rounded-lg text-xs cursor-pointer shadow-xs"
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </th>
+
+                {/* Column 3: Quantity in Stock */}
+                <th 
+                  className={`p-3.5 relative select-none transition-colors group/col cursor-pointer ${
+                    sortColumn === 'quantity' && sortDirection !== 'default'
+                      ? 'bg-indigo-50/80 text-indigo-900'
+                      : 'hover:bg-slate-100/80 text-slate-700'
+                  }`}
+                  onClick={() => handleToggleSort('quantity')}
+                  title={`Sort by Quantity: currently ${sortColumn === 'quantity' ? sortDirection : 'default'}. Click to toggle Low-High → High-Low → Default.`}
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <div className="flex items-center gap-1.5 font-bold group-hover/col:text-indigo-600 transition-colors">
+                      <span>Quantity in Stock</span>
+                      {renderSortIndicator('quantity', 'numeric')}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveFilterDropdown(prev => prev === 'quantity' ? null : 'quantity');
+                      }}
+                      className={`p-1 rounded-md transition-colors cursor-pointer flex items-center justify-center ${
+                        isQuantityFiltered 
+                          ? 'bg-indigo-600 text-white shadow-xs' 
+                          : 'text-slate-400 hover:text-indigo-600 hover:bg-slate-200/80'
+                      }`}
+                      title={isQuantityFiltered ? 'Filter active on Quantity' : 'Filter by Quantity'}
+                    >
+                      <Filter className={`w-3 h-3 ${isQuantityFiltered ? 'fill-white' : ''}`} />
+                    </button>
+                  </div>
+
+                  {activeFilterDropdown === 'quantity' && (
+                    <div 
+                      onClick={(e) => e.stopPropagation()} 
+                      className="absolute left-0 top-full mt-2 w-80 bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 text-xs font-normal normal-case text-slate-700 z-30 space-y-3 animate-in fade-in zoom-in-95 duration-100"
+                    >
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                        <span className="font-bold text-slate-900 text-xs">Filter Stock Quantity</span>
+                        {isQuantityFiltered && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setColumnFilters(p => ({ ...p, quantityPreset: 'all', minQuantity: '', maxQuantity: '', sortByQuantity: 'none' }));
+                              if (sortColumn === 'quantity') {
+                                setSortColumn(null);
+                                setSortDirection('default');
+                              }
+                            }}
+                            className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 cursor-pointer"
+                          >
+                            <RotateCcw className="w-3 h-3" /> Reset
+                          </button>
+                        )}
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">Stock Availability</label>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {[
+                            { id: 'all', label: 'All Quantities' },
+                            { id: 'in_stock', label: 'In Stock (> 0)' },
+                            { id: 'out_of_stock', label: 'Out of Stock (0)' },
+                            { id: 'low_stock', label: `Low Stock (≤ ${lowStockThreshold})` },
+                            { id: 'high_stock', label: 'Surplus (≥ 50)' },
+                            { id: 'custom', label: 'Custom Range' },
+                          ].map(opt => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => setColumnFilters(p => ({ ...p, quantityPreset: opt.id as any }))}
+                              className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-left transition border cursor-pointer ${
+                                columnFilters.quantityPreset === opt.id
+                                  ? 'bg-indigo-50 border-indigo-300 text-indigo-700 font-bold'
+                                  : 'border-slate-200 hover:bg-slate-50 text-slate-600'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {columnFilters.quantityPreset === 'custom' && (
+                        <div className="space-y-1 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                          <label className="text-[10px] font-bold text-slate-600 uppercase">Quantity Range (Min - Max)</label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              placeholder="Min"
+                              value={columnFilters.minQuantity}
+                              onChange={(e) => setColumnFilters(p => ({ ...p, minQuantity: e.target.value }))}
+                              className="w-1/2 p-1.5 border border-slate-300 rounded-lg text-xs bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                            />
+                            <span className="text-slate-400 font-bold">-</span>
+                            <input
+                              type="number"
+                              placeholder="Max"
+                              value={columnFilters.maxQuantity}
+                              onChange={(e) => setColumnFilters(p => ({ ...p, maxQuantity: e.target.value }))}
+                              className="w-1/2 p-1.5 border border-slate-300 rounded-lg text-xs bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">Sort by Quantity</label>
+                        <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl">
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('quantity', 'none')}
+                            className={`py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                              sortColumn === 'quantity' && sortDirection !== 'default'
+                                ? 'text-slate-500 hover:text-slate-800'
+                                : 'bg-white text-indigo-600 shadow-xs'
+                            }`}
+                          >
+                            Default
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('quantity', 'asc')}
+                            className={`py-1 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
+                              sortColumn === 'quantity' && sortDirection === 'asc'
+                                ? 'bg-white text-indigo-600 shadow-xs'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            <ArrowDown10 className="w-3 h-3" /> Low-High
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('quantity', 'desc')}
+                            className={`py-1 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
+                              sortColumn === 'quantity' && sortDirection === 'desc'
+                                ? 'bg-white text-indigo-600 shadow-xs'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            <ArrowUp10 className="w-3 h-3" /> High-Low
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-100 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => setActiveFilterDropdown(null)}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-1 rounded-lg text-xs cursor-pointer shadow-xs"
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </th>
+
+                {/* Column 4: HSN Code */}
+                <th 
+                  className={`p-3.5 relative select-none transition-colors group/col cursor-pointer ${
+                    sortColumn === 'hsn' && sortDirection !== 'default'
+                      ? 'bg-indigo-50/80 text-indigo-900'
+                      : 'hover:bg-slate-100/80 text-slate-700'
+                  }`}
+                  onClick={() => handleToggleSort('hsn')}
+                  title={`Sort by HSN Code: currently ${sortColumn === 'hsn' ? sortDirection : 'default'}. Click to toggle Ascending → Descending → Default.`}
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <div className="flex items-center gap-1.5 font-bold group-hover/col:text-indigo-600 transition-colors">
+                      <span>HSN Code</span>
+                      {renderSortIndicator('hsn', 'alpha')}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveFilterDropdown(prev => prev === 'hsn' ? null : 'hsn');
+                      }}
+                      className={`p-1 rounded-md transition-colors cursor-pointer flex items-center justify-center ${
+                        isHsnFiltered 
+                          ? 'bg-indigo-600 text-white shadow-xs' 
+                          : 'text-slate-400 hover:text-indigo-600 hover:bg-slate-200/80'
+                      }`}
+                      title={isHsnFiltered ? 'Filter active on HSN' : 'Filter by HSN'}
+                    >
+                      <Filter className={`w-3 h-3 ${isHsnFiltered ? 'fill-white' : ''}`} />
+                    </button>
+                  </div>
+
+                  {activeFilterDropdown === 'hsn' && (
+                    <div 
+                      onClick={(e) => e.stopPropagation()} 
+                      className="absolute right-0 top-full mt-2 w-72 bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 text-xs font-normal normal-case text-slate-700 z-30 space-y-3 animate-in fade-in zoom-in-95 duration-100"
+                    >
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                        <span className="font-bold text-slate-900 text-xs">Filter HSN Code</span>
+                        {isHsnFiltered && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setColumnFilters(p => ({ ...p, hsnText: '', hsnStatus: 'all', selectedHsns: [] }));
+                              if (sortColumn === 'hsn') {
+                                setSortColumn(null);
+                                setSortDirection('default');
+                              }
+                            }}
+                            className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 cursor-pointer"
+                          >
+                            <RotateCcw className="w-3 h-3" /> Reset
+                          </button>
+                        )}
+                      </div>
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">Search HSN Code</label>
+                        <div className="relative">
+                          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                          <input
+                            type="text"
+                            placeholder="e.g. 8708, 4016..."
+                            value={columnFilters.hsnText}
+                            onChange={(e) => setColumnFilters(p => ({ ...p, hsnText: e.target.value }))}
+                            className="w-full pl-8 pr-3 py-1.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                            autoFocus
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">HSN Completeness</label>
+                        <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl">
+                          {[
+                            { id: 'all', label: 'All' },
+                            { id: 'has_hsn', label: 'Has HSN' },
+                            { id: 'no_hsn', label: 'Missing' },
+                          ].map(st => (
+                            <button
+                              key={st.id}
+                              type="button"
+                              onClick={() => setColumnFilters(p => ({ ...p, hsnStatus: st.id as any }))}
+                              className={`py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                                columnFilters.hsnStatus === st.id
+                                  ? 'bg-white text-indigo-600 shadow-xs'
+                                  : 'text-slate-500 hover:text-slate-800'
+                              }`}
+                            >
+                              {st.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">Sort HSN Code</label>
+                        <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl">
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('hsn', 'none')}
+                            className={`py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                              sortColumn === 'hsn' && sortDirection !== 'default'
+                                ? 'text-slate-500 hover:text-slate-800'
+                                : 'bg-white text-indigo-600 shadow-xs'
+                            }`}
+                          >
+                            Default
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('hsn', 'asc')}
+                            className={`py-1 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
+                              sortColumn === 'hsn' && sortDirection === 'asc'
+                                ? 'bg-white text-indigo-600 shadow-xs'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            <ArrowDownAZ className="w-3 h-3" /> Asc
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('hsn', 'desc')}
+                            className={`py-1 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
+                              sortColumn === 'hsn' && sortDirection === 'desc'
+                                ? 'bg-white text-indigo-600 shadow-xs'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            <ArrowUpAZ className="w-3 h-3" /> Desc
+                          </button>
+                        </div>
+                      </div>
+
+                      {availableHsnCodes.length > 0 && (
+                        <div className="space-y-1.5">
+                          <label className="text-[11px] font-semibold text-slate-600">Frequently Used HSN Codes</label>
+                          <div className="max-h-28 overflow-y-auto space-y-1 pr-1">
+                            {availableHsnCodes.map(([hsn, count]) => {
+                              const isChecked = columnFilters.selectedHsns.includes(hsn);
+                              return (
+                                <label key={hsn} className="flex items-center justify-between p-1.5 rounded-lg hover:bg-slate-50 border border-slate-100 cursor-pointer text-[11px]">
+                                  <span className="flex items-center gap-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      onChange={(e) => {
+                                        if (e.target.checked) {
+                                          setColumnFilters(p => ({ ...p, selectedHsns: [...p.selectedHsns, hsn] }));
+                                        } else {
+                                          setColumnFilters(p => ({ ...p, selectedHsns: p.selectedHsns.filter(x => x !== hsn) }));
+                                        }
+                                      }}
+                                      className="rounded text-indigo-600 focus:ring-0 cursor-pointer"
+                                    />
+                                    <span className="font-mono font-medium text-slate-800">{hsn}</span>
+                                  </span>
+                                  <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded-full">{count}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="pt-2 border-t border-slate-100 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => setActiveFilterDropdown(null)}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-1 rounded-lg text-xs cursor-pointer shadow-xs"
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </th>
+
+                {/* Column 5: MRP (INR) */}
+                <th 
+                  className={`p-3.5 relative select-none transition-colors group/col cursor-pointer ${
+                    sortColumn === 'mrp' && sortDirection !== 'default'
+                      ? 'bg-indigo-50/80 text-indigo-900'
+                      : 'hover:bg-slate-100/80 text-slate-700'
+                  }`}
+                  onClick={() => handleToggleSort('mrp')}
+                  title={`Sort by MRP: currently ${sortColumn === 'mrp' ? sortDirection : 'default'}. Click to toggle Low-High → High-Low → Default.`}
+                >
+                  <div className="flex items-center justify-between gap-1.5">
+                    <div className="flex items-center gap-1.5 font-bold group-hover/col:text-indigo-600 transition-colors">
+                      <span>MRP (INR)</span>
+                      {renderSortIndicator('mrp', 'numeric')}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setActiveFilterDropdown(prev => prev === 'mrp' ? null : 'mrp');
+                      }}
+                      className={`p-1 rounded-md transition-colors cursor-pointer flex items-center justify-center ${
+                        isPriceFiltered 
+                          ? 'bg-indigo-600 text-white shadow-xs' 
+                          : 'text-slate-400 hover:text-indigo-600 hover:bg-slate-200/80'
+                      }`}
+                      title={isPriceFiltered ? 'Filter active on MRP' : 'Filter by MRP'}
+                    >
+                      <Filter className={`w-3 h-3 ${isPriceFiltered ? 'fill-white' : ''}`} />
+                    </button>
+                  </div>
+
+                  {activeFilterDropdown === 'mrp' && (
+                    <div 
+                      onClick={(e) => e.stopPropagation()} 
+                      className="absolute right-0 top-full mt-2 w-80 bg-white rounded-2xl shadow-2xl border border-slate-200 p-4 text-xs font-normal normal-case text-slate-700 z-30 space-y-3 animate-in fade-in zoom-in-95 duration-100"
+                    >
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+                        <span className="font-bold text-slate-900 text-xs">Filter Price (MRP)</span>
+                        {isPriceFiltered && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setColumnFilters(p => ({ ...p, pricePreset: 'all', minPrice: '', maxPrice: '', sortByPrice: 'none' }));
+                              if (sortColumn === 'mrp') {
+                                setSortColumn(null);
+                                setSortDirection('default');
+                              }
+                            }}
+                            className="text-[11px] text-indigo-600 hover:text-indigo-800 font-semibold flex items-center gap-1 cursor-pointer"
+                          >
+                            <RotateCcw className="w-3 h-3" /> Reset
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">Price Brackets</label>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {[
+                            { id: 'all', label: 'All Prices' },
+                            { id: 'under_500', label: 'Under ₹500' },
+                            { id: '500_2000', label: '₹500 - ₹2,000' },
+                            { id: '2000_10000', label: '₹2,000 - ₹10,000' },
+                            { id: 'above_10000', label: 'Above ₹10,000' },
+                            { id: 'custom', label: 'Custom Range' },
+                          ].map(opt => (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => setColumnFilters(p => ({ ...p, pricePreset: opt.id as any }))}
+                              className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold text-left transition border cursor-pointer ${
+                                columnFilters.pricePreset === opt.id
+                                  ? 'bg-indigo-50 border-indigo-300 text-indigo-700 font-bold'
+                                  : 'border-slate-200 hover:bg-slate-50 text-slate-600'
+                              }`}
+                            >
+                              {opt.label}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {columnFilters.pricePreset === 'custom' && (
+                        <div className="space-y-1 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                          <label className="text-[10px] font-bold text-slate-600 uppercase">Custom Price Range (₹)</label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="number"
+                              placeholder="Min ₹"
+                              value={columnFilters.minPrice}
+                              onChange={(e) => setColumnFilters(p => ({ ...p, minPrice: e.target.value }))}
+                              className="w-1/2 p-1.5 border border-slate-300 rounded-lg text-xs bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                            />
+                            <span className="text-slate-400 font-bold">-</span>
+                            <input
+                              type="number"
+                              placeholder="Max ₹"
+                              value={columnFilters.maxPrice}
+                              onChange={(e) => setColumnFilters(p => ({ ...p, maxPrice: e.target.value }))}
+                              className="w-1/2 p-1.5 border border-slate-300 rounded-lg text-xs bg-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                            />
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="space-y-1.5">
+                        <label className="text-[11px] font-semibold text-slate-600">Sort by Price</label>
+                        <div className="grid grid-cols-3 gap-1 bg-slate-100 p-1 rounded-xl">
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('mrp', 'none')}
+                            className={`py-1 rounded-lg text-[11px] font-bold transition cursor-pointer ${
+                              sortColumn === 'mrp' && sortDirection !== 'default'
+                                ? 'text-slate-500 hover:text-slate-800'
+                                : 'bg-white text-indigo-600 shadow-xs'
+                            }`}
+                          >
+                            Default
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('mrp', 'asc')}
+                            className={`py-1 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
+                              sortColumn === 'mrp' && sortDirection === 'asc'
+                                ? 'bg-white text-indigo-600 shadow-xs'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            <ArrowDown10 className="w-3 h-3" /> Low-High
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSetSort('mrp', 'desc')}
+                            className={`py-1 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1 transition cursor-pointer ${
+                              sortColumn === 'mrp' && sortDirection === 'desc'
+                                ? 'bg-white text-indigo-600 shadow-xs'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            <ArrowUp10 className="w-3 h-3" /> High-Low
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-100 flex justify-end">
+                        <button
+                          type="button"
+                          onClick={() => setActiveFilterDropdown(null)}
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-1 rounded-lg text-xs cursor-pointer shadow-xs"
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </th>
+
                 <th className="p-4 text-right">{isReadOnly ? 'Access' : 'Actions'}</th>
               </tr>
             </thead>
@@ -768,16 +1934,24 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                   )}
                   <td 
                     onClick={() => setViewingPartDetails(item)}
-                    className="p-4 font-mono font-bold text-slate-900 hover:text-indigo-600 hover:underline cursor-pointer group"
-                    title="Click to view full movement details"
+                    className="p-4 font-mono font-bold text-slate-900 hover:text-indigo-600 cursor-pointer group"
+                    title="Click to view full part and movement details"
                   >
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-indigo-600 group-hover:text-indigo-800 transition duration-150">{item.part_no}</span>
-                      {item.is_active === false && (
-                        <span className="px-1.5 py-0.5 text-[8px] bg-amber-50 text-amber-700 rounded border border-amber-200/60 font-sans tracking-wide uppercase font-black">
-                          Archived
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="text-indigo-600 group-hover:text-indigo-800 group-hover:underline transition duration-150">{item.part_no}</span>
+                        {item.is_active === false && (
+                          <span className="px-1.5 py-0.5 text-[8px] bg-amber-50 text-amber-700 rounded border border-amber-200/60 font-sans tracking-wide uppercase font-black">
+                            Archived
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-sans font-semibold text-slate-400">HSN:</span>
+                        <span className="text-[10px] font-mono text-slate-600 bg-slate-100 group-hover:bg-indigo-50 group-hover:text-indigo-700 group-hover:border-indigo-200 px-1.5 py-0.5 rounded border border-slate-200 transition">
+                          {item.hsn || 'N/A'}
                         </span>
-                      )}
+                      </div>
                     </div>
                   </td>
                   <td 
@@ -829,15 +2003,9 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                       </span>
                     )}
                   </td>
-                  <td className="p-4 text-slate-400 font-mono">{item.hsn || '-'}</td>
                   <td className="p-4 font-bold text-slate-800">₹{item.mrp.toLocaleString('en-IN')}</td>
                   <td className="p-4 text-right">
-                    {isReadOnly ? (
-                      <span className="text-slate-400 text-[10px] font-medium inline-flex items-center gap-1 px-2.5 py-1 bg-slate-100 rounded-lg border border-slate-200 select-none">
-                        <Eye className="w-3 h-3 text-slate-400" />
-                        View Only
-                      </span>
-                    ) : isInlineEditMode ? (
+                    {isInlineEditMode ? (
                       <div className="flex items-center justify-end gap-1.5">
                         <button
                           onClick={() => handleInlineSave(item)}
@@ -861,26 +2029,41 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                         </button>
                       </div>
                     ) : (
-                      isOwnerOrAdmin(user.role) ? (
+                      <div className="flex items-center justify-end gap-1.5">
                         <button
-                          onClick={() => handleOpenEdit(item)}
-                          className="p-1 px-2 hover:bg-indigo-50 rounded text-indigo-600 font-bold hover:underline inline-flex items-center gap-1"
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenOrderRequestModal(item);
+                          }}
+                          className="px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-600 text-indigo-700 hover:text-white border border-indigo-200 hover:border-indigo-600 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+                          title={`Request order for ${item.part_no}`}
                         >
-                          <Pencil className="w-3.5 h-3.5" />
-                          Edit
+                          <ClipboardPlus className="w-3.5 h-3.5" />
+                          <span>Request</span>
                         </button>
-                      ) : (
-                        <span className="text-slate-400 text-[10px] italic pr-2 px-2 py-1 bg-slate-50 rounded-lg border border-slate-200 select-none">
-                          🔑 View Only
-                        </span>
-                      )
+
+                        {isOwnerOrAdmin(user.role) && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenEdit(item);
+                            }}
+                            className="p-1.5 px-2 hover:bg-slate-100 text-slate-600 hover:text-slate-900 rounded-lg font-bold border border-slate-200 hover:border-slate-300 inline-flex items-center gap-1 text-xs transition cursor-pointer"
+                            title="Edit part details"
+                          >
+                            <Pencil className="w-3.5 h-3.5 text-slate-500" />
+                            <span>Edit</span>
+                          </button>
+                        )}
+                      </div>
                     )}
                   </td>
                 </tr>
               ))}
               {filteredList.length === 0 && (
                 <tr>
-                  <td colSpan={isReadOnly ? 6 : 7} className="p-12 text-center text-slate-400">
+                  <td colSpan={isReadOnly ? 5 : 6} className="p-12 text-center text-slate-400">
                     No results matched your search configurations.
                   </td>
                 </tr>
@@ -1313,7 +2496,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                 <div className="flex items-center gap-2">
                   <History className="w-5 h-5 text-indigo-600" />
                   <span className="font-sans text-[10px] uppercase font-extrabold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-full tracking-wider">
-                    Movement Ledger
+                    Part Details &amp; Movement Ledger
                   </span>
                 </div>
                 <h3 className="font-bold text-slate-900 text-lg font-sans flex items-baseline gap-2">
@@ -1322,21 +2505,84 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                   <span className="text-slate-700 text-sm font-semibold">{viewingPartDetails.part_name}</span>
                 </h3>
               </div>
-              <button 
-                onClick={() => {
-                  setViewingPartDetails(null);
-                  setMovementTab('all');
-                }}
-                className="p-1.5 hover:bg-slate-200 rounded-xl text-slate-500 cursor-pointer transition duration-150"
-                title="Close"
-              >
-                <X className="w-5 h-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const item = viewingPartDetails;
+                    setViewingPartDetails(null);
+                    handleOpenOrderRequestModal(item);
+                  }}
+                  className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-xs"
+                >
+                  <ClipboardPlus className="w-4 h-4" />
+                  <span>+ Add to Order Request</span>
+                </button>
+                <button 
+                  onClick={() => {
+                    setViewingPartDetails(null);
+                    setMovementTab('all');
+                  }}
+                  className="p-1.5 hover:bg-slate-200 rounded-xl text-slate-500 cursor-pointer transition duration-150"
+                  title="Close"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
 
             {/* Modal Body */}
             <div className="p-6 overflow-y-auto space-y-6 flex-1 min-h-0">
               
+              {/* Part Master Specifications Box (HSN, MRP, Brand, Status) */}
+              <div className="bg-gradient-to-r from-slate-50 to-indigo-50/40 border border-indigo-100/80 rounded-2xl p-4">
+                <div className="text-[11px] font-bold uppercase tracking-wider text-indigo-900 mb-3 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
+                  Part Master Details &amp; Tax Classification
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">HSN / SAC Code</span>
+                    <span className="text-base font-bold font-mono text-indigo-700 mt-1 block">
+                      {viewingPartDetails.hsn || <span className="text-slate-400 font-normal italic">Not Specified</span>}
+                    </span>
+                    <span className="text-[10px] text-slate-500 mt-0.5 block">Harmonized Tariff Code</span>
+                  </div>
+
+                  <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Retail MRP</span>
+                    <span className="text-base font-bold font-mono text-slate-900 mt-1 block">
+                      ₹{viewingPartDetails.mrp.toLocaleString('en-IN')}
+                    </span>
+                    <span className="text-[10px] text-slate-500 mt-0.5 block">Per unit price</span>
+                  </div>
+
+                  <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Brand Catalog</span>
+                    <span className="text-base font-bold text-slate-800 mt-1 block capitalize">
+                      {brand}
+                    </span>
+                    <span className="text-[10px] text-slate-500 mt-0.5 block">Vehicle Segment</span>
+                  </div>
+
+                  <div className="bg-white p-3 rounded-xl border border-slate-200 shadow-2xs">
+                    <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">Status</span>
+                    <div className="mt-1">
+                      {viewingPartDetails.is_active !== false ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                          <CheckCircle2 className="w-3 h-3" /> Active
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-bold bg-amber-50 text-amber-700 border border-amber-200">
+                          <Archive className="w-3 h-3" /> Archived
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-[10px] text-slate-500 mt-0.5 block">Billing availability</span>
+                  </div>
+                </div>
+              </div>
+
               {/* Part Quick Meta / KPIs */}
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 
@@ -1528,6 +2774,168 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
               </button>
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* Direct Order Request Modal */}
+      {orderRequestingItem && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md border border-slate-200 overflow-hidden transform transition animate-in fade-in zoom-in-95 duration-150">
+            <div className="bg-indigo-600 px-6 py-4 flex items-center justify-between text-white">
+              <div className="flex items-center gap-2">
+                <ClipboardPlus className="w-5 h-5 text-indigo-200" />
+                <h3 className="font-bold text-base">Add to Order Request</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOrderRequestingItem(null)}
+                className="p-1 hover:bg-white/20 rounded-lg transition cursor-pointer text-white/80 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmOrderRequest} className="p-6 space-y-4">
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="font-mono font-bold text-indigo-700 text-sm">
+                    {orderRequestingItem.part_no}
+                  </span>
+                  <span className="text-[11px] font-semibold text-slate-500 bg-white px-2 py-0.5 rounded border border-slate-200">
+                    Stock: {orderRequestingItem.quantity}
+                  </span>
+                </div>
+                <div className="text-xs font-medium text-slate-700 line-clamp-2">
+                  {orderRequestingItem.part_name}
+                </div>
+                <div className="text-[11px] text-slate-500 flex items-center justify-between pt-1 border-t border-slate-200/60">
+                  <span>HSN: <strong className="font-mono text-slate-700">{orderRequestingItem.hsn || 'N/A'}</strong></span>
+                  <span>MRP: <strong className="text-slate-900">₹{orderRequestingItem.mrp.toLocaleString('en-IN')}</strong></span>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                  Requested Quantity <span className="text-rose-600">*</span>
+                </label>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setOrderRequestQuantity(q => Math.max(1, q - 1))}
+                    className="w-10 h-10 flex items-center justify-center bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-base transition cursor-pointer"
+                  >
+                    -
+                  </button>
+                  <input
+                    type="number"
+                    min="1"
+                    required
+                    value={orderRequestQuantity}
+                    onChange={(e) => setOrderRequestQuantity(Math.max(1, parseInt(e.target.value) || 1))}
+                    className="flex-1 px-3 py-2 text-center text-base font-bold font-mono border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setOrderRequestQuantity(q => q + 1)}
+                    className="w-10 h-10 flex items-center justify-center bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-base transition cursor-pointer"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Reason
+                  </label>
+                  <select
+                    value={orderRequestReason}
+                    onChange={(e) => setOrderRequestReason(e.target.value as any)}
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none font-medium bg-white"
+                  >
+                    <option value="Out of Stock">Out of Stock</option>
+                    <option value="Customer Demand">Customer Demand</option>
+                    <option value="Regular Reorder">Regular Reorder</option>
+                    <option value="Emergency">Emergency</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Urgency
+                  </label>
+                  <select
+                    value={orderRequestUrgency}
+                    onChange={(e) => setOrderRequestUrgency(e.target.value as any)}
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none font-medium bg-white"
+                  >
+                    <option value="Low">Low</option>
+                    <option value="Medium">Medium</option>
+                    <option value="High">High</option>
+                    <option value="Critical">Critical</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Customer Name <span className="text-slate-400 font-normal">(opt)</span>
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Rahul Sharma"
+                    value={orderRequestCustomer}
+                    onChange={(e) => setOrderRequestCustomer(e.target.value)}
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Customer Phone <span className="text-slate-400 font-normal">(opt)</span>
+                  </label>
+                  <input
+                    type="tel"
+                    placeholder="e.g. 9876543210"
+                    value={orderRequestCustomerPhone}
+                    onChange={(e) => setOrderRequestCustomerPhone(e.target.value)}
+                    className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Notes / Specification <span className="text-slate-400 font-normal">(opt)</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Required by Monday for urgent repair"
+                  value={orderRequestNotes}
+                  onChange={(e) => setOrderRequestNotes(e.target.value)}
+                  className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setOrderRequestingItem(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl transition cursor-pointer shadow-xs"
+                >
+                  Add to Request
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
