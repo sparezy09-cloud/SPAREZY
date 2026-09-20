@@ -593,7 +593,7 @@ export default function App() {
             className="w-full bg-slate-800 hover:bg-slate-750 text-slate-300 hover:text-white py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition text-[10px] font-bold cursor-pointer border border-slate-700"
           >
             <LogOut className="w-3.5 h-3.5" />
-            Switch Brand
+            Log Out
           </button>
         </div>
 
@@ -786,7 +786,7 @@ export default function App() {
                 className="w-full bg-slate-800 hover:bg-slate-755 text-white py-2 rounded-xl flex items-center justify-center gap-1"
               >
                 <LogOut className="w-4 h-4" />
-                Change Brand Database
+                Log Out
               </button>
             </div>
 

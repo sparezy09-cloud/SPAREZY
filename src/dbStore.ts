@@ -1789,7 +1789,8 @@ export const db = {
         ...list[existingIdx],
         part_name: part.part_name ?? list[existingIdx].part_name,
         hsn: part.hsn ?? list[existingIdx].hsn,
-        mrp: part.mrp ?? list[existingIdx].mrp,
+        // MRP can strictly only be updated by the MRP update tool in the bulk update system
+        mrp: list[existingIdx].mrp,
         quantity: part.quantity ?? list[existingIdx].quantity,
         is_active: part.is_active ?? list[existingIdx].is_active,
         archived_at: part.is_active === false ? new Date().toISOString() : null,
@@ -1807,7 +1808,6 @@ export const db = {
         supabase.schema(b).from('inventory').update({
           part_name: updated.part_name,
           hsn: updated.hsn,
-          mrp: updated.mrp,
           quantity: updated.quantity,
           is_active: updated.is_active,
           archived_at: updated.archived_at,
@@ -1816,27 +1816,10 @@ export const db = {
       } else {
         localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(list));
       }
+      idbStore.set('cache_partitions', `${b}_inventory`, list);
       
       db.logTransaction(user.id, user.name, 'Edit Inventory', 'Inventory', `Manual update of part ${part.part_no}`, oldItem, updated);
       
-      if (part.mrp !== undefined && part.mrp !== oldItem.mrp) {
-        const historyList = cache[b].mrp_history;
-        const mrpRec: MRPHistory = {
-          id: uuid(),
-          part_no: part.part_no || '',
-          old_mrp: oldItem.mrp,
-          new_mrp: part.mrp,
-          changed_by: user.name,
-          changed_at: new Date().toISOString()
-        };
-        historyList.unshift(mrpRec);
-        
-        if (isSupabaseConfigured && supabase) {
-          supabase.schema(b).from('mrp_history').insert(mrpRec).then();
-        } else {
-          localStorage.setItem(`sparezy_schema_${b}_mrp_history`, JSON.stringify(historyList));
-        }
-      }
       db.notify();
       return updated;
     } else {
@@ -2686,9 +2669,8 @@ export const db = {
       
       if (hasMatched) {
         const invPart = inventory[invIdx];
-        const oldInv = { ...invPart };
         invPart.quantity += pItem.quantity;
-        invPart.mrp = pItem.mrp;
+        // Strictly do NOT update MRP in purchase tab: MRP can only be updated by the MRP update tool in Bulk Update
         if (!invPart.is_active) {
           invPart.is_active = true;
           invPart.archived_at = null;
@@ -2698,32 +2680,12 @@ export const db = {
         if (isSupabaseConfigured && supabase) {
           const { error: invErr } = await supabase.schema(b).from('inventory').update({
             quantity: invPart.quantity,
-            mrp: invPart.mrp,
             is_active: invPart.is_active,
             archived_at: invPart.archived_at,
             updated_at: invPart.updated_at
           }).eq('id', invPart.id);
           if (invErr) {
             throw new Error(`Failed to update stock quantity for part ${invPart.part_no}: ${invErr.message}`);
-          }
-        }
-        
-        if (pItem.mrp !== oldInv.mrp) {
-          const mrpHistory = cache[b].mrp_history;
-          const mrpRec = {
-            id: uuid(),
-            part_no: pItem.part_no,
-            old_mrp: oldInv.mrp,
-            new_mrp: pItem.mrp,
-            changed_by: `${user.name} (Via Purchase)`,
-            changed_at: new Date().toISOString()
-          };
-          mrpHistory.unshift(mrpRec);
-          if (isSupabaseConfigured && supabase) {
-            const { error: mrpErr } = await supabase.schema(b).from('mrp_history').insert(mrpRec);
-            if (mrpErr) {
-               console.warn("❌ Failed to log MRP change in DB:", mrpErr.message);
-            }
           }
         }
       } else {
@@ -2733,7 +2695,8 @@ export const db = {
           part_name: pItem.part_name || 'New Spares Part',
           quantity: pItem.quantity,
           hsn: pItem.hsn || '',
-          mrp: pItem.mrp,
+          // New part created via purchase starts with MRP 0; MRP can only be updated via the Bulk MRP Update tool
+          mrp: 0,
           brand,
           is_active: true,
           archived_at: null,
@@ -2799,6 +2762,9 @@ export const db = {
       localStorage.setItem(`sparezy_schema_${b}_purchases`, JSON.stringify(listPurchases));
       localStorage.setItem(`sparezy_schema_${b}_purchase_items`, JSON.stringify(purchaseItemsList));
     }
+    idbStore.set('cache_partitions', `${b}_inventory`, inventory);
+    idbStore.set('cache_partitions', `${b}_purchases`, listPurchases);
+    idbStore.set('cache_partitions', `${b}_purchase_items`, purchaseItemsList);
     
     db.logTransaction(user.id, user.name, 'Create Purchase', 'Purchases', `Added brand purchase invoice ${invoiceNo} for dealer ${dealerName}`, null, purchase);
     db.notify();
@@ -2874,7 +2840,7 @@ export const db = {
   },
 
   // Bulk processings (Excel/CSV sheets uploads)
-  mrpBulkUpdate: async (brand: Brand, rows: { part_no: string; part_name?: string; hsn?: string; mrp: number }[], fileName: string, user: User): Promise<BulkUpdateHistory> => {
+  mrpBulkUpdate: async (brand: Brand, rows: { part_no: string; part_name?: string; hsn?: string; mrp: number }[], fileName: string, user: User, onProgress?: (progress: number, status?: string) => void): Promise<BulkUpdateHistory> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const inventory = cache[b].inventory;
     const mrpHistory = cache[b].mrp_history;
@@ -2882,6 +2848,8 @@ export const db = {
     
     let successCount = 0;
     let failedCount = 0;
+    
+    onProgress?.(5, `Analyzing ${rows.length} rows and matching with inventory...`);
     
     if (isSupabaseConfigured && supabase) {
       const itemsToUpdateMap = new Map<string, any>();
@@ -2898,7 +2866,12 @@ export const db = {
         inventoryLookupMap.set(inventory[i].part_no.toLowerCase(), { item: inventory[i], idx: i });
       }
 
-      for (const row of rows) {
+      for (let rIdx = 0; rIdx < rows.length; rIdx++) {
+        const row = rows[rIdx];
+        if (rIdx % 50 === 0 || rIdx === rows.length - 1) {
+          const rowPct = 5 + Math.round(((rIdx + 1) / rows.length) * 20); // 5% to 25%
+          onProgress?.(rowPct, `Audited ${rIdx + 1} of ${rows.length} rows...`);
+        }
         if (!row.part_no) {
           failedCount++;
           continue;
@@ -2917,9 +2890,17 @@ export const db = {
           const newMrp = row.mrp;
 
           if (oldMrp !== newMrp) {
-            const updatedItem = {
+            const updatedItem: InventoryItem = {
               ...matchedItem,
+              // Strictly overwrite only MRP; keep part_name, part_no, hsn, and quantity untouched
+              part_name: matchedItem.part_name,
+              part_no: matchedItem.part_no,
+              hsn: matchedItem.hsn,
+              quantity: matchedItem.quantity,
               mrp: newMrp,
+              // If part is archived, keep it archived (do NOT unarchive)
+              is_active: matchedItem.is_active,
+              archived_at: matchedItem.archived_at,
               updated_at: new Date().toISOString()
             };
 
@@ -2935,30 +2916,42 @@ export const db = {
             };
 
             mrpHistoryToInsert.push(mrpRec);
-            updatedOriginals.push({ ...matchedItem });
+            if (!itemsToUpdateMap.has(matchedItem.id) || !updatedOriginals.some(o => o.id === matchedItem.id)) {
+              updatedOriginals.push({ ...matchedItem });
+            }
 
             localUpdatedInventoryItemsMap.set(invIdx, { item: updatedItem, mrpRec });
           }
           successCount++;
         } else {
           const previousInsert = itemsToInsertMap.get(cleanPartNo.toLowerCase());
+          const initialQty = (row as any).quantity !== undefined ? Number((row as any).quantity) : 0;
+          const isZeroQty = initialQty === 0;
+
           if (previousInsert) {
             previousInsert.mrp = row.mrp;
-            previousInsert.part_name = row.part_name || previousInsert.part_name;
-            previousInsert.hsn = row.hsn || previousInsert.hsn;
+            if (row.part_name?.trim()) previousInsert.part_name = row.part_name.trim();
+            if (row.hsn?.trim()) previousInsert.hsn = row.hsn.trim();
+            if ((row as any).quantity !== undefined) {
+              const q = Number((row as any).quantity);
+              previousInsert.quantity = q;
+              previousInsert.is_active = q > 0;
+              previousInsert.archived_at = q > 0 ? null : (previousInsert.archived_at || new Date().toISOString());
+            }
             previousInsert.updated_at = new Date().toISOString();
           } else {
             const newId = uuid();
             const newPartItem: InventoryItem = {
               id: newId,
               part_no: cleanPartNo,
-              part_name: row.part_name || 'Bulk Introduced Part',
-              quantity: 0,
-              hsn: row.hsn || '',
+              part_name: row.part_name?.trim() || 'Bulk Introduced Part',
+              quantity: initialQty,
+              hsn: row.hsn?.trim() || '',
               mrp: row.mrp,
               brand,
-              is_active: true,
-              archived_at: null,
+              // If new part added and has zero quantity then archive that part (don't add in active list)
+              is_active: !isZeroQty,
+              archived_at: isZeroQty ? new Date().toISOString() : null,
               created_at: new Date().toISOString(),
               updated_at: new Date().toISOString()
             };
@@ -2973,8 +2966,8 @@ export const db = {
       const itemsToUpdate = Array.from(itemsToUpdateMap.values());
       const itemsToInsert = Array.from(itemsToInsertMap.values());
 
-      const CHUNK_SIZE = 2000;
-      const CONCURRENCY_LIMIT = 10;
+      const CHUNK_SIZE = 500;
+      const CONCURRENCY_LIMIT = 5;
 
       const chunkMyArray = <T>(arr: T[], size: number): T[][] => {
         const result: T[][] = [];
@@ -2984,14 +2977,27 @@ export const db = {
         return result;
       };
 
+      const updateChunks = itemsToUpdate.length > 0 ? chunkMyArray(itemsToUpdate, CHUNK_SIZE) : [];
+      const historyChunks = mrpHistoryToInsert.length > 0 ? chunkMyArray(mrpHistoryToInsert, CHUNK_SIZE) : [];
+      const insertChunks = itemsToInsert.length > 0 ? chunkMyArray(itemsToInsert, CHUNK_SIZE) : [];
+      const totalDbChunks = updateChunks.length + historyChunks.length + insertChunks.length;
+      let completedDbChunks = 0;
+
+      const reportDbChunkProgress = (stage: string) => {
+        completedDbChunks++;
+        const pct = 25 + Math.round((completedDbChunks / Math.max(1, totalDbChunks)) * 60); // 25% to 85%
+        onProgress?.(Math.min(85, pct), `${stage} (Batch ${completedDbChunks}/${totalDbChunks})...`);
+      };
+
       try {
+        onProgress?.(25, "Transacting database updates with Supabase...");
         // 1. Process Updates in chunks
-        if (itemsToUpdate.length > 0) {
-          const updateChunks = chunkMyArray(itemsToUpdate, CHUNK_SIZE);
+        if (updateChunks.length > 0) {
           for (let i = 0; i < updateChunks.length; i += CONCURRENCY_LIMIT) {
             const batch = updateChunks.slice(i, i + CONCURRENCY_LIMIT).map(chunk => 
               supabase.schema(b).from('inventory').upsert(chunk, { onConflict: 'id' }).then(({ error }) => {
                 if (error) throw new Error("Batch update chunk failed: " + error.message);
+                reportDbChunkProgress("Updating inventory MRP records");
               })
             );
             await Promise.all(batch);
@@ -2999,12 +3005,12 @@ export const db = {
         }
 
         // 2. Process MRP History in chunks
-        if (mrpHistoryToInsert.length > 0) {
-          const historyChunks = chunkMyArray(mrpHistoryToInsert, CHUNK_SIZE);
+        if (historyChunks.length > 0) {
           for (let i = 0; i < historyChunks.length; i += CONCURRENCY_LIMIT) {
             const batch = historyChunks.slice(i, i + CONCURRENCY_LIMIT).map(chunk => 
               supabase.schema(b).from('mrp_history').insert(chunk).then(({ error }) => {
                 if (error) throw new Error("Batch MRP history chunk failed: " + error.message);
+                reportDbChunkProgress("Writing MRP price history logs");
               })
             );
             await Promise.all(batch);
@@ -3012,17 +3018,19 @@ export const db = {
         }
 
         // 3. Process Inserts in chunks
-        if (itemsToInsert.length > 0) {
-          const insertChunks = chunkMyArray(itemsToInsert, CHUNK_SIZE);
+        if (insertChunks.length > 0) {
           for (let i = 0; i < insertChunks.length; i += CONCURRENCY_LIMIT) {
             const batch = insertChunks.slice(i, i + CONCURRENCY_LIMIT).map(chunk => 
               supabase.schema(b).from('inventory').insert(chunk).then(({ error }) => {
                 if (error) throw new Error("Batch insert chunk failed: " + error.message);
+                reportDbChunkProgress("Inserting new inventory parts");
               })
             );
             await Promise.all(batch);
           }
         }
+
+        onProgress?.(88, "Synchronizing local caches and IndexedDB storage...");
 
         // Only update local caches if all database calls committed successfully
         const mrpRecsToPrep: any[] = [];
@@ -3040,11 +3048,14 @@ export const db = {
         for (const ins of itemsToInsert) {
           inventory.push(ins);
         }
+        idbStore.set('cache_partitions', `${b}_inventory`, inventory);
+        idbStore.set('cache_partitions', `${b}_mrp`, mrpHistory);
       } catch (dbError: any) {
         reportSupabaseError(b, 'inventory_bulk_mrp', 'batch', dbError.message || String(dbError));
         throw new Error("Bulk MRP batch commit failed: " + (dbError.message || dbError));
       }
 
+      onProgress?.(94, "Recording bulk update transaction audit log...");
       const backupData = JSON.stringify({ updatedOriginals, insertedIds });
 
       const bulkId = uuid();
@@ -3069,6 +3080,7 @@ export const db = {
       }
       
       db.logTransaction(user.id, user.name, 'Bulk Update', 'Bulk Updates', `Completed bulk MRP update using ${fileName}: ${successCount} successful rows, ${failedCount} failing`, null, bulkRec);
+      onProgress?.(100, "MRP Bulk update completed successfully!");
       db.notify();
       return bulkRec;
     } else {
@@ -3076,13 +3088,15 @@ export const db = {
     }
   },
 
-  stockBulkUpdate: async (brand: Brand, rows: { part_no: string; part_name?: string; hsn?: string; quantity: number }[], fileName: string, user: User): Promise<BulkUpdateHistory> => {
+  stockBulkUpdate: async (brand: Brand, rows: { part_no: string; part_name?: string; hsn?: string; quantity: number }[], fileName: string, user: User, onProgress?: (progress: number, status?: string) => void): Promise<BulkUpdateHistory> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const inventory = cache[b].inventory;
     const bulkHistory = cache[b].bulk_update_history;
     
     let successCount = 0;
     let failedCount = 0;
+    
+    onProgress?.(5, `Analyzing ${rows.length} rows and matching with inventory stock...`);
     
     if (isSupabaseConfigured && supabase) {
       const itemsToUpdateMap = new Map<string, any>();
@@ -3097,7 +3111,12 @@ export const db = {
         inventoryLookupMap.set(inventory[i].part_no.toLowerCase(), { item: inventory[i], idx: i });
       }
 
-      for (const row of rows) {
+      for (let rIdx = 0; rIdx < rows.length; rIdx++) {
+        const row = rows[rIdx];
+        if (rIdx % 50 === 0 || rIdx === rows.length - 1) {
+          const rowPct = 5 + Math.round(((rIdx + 1) / rows.length) * 20); // 5% to 25%
+          onProgress?.(rowPct, `Audited ${rIdx + 1} of ${rows.length} rows...`);
+        }
         if (!row.part_no) {
           failedCount++;
           continue;
@@ -3110,28 +3129,35 @@ export const db = {
           const matchedItem = matched.item;
           const invIdx = matched.idx;
           
-          const updatedItem = {
+          const updatedItem: InventoryItem = {
             ...matchedItem,
-            part_name: row.part_name?.trim() ? row.part_name.trim() : matchedItem.part_name,
-            hsn: row.hsn?.trim() ? row.hsn.trim() : matchedItem.hsn,
+            // Strictly overwrite only stock quantity; neither part_name nor part_no nor HSN code
+            part_name: matchedItem.part_name,
+            part_no: matchedItem.part_no,
+            hsn: matchedItem.hsn,
             quantity: row.quantity,
-            is_active: (!matchedItem.is_active && row.quantity > 0) ? true : matchedItem.is_active,
-            archived_at: (!matchedItem.is_active && row.quantity > 0) ? null : matchedItem.archived_at,
+            // If part was in archive, just unarchive it and add quantity
+            is_active: true,
+            archived_at: null,
             updated_at: new Date().toISOString()
           };
 
           itemsToUpdateMap.set(matchedItem.id, updatedItem);
-          updatedOriginals.push({ ...matchedItem });
+          if (!itemsToUpdateMap.has(matchedItem.id) || !updatedOriginals.some(o => o.id === matchedItem.id)) {
+            updatedOriginals.push({ ...matchedItem });
+          }
 
           localUpdatedInventoryItemsMap.set(invIdx, { item: updatedItem });
           successCount++;
         } else {
-          // New part present in Excel - add directly to inventory
+          // New part present in Excel - add directly to inventory in active mode
           const previousInsert = itemsToInsertMap.get(cleanPartNo.toLowerCase());
           if (previousInsert) {
             previousInsert.quantity = row.quantity;
             if (row.part_name?.trim()) previousInsert.part_name = row.part_name.trim();
             if (row.hsn?.trim()) previousInsert.hsn = row.hsn.trim();
+            previousInsert.is_active = true;
+            previousInsert.archived_at = null;
             previousInsert.updated_at = new Date().toISOString();
           } else {
             const newId = uuid();
@@ -3143,6 +3169,7 @@ export const db = {
               hsn: row.hsn?.trim() || '',
               mrp: 0,
               brand,
+              // If new part detected, just add in inventory in active mode
               is_active: true,
               archived_at: null,
               created_at: new Date().toISOString(),
@@ -3159,8 +3186,8 @@ export const db = {
       const itemsToUpdate = Array.from(itemsToUpdateMap.values());
       const itemsToInsert = Array.from(itemsToInsertMap.values());
 
-      const CHUNK_SIZE = 2000;
-      const CONCURRENCY_LIMIT = 10;
+      const CHUNK_SIZE = 500;
+      const CONCURRENCY_LIMIT = 5;
 
       const chunkMyArray = <T>(arr: T[], size: number): T[][] => {
         const result: T[][] = [];
@@ -3170,30 +3197,44 @@ export const db = {
         return result;
       };
 
+      const updateChunks = itemsToUpdate.length > 0 ? chunkMyArray(itemsToUpdate, CHUNK_SIZE) : [];
+      const insertChunks = itemsToInsert.length > 0 ? chunkMyArray(itemsToInsert, CHUNK_SIZE) : [];
+      const totalDbChunks = updateChunks.length + insertChunks.length;
+      let completedDbChunks = 0;
+
+      const reportDbChunkProgress = (stage: string) => {
+        completedDbChunks++;
+        const pct = 25 + Math.round((completedDbChunks / Math.max(1, totalDbChunks)) * 60); // 25% to 85%
+        onProgress?.(Math.min(85, pct), `${stage} (Batch ${completedDbChunks}/${totalDbChunks})...`);
+      };
+
       try {
-        if (itemsToUpdate.length > 0) {
-          const updateChunks = chunkMyArray(itemsToUpdate, CHUNK_SIZE);
+        onProgress?.(25, "Transacting stock overwrites with Supabase...");
+        if (updateChunks.length > 0) {
           for (let i = 0; i < updateChunks.length; i += CONCURRENCY_LIMIT) {
             const batch = updateChunks.slice(i, i + CONCURRENCY_LIMIT).map(chunk => 
               supabase.schema(b).from('inventory').upsert(chunk, { onConflict: 'id' }).then(({ error }) => {
                 if (error) throw new Error("Batch update chunk failed: " + error.message);
+                reportDbChunkProgress("Updating inventory stock quantities");
               })
             );
             await Promise.all(batch);
           }
         }
 
-        if (itemsToInsert.length > 0) {
-          const insertChunks = chunkMyArray(itemsToInsert, CHUNK_SIZE);
+        if (insertChunks.length > 0) {
           for (let i = 0; i < insertChunks.length; i += CONCURRENCY_LIMIT) {
             const batch = insertChunks.slice(i, i + CONCURRENCY_LIMIT).map(chunk => 
               supabase.schema(b).from('inventory').insert(chunk).then(({ error }) => {
                 if (error) throw new Error("Batch insert chunk failed: " + error.message);
+                reportDbChunkProgress("Inserting new active parts");
               })
             );
             await Promise.all(batch);
           }
         }
+
+        onProgress?.(88, "Synchronizing local caches and IndexedDB storage...");
 
         // Apply to local memory only after successful database save
         for (const [idx, up] of localUpdatedInventoryItemsMap.entries()) {
@@ -3208,6 +3249,7 @@ export const db = {
         throw new Error("Bulk stock update batch commit failed: " + (batchErr.message || batchErr));
       }
 
+      onProgress?.(94, "Recording bulk update transaction audit log...");
       const backupData = JSON.stringify({ updatedOriginals, insertedIds });
 
       const bulkId = uuid();
@@ -3232,6 +3274,7 @@ export const db = {
       }
       
       db.logTransaction(user.id, user.name, 'Bulk Update', 'Bulk Updates', `Completed bulk Stock update using ${fileName}: ${successCount} items processed (${itemsToUpdate.length} updated, ${itemsToInsert.length} new parts created), ${failedCount} failed`, null, bulkRec);
+      onProgress?.(100, "Stock Bulk update completed successfully!");
       db.notify();
       return bulkRec;
     } else {

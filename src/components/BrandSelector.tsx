@@ -452,7 +452,7 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
             className="ml-3 text-slate-400 hover:text-rose-400 font-bold hover:underline cursor-pointer border-l border-slate-800 pl-3 leading-none flex items-center gap-1 text-[11px]"
           >
             <LogOut className="w-3 h-3" />
-            Switch Account
+            Log Out
           </button>
         </div>
 

@@ -296,7 +296,7 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
       part_no: formPartNo,
       part_name: formPartName,
       hsn: formHsn,
-      mrp: Number(formMrp),
+      mrp: editingItem ? editingItem.mrp : Number(formMrp),
       quantity: Number(formQuantity),
       is_active: editingItem ? editingItem.is_active : true
     }, user);
@@ -958,17 +958,30 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
 
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-slate-600 mb-1">Maximum Retail Price (INR)</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-slate-600">Maximum Retail Price (INR)</label>
+                    {editingItem && (
+                      <span className="text-[9px] font-bold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                        Bulk MRP Tool Only
+                      </span>
+                    )}
+                  </div>
                   <input
                     type="number"
                     min="0.01"
                     step="0.01"
                     required
+                    disabled={editingItem !== null}
                     placeholder="2500"
-                    className="w-full p-2.5 border border-slate-200 rounded-xl font-mono text-slate-900"
+                    className="w-full p-2.5 border border-slate-200 rounded-xl font-mono text-slate-900 disabled:bg-slate-100 disabled:text-slate-500 disabled:cursor-not-allowed"
                     value={formMrp || ''}
                     onChange={(e) => setFormMrp(Number(e.target.value))}
                   />
+                  {editingItem && (
+                    <p className="text-[10px] text-slate-400 mt-1">
+                      MRP cannot be modified here. Use Bulk Update &gt; MRP Update tool.
+                    </p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-slate-600 mb-1">Stock Quantity (Units)</label>

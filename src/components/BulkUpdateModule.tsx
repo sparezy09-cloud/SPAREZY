@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, DragEvent } from 'react';
 import * as XLSX from 'xlsx';
-import { Brand, User, BulkUpdateHistory, MRPHistory, isOwnerOrAdmin } from '../types';
+import { Brand, User, BulkUpdateHistory, MRPHistory, isOwnerOrAdmin, InventoryItem } from '../types';
 import { db } from '../dbStore';
 import { 
   FileSpreadsheet, UploadCloud, RefreshCw, CheckCircle, 
@@ -18,6 +18,7 @@ interface ParsedBulkMRPRow {
   hsn?: string;
   mrp: number;
   matched: boolean;
+  is_archived?: boolean;
   current_mrp?: number;
 }
 
@@ -27,6 +28,7 @@ interface ParsedBulkStockRow {
   hsn?: string;
   quantity: number;
   matched: boolean;
+  is_archived?: boolean;
   current_qty?: number;
 }
 
@@ -51,6 +53,8 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
   const [parsedLoaded, setParsedLoaded] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<number>(0);
+  const [updateStatusMessage, setUpdateStatusMessage] = useState<string>('');
 
   // Lists
   const [bulkHistory, setBulkHistory] = useState<BulkUpdateHistory[]>(() => db.getBulkHistory(brand));
@@ -121,9 +125,9 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
           throw new Error("The main worksheet is empty or contains no readable rows.");
         }
 
-        // Get inventory list to match parts
-        const currentInventory = db.getInventory(brand);
-        const inventoryMap = new Map<string, any>();
+        // Get complete inventory list to match parts (including archived parts)
+        const currentInventory = db.getInventory(brand, true);
+        const inventoryMap = new Map<string, InventoryItem>();
         for (const item of currentInventory) {
           inventoryMap.set(item.part_no.toUpperCase(), item);
         }
@@ -174,11 +178,13 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
             const existingItem = inventoryMap.get(partNoVal);
 
             parsed.push({
-              part_no: partNoVal,
-              part_name: partName || existingItem?.part_name,
-              hsn: hsn || existingItem?.hsn,
+              part_no: existingItem ? existingItem.part_no : partNoVal,
+              // For existing parts, preserve part name and HSN (do not overwrite)
+              part_name: existingItem ? existingItem.part_name : (partName || 'Bulk Introduced Part'),
+              hsn: existingItem ? existingItem.hsn : (hsn || ''),
               mrp: mrpNum,
               matched: !!existingItem,
+              is_archived: existingItem ? !existingItem.is_active : false,
               current_mrp: existingItem?.mrp
             });
           }
@@ -236,11 +242,13 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
             const existingItem = inventoryMap.get(partNoVal);
 
             parsed.push({
-              part_no: partNoVal,
-              part_name: partName || existingItem?.part_name || 'New Spares Part',
-              hsn: hsn || existingItem?.hsn || '',
+              part_no: existingItem ? existingItem.part_no : partNoVal,
+              // For existing parts, strictly overwrite ONLY stock quantity; neither part name nor HSN code
+              part_name: existingItem ? existingItem.part_name : (partName || 'New Spares Part'),
+              hsn: existingItem ? existingItem.hsn : (hsn || ''),
               quantity: qtyNum,
               matched: !!existingItem,
+              is_archived: existingItem ? !existingItem.is_active : false,
               current_qty: existingItem?.quantity
             });
           }
@@ -318,6 +326,8 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
   const handleApplyBulkUpdates = async () => {
     if (isApplying) return;
     setIsApplying(true);
+    setUpdateProgress(0);
+    setUpdateStatusMessage(`Initiating bulk ${updateType} update...`);
     try {
       if (updateType === 'MRP') {
         if (parsedMRPs.length === 0) return;
@@ -329,7 +339,10 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
           mrp: row.mrp
         }));
 
-        await db.mrpBulkUpdate(brand, payload, fileName, user);
+        await db.mrpBulkUpdate(brand, payload, fileName, user, (progress, status) => {
+          setUpdateProgress(progress);
+          if (status) setUpdateStatusMessage(status);
+        });
         setParsedMRPs([]);
       } else {
         if (parsedStocks.length === 0) return;
@@ -341,9 +354,17 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
           quantity: row.quantity
         }));
 
-        await db.stockBulkUpdate(brand, payload, fileName, user);
+        await db.stockBulkUpdate(brand, payload, fileName, user, (progress, status) => {
+          setUpdateProgress(progress);
+          if (status) setUpdateStatusMessage(status);
+        });
         setParsedStocks([]);
       }
+
+      setUpdateProgress(100);
+      setUpdateStatusMessage("Bulk update 100% complete! Finalizing schema...");
+      // Pause briefly so the user sees the progress bar reach 100%
+      await new Promise(res => setTimeout(res, 600));
 
       setParsedLoaded(false);
       refreshComponentData();
@@ -353,6 +374,8 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
       alert(`Bulk update failed: ${err.message || 'Check database permissions or schema connectivity.'}`);
     } finally {
       setIsApplying(false);
+      setUpdateProgress(0);
+      setUpdateStatusMessage('');
     }
   };
 
@@ -381,12 +404,14 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
     if (updateType === 'MRP') {
       const succ = parsedMRPs.length; 
       const matched = parsedMRPs.filter(r => r.matched).length;
+      const archivedMatched = parsedMRPs.filter(r => r.matched && r.is_archived).length;
       const newParts = parsedMRPs.filter(r => !r.matched).length;
-      return { total: parsedMRPs.length, matched, newParts, success: succ, failed: 0 };
+      return { total: parsedMRPs.length, matched, archivedMatched, unarchiving: 0, newParts, success: succ, failed: 0 };
     } else {
       const matched = parsedStocks.filter(r => r.matched).length;
+      const unarchiving = parsedStocks.filter(r => r.matched && r.is_archived).length;
       const newParts = parsedStocks.filter(r => !r.matched).length;
-      return { total: parsedStocks.length, matched, newParts, success: parsedStocks.length, failed: 0 };
+      return { total: parsedStocks.length, matched, archivedMatched: 0, unarchiving, newParts, success: parsedStocks.length, failed: 0 };
     }
   }, [updateType, parsedMRPs, parsedStocks]);
 
@@ -497,9 +522,13 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
                       {updateType === 'MRP' ? 'PART NO., PART NAME, HSN, MRP' : 'PART NO., PART NAME, HSN, QUANTITY'}
                     </span>. You can edit this sample file and drop it here to sync instantly.
                   </p>
-                  {updateType === 'Stock' && (
-                    <p className="text-[10.5px] text-emerald-800 mt-2 font-medium bg-emerald-100/60 px-2 py-1 rounded-lg">
-                      ✨ <strong>Auto-Add New Parts:</strong> Any new part present in the Excel sheet will automatically be created and added to your inventory!
+                  {updateType === 'Stock' ? (
+                    <p className="text-[10.5px] text-emerald-900 mt-2 font-medium bg-emerald-100/60 px-2.5 py-1.5 rounded-lg leading-relaxed border border-emerald-200/60">
+                      ✨ <strong>Inventory Stock Overwrite:</strong> Overwrites ONLY stock quantity for existing items. Part names, part numbers, and HSN codes are preserved untouched. If a part was in archive, it will be unarchived and its stock updated. Any newly detected part is added in active mode.
+                    </p>
+                  ) : (
+                    <p className="text-[10.5px] text-emerald-900 mt-2 font-medium bg-emerald-100/60 px-2.5 py-1.5 rounded-lg leading-relaxed border border-emerald-200/60">
+                      ✨ <strong>MRP Price Overwrite:</strong> Overwrites ONLY MRP price for existing items. If a part is archived, its MRP is updated without unarchiving it. Any newly detected part with 0 quantity is archived (not added to the active list).
                     </p>
                   )}
                 </div>
@@ -532,16 +561,26 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
                   <p className="text-xs text-slate-400">Please audit calculated columns below before committing.</p>
                 </div>
 
-                <div className="flex gap-2 text-[10px] font-bold">
+                <div className="flex flex-wrap gap-2 text-[10px] font-bold">
                   <span className="bg-indigo-50 text-indigo-700 px-2 py-1 rounded">
                     Total Rows: {previewSummary.total}
                   </span>
                   <span className="bg-emerald-50 text-emerald-700 px-2 py-1 rounded">
                     Existing Parts: {previewSummary.matched}
                   </span>
+                  {updateType === 'Stock' && previewSummary.unarchiving > 0 && (
+                    <span className="bg-purple-50 text-purple-700 px-2 py-1 rounded border border-purple-200">
+                      Unarchiving: {previewSummary.unarchiving}
+                    </span>
+                  )}
+                  {updateType === 'MRP' && previewSummary.archivedMatched > 0 && (
+                    <span className="bg-slate-100 text-slate-700 px-2 py-1 rounded border border-slate-200">
+                      Archived (Stays Archived): {previewSummary.archivedMatched}
+                    </span>
+                  )}
                   {previewSummary.newParts > 0 && (
-                    <span className="bg-blue-50 text-blue-700 px-2 py-1 rounded">
-                      + New Parts (Will Add): {previewSummary.newParts}
+                    <span className={`${updateType === 'MRP' ? 'bg-amber-50 text-amber-800 border border-amber-200' : 'bg-blue-50 text-blue-700 border border-blue-200'} px-2 py-1 rounded`}>
+                      + New Parts: {previewSummary.newParts} {updateType === 'MRP' ? '(Archived - 0 Qty)' : '(Active Mode)'}
                     </span>
                   )}
                 </div>
@@ -576,9 +615,13 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
                         <tr key={row.part_no} className="hover:bg-slate-50/50">
                           <td className="p-3">
                             <span className={`inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                              row.matched ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                              row.matched 
+                                ? (row.is_archived ? 'bg-slate-100 text-slate-700 border border-slate-300' : 'bg-emerald-100 text-emerald-800') 
+                                : 'bg-amber-100 text-amber-800'
                             }`}>
-                              {row.matched ? 'Existing Part' : '+ New Spares Part'}
+                              {row.matched 
+                                ? (row.is_archived ? 'Existing (Archived - Keeps Archived)' : 'Existing (MRP Only)') 
+                                : '+ New Part (Will Archive - 0 Qty)'}
                             </span>
                           </td>
                           <td className="p-3 font-mono font-bold">{row.part_no}</td>
@@ -592,9 +635,13 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
                         <tr key={row.part_no} className="hover:bg-slate-50/50">
                           <td className="p-3">
                             <span className={`inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                              row.matched ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'
+                              row.matched 
+                                ? (row.is_archived ? 'bg-purple-100 text-purple-800 border border-purple-200' : 'bg-emerald-100 text-emerald-800') 
+                                : 'bg-blue-100 text-blue-800'
                             }`}>
-                              {row.matched ? 'Existing Part' : '+ New Part (Will Add)'}
+                              {row.matched 
+                                ? (row.is_archived ? 'Existing (Unarchive & Set Qty)' : 'Existing (Qty Overwrite Only)') 
+                                : '+ New Part (Active Mode)'}
                             </span>
                           </td>
                           <td className="p-3 font-mono font-bold text-slate-900">{row.part_no}</td>
@@ -621,22 +668,56 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
                 </div>
               )}
 
+              {/* Real-time Progress Bar & Status (Inline) */}
+              {isApplying && (
+                <div className="bg-slate-50 border border-indigo-100 rounded-2xl p-4 space-y-2.5 shadow-sm">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <RefreshCw className="w-4 h-4 text-indigo-600 animate-spin" />
+                      <span className="text-xs font-bold text-slate-800">
+                        {updateStatusMessage || `Applying bulk ${updateType} update...`}
+                      </span>
+                    </div>
+                    <span className="font-mono font-black text-sm text-indigo-600">
+                      {Math.round(updateProgress)}%
+                    </span>
+                  </div>
+                  <div className="w-full bg-slate-200/80 rounded-full h-3 overflow-hidden p-0.5 border border-slate-200">
+                    <div
+                      className={`h-full rounded-full transition-all duration-300 ease-out ${
+                        updateProgress === 100
+                          ? 'bg-emerald-500'
+                          : updateType === 'MRP'
+                            ? 'bg-gradient-to-r from-emerald-500 to-teal-500'
+                            : 'bg-gradient-to-r from-indigo-500 to-blue-600'
+                      }`}
+                      style={{ width: `${Math.min(100, Math.max(0, updateProgress))}%` }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-[10px] text-slate-400 font-semibold">
+                    <span>0% Start</span>
+                    <span>Synchronizing with Supabase database</span>
+                    <span>100% Complete</span>
+                  </div>
+                </div>
+              )}
+
               {/* Action */}
               <div className="flex gap-2 justify-end">
                 <button
                   onClick={() => setParsedLoaded(false)}
                   disabled={isApplying}
-                  className="bg-slate-100 text-slate-600 px-4 py-2 rounded-xl disabled:opacity-50"
+                  className="bg-slate-100 text-slate-600 px-4 py-2 rounded-xl disabled:opacity-50 hover:bg-slate-200 transition-colors"
                 >
                   Clear Sheets
                 </button>
                 <button
                   onClick={handleApplyBulkUpdates}
                   disabled={isApplying}
-                  className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-5 py-2 rounded-xl shadow cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+                  className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-5 py-2 rounded-xl shadow cursor-pointer disabled:opacity-50 flex items-center gap-1.5 transition-all"
                 >
                   {isApplying && <RefreshCw className="w-4 h-4 animate-spin" />}
-                  {isApplying ? 'Applying Overwrites...' : 'Apply & Confirm Overwrites'}
+                  {isApplying ? `Applying (${Math.round(updateProgress)}%)...` : 'Apply & Confirm Overwrites'}
                 </button>
               </div>
 
@@ -724,6 +805,91 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
         </div>
 
       </div>
+
+      {/* Full Modal Progress Bar Dialog (0% to 100%) */}
+      {isApplying && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl border border-slate-200 shadow-2xl p-6 sm:p-8 max-w-md w-full space-y-6 animate-in fade-in zoom-in-95 duration-200">
+            
+            {/* Header with status icon and percentage */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3.5">
+                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center transition-colors ${
+                  updateProgress === 100 
+                    ? 'bg-emerald-100 text-emerald-600 ring-4 ring-emerald-50' 
+                    : updateType === 'MRP' 
+                      ? 'bg-emerald-50 text-emerald-600 ring-4 ring-emerald-50/50' 
+                      : 'bg-indigo-50 text-indigo-600 ring-4 ring-indigo-50/50'
+                }`}>
+                  {updateProgress === 100 ? (
+                    <CheckCircle className="w-6 h-6 text-emerald-600 animate-in zoom-in" />
+                  ) : (
+                    <RefreshCw className="w-6 h-6 animate-spin" />
+                  )}
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-slate-900 text-base">
+                    {updateProgress === 100 ? 'Update Finalized!' : `Applying Bulk ${updateType} Update`}
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium truncate max-w-[180px] sm:max-w-[220px]">
+                    {fileName || 'Processing spreadsheet records'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="text-right">
+                <span className={`text-3xl font-black font-mono tracking-tight transition-colors ${
+                  updateProgress === 100 ? 'text-emerald-600' : 'text-indigo-600'
+                }`}>
+                  {Math.round(updateProgress)}%
+                </span>
+              </div>
+            </div>
+
+            {/* 0 to 100% Progress Bar */}
+            <div className="space-y-2">
+              <div className="w-full bg-slate-100 rounded-full h-4 overflow-hidden p-0.5 border border-slate-200 shadow-inner">
+                <div 
+                  className={`h-full rounded-full transition-all duration-300 ease-out ${
+                    updateProgress === 100 
+                      ? 'bg-emerald-500' 
+                      : updateType === 'MRP' 
+                        ? 'bg-gradient-to-r from-emerald-500 to-teal-500' 
+                        : 'bg-gradient-to-r from-indigo-500 to-blue-600'
+                  }`}
+                  style={{ width: `${Math.min(100, Math.max(0, updateProgress))}%` }}
+                />
+              </div>
+              <div className="flex justify-between text-[11px] text-slate-400 font-bold uppercase tracking-wider">
+                <span>0% Start</span>
+                <span>{updateProgress >= 25 && updateProgress < 90 ? 'Writing Batches' : 'Verifying'}</span>
+                <span>100% Complete</span>
+              </div>
+            </div>
+
+            {/* Dynamic Status Description Box */}
+            <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-4 flex items-center gap-3">
+              {updateProgress < 100 ? (
+                <span className="relative flex h-3 w-3 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-indigo-500"></span>
+                </span>
+              ) : (
+                <CheckCircle className="w-4 h-4 text-emerald-500 shrink-0" />
+              )}
+              <p className="text-xs font-semibold text-slate-700 truncate">
+                {updateStatusMessage || 'Synchronizing with live database...'}
+              </p>
+            </div>
+
+            {/* Safety Notice */}
+            <p className="text-[11px] text-slate-400 text-center font-medium leading-relaxed">
+              Please do not close or reload this browser tab while updates are in progress.
+            </p>
+
+          </div>
+        </div>
+      )}
 
     </div>
   );

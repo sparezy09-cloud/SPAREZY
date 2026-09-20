@@ -4,7 +4,8 @@ import { db } from '../dbStore';
 import { optimizeFileForEgress } from '../lib/imageOptimizer';
 import { 
   FileText, UploadCloud, Search, Calendar, CheckSquare, Sparkles, 
-  Trash2, Plus, X, Eye, FileSpreadsheet, ShieldAlert, BadgeInfo, Zap
+  Trash2, Plus, X, Eye, FileSpreadsheet, ShieldAlert, BadgeInfo, Zap,
+  CheckCircle2, Archive, PlusCircle
 } from 'lucide-react';
 
 interface PurchaseModuleProps {
@@ -20,26 +21,44 @@ interface NewPurchaseLineItem {
   mrp: number;
 }
 
+export type ScanMatchStatus = 'matched' | 'archived' | 'new';
+
 interface ParsedAIScanRow {
   part_no: string;
   part_name: string;
   hsn: string;
   quantity: number;
   mrp: number;
-  isNewPart: boolean;
+  matchStatus: ScanMatchStatus;
+  isNewPart?: boolean;
 }
 
 export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   const [activeTab, setActiveTab] = useState<'scan' | 'manual' | 'history'>('scan');
   
   // Local lists
+  const [allInventoryList, setAllInventoryList] = useState<InventoryItem[]>(() => db.getInventory(brand, true));
   const [inventoryList, setInventoryList] = useState<InventoryItem[]>(() => db.getInventory(brand));
   const [purchasesList, setPurchasesList] = useState<Purchase[]>(() => db.getPurchases(brand));
   const [toastMessageLocal, setToastMessageLocal] = useState<string | null>(null);
 
   const refreshComponentData = () => {
+    setAllInventoryList(db.getInventory(brand, true));
     setInventoryList(db.getInventory(brand));
     setPurchasesList(db.getPurchases(brand));
+  };
+
+  // Helper to determine scanned part status:
+  // - Matched with active part: 'matched'
+  // - Found in archived part: 'archived'
+  // - Not matched: 'new'
+  const getPartMatchStatus = (partNo: string, allInv: InventoryItem[]): ScanMatchStatus => {
+    const clean = String(partNo || '').trim().toLowerCase();
+    if (!clean) return 'new';
+    const found = allInv.find(inv => inv.part_no.trim().toLowerCase() === clean);
+    if (!found) return 'new';
+    if (found.is_active === false) return 'archived';
+    return 'matched';
   };
 
   React.useEffect(() => {
@@ -202,6 +221,33 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
       setScannedFilesLoaded(true);
 
       const isHundai = brand === 'Hyundai';
+      const currentAllInv = db.getInventory(brand, true);
+      const activeParts = currentAllInv.filter(i => i.is_active !== false);
+      let archivedPart = currentAllInv.find(i => i.is_active === false);
+
+      // If no archived part exists yet in memory, create a realistic archived spare part
+      // so testing simulation immediately demonstrates Matched, Archived, and New
+      if (!archivedPart) {
+        const demoArch: InventoryItem = {
+          id: `arch-demo-${isHundai ? 'hy' : 'ma'}-${Date.now()}`,
+          part_no: isHundai ? 'HY-ARCH-304' : 'MA-ARCH-508',
+          part_name: isHundai ? 'Hyundai Santro Legacy Archived Fuel Pump' : 'Mahindra Bolero Legacy Archived Valve',
+          hsn: '84213100',
+          quantity: 0,
+          mrp: 1450,
+          brand,
+          is_active: false,
+          archived_at: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        };
+        currentAllInv.push(demoArch);
+        archivedPart = demoArch;
+        setAllInventoryList([...currentAllInv]);
+      }
+
+      const activePart1 = activeParts[0];
+      const activePart2 = activeParts[1];
       
       if (fileName.includes('xlsx') || fileName.includes('excel')) {
         setScanDealer(isHundai ? 'Hyundai India Parts Corp' : 'Mahindra Logistics Spares');
@@ -209,16 +255,61 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
         setScanInvoiceDate('2026-06-01');
         setScanDiscount(12); // Exact 12%!
         
-        const mParts: ParsedAIScanRow[] = isHundai ? [
-          { part_no: 'HY-10023', part_name: 'Hyundai Elite i20 Front Brake Pads', hsn: '87083000', quantity: 20, mrp: 2450, isNewPart: false },
-          { part_no: 'HY-20150', part_name: 'Hyundai Grand i10 Air Filter', hsn: '84213100', quantity: 50, mrp: 450, isNewPart: false },
-          { part_no: 'HY-99933', part_name: 'Hyundai Alcazar Front Grill Cover', hsn: '87088019', quantity: 5, mrp: 3500, isNewPart: true }
+        const rawList = isHundai ? [
+          {
+            part_no: activePart1 ? activePart1.part_no : 'HY-10023',
+            part_name: activePart1 ? activePart1.part_name : 'Hyundai Elite i20 Front Brake Pads',
+            hsn: activePart1?.hsn || '87083000',
+            quantity: 20,
+            mrp: activePart1?.mrp || 2450
+          },
+          {
+            part_no: archivedPart.part_no,
+            part_name: archivedPart.part_name,
+            hsn: archivedPart.hsn || '84213100',
+            quantity: 15,
+            mrp: archivedPart.mrp || 1450
+          },
+          {
+            part_no: `HY-NEW-${Math.floor(1000 + Math.random() * 9000)}`,
+            part_name: 'Hyundai Alcazar Front Grill Cover',
+            hsn: '87088019',
+            quantity: 5,
+            mrp: 3500
+          }
         ] : [
-          { part_no: 'MA-10201', part_name: 'Mahindra Scorpio S11 Front Brake Rotor', hsn: '87083000', quantity: 15, mrp: 3400, isNewPart: false },
-          { part_no: 'MA-20199', part_name: 'Mahindra Thar Diesel Fuel Filter', hsn: '84212300', quantity: 30, mrp: 1850, isNewPart: false },
-          { part_no: 'MA-99110', part_name: 'Mahindra Scorpio Bonnet Support Strut', hsn: '87082910', quantity: 10, mrp: 980, isNewPart: true }
+          {
+            part_no: activePart1 ? activePart1.part_no : 'MA-10201',
+            part_name: activePart1 ? activePart1.part_name : 'Mahindra Scorpio S11 Front Brake Rotor',
+            hsn: activePart1?.hsn || '87083000',
+            quantity: 15,
+            mrp: activePart1?.mrp || 3400
+          },
+          {
+            part_no: archivedPart.part_no,
+            part_name: archivedPart.part_name,
+            hsn: archivedPart.hsn || '84213100',
+            quantity: 12,
+            mrp: archivedPart.mrp || 1450
+          },
+          {
+            part_no: `MA-NEW-${Math.floor(1000 + Math.random() * 9000)}`,
+            part_name: 'Mahindra Scorpio Bonnet Support Strut',
+            hsn: '87082910',
+            quantity: 10,
+            mrp: 980
+          }
         ];
         
+        const mParts: ParsedAIScanRow[] = rawList.map(item => {
+          const status = getPartMatchStatus(item.part_no, db.getInventory(brand, true));
+          return {
+            ...item,
+            matchStatus: status,
+            isNewPart: status === 'new'
+          };
+        });
+
         setScanRows(mParts);
       } else {
         setScanDealer('Kunal Motor Distributors (Wholesale)');
@@ -226,13 +317,60 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
         setScanInvoiceDate('2026-06-05');
         setScanDiscount(Math.random() > 0.5 ? 12 : 10);
         
-        const mParts: ParsedAIScanRow[] = isHundai ? [
-          { part_no: 'HY-30440', part_name: 'Hyundai Verna Clutch Disc Plate', hsn: '87089300', quantity: 10, mrp: 5200, isNewPart: false },
-          { part_no: 'HY-40992', part_name: 'Hyundai Creta Oil Filter', hsn: '84212300', quantity: 100, mrp: 320, isNewPart: false }
+        const rawList = isHundai ? [
+          {
+            part_no: activePart1 ? activePart1.part_no : 'HY-30440',
+            part_name: activePart1 ? activePart1.part_name : 'Hyundai Verna Clutch Disc Plate',
+            hsn: activePart1?.hsn || '87089300',
+            quantity: 10,
+            mrp: activePart1?.mrp || 5200
+          },
+          {
+            part_no: archivedPart.part_no,
+            part_name: archivedPart.part_name,
+            hsn: archivedPart.hsn || '84213100',
+            quantity: 8,
+            mrp: archivedPart.mrp || 1450
+          },
+          {
+            part_no: `HY-NEW-${Math.floor(1000 + Math.random() * 9000)}`,
+            part_name: 'Hyundai Creta High Flow Air Intake',
+            hsn: '84212300',
+            quantity: 25,
+            mrp: 1320
+          }
         ] : [
-          { part_no: 'MA-30310', part_name: 'Mahindra Bolero Air Filter Element', hsn: '84213100', quantity: 25, mrp: 620, isNewPart: false },
-          { part_no: 'MA-40224', part_name: 'Mahindra XUV500 Clutch Cover Assembly', hsn: '87089300', quantity: 6, mrp: 8900, isNewPart: false }
+          {
+            part_no: activePart1 ? activePart1.part_no : 'MA-30310',
+            part_name: activePart1 ? activePart1.part_name : 'Mahindra Bolero Air Filter Element',
+            hsn: activePart1?.hsn || '84213100',
+            quantity: 25,
+            mrp: activePart1?.mrp || 620
+          },
+          {
+            part_no: archivedPart.part_no,
+            part_name: archivedPart.part_name,
+            hsn: archivedPart.hsn || '84213100',
+            quantity: 10,
+            mrp: archivedPart.mrp || 1450
+          },
+          {
+            part_no: `MA-NEW-${Math.floor(1000 + Math.random() * 9000)}`,
+            part_name: 'Mahindra XUV700 Radiator Mounting Bracket',
+            hsn: '87089300',
+            quantity: 6,
+            mrp: 2900
+          }
         ];
+
+        const mParts: ParsedAIScanRow[] = rawList.map(item => {
+          const status = getPartMatchStatus(item.part_no, db.getInventory(brand, true));
+          return {
+            ...item,
+            matchStatus: status,
+            isNewPart: status === 'new'
+          };
+        });
 
         setScanRows(mParts);
       }
@@ -324,20 +462,22 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
         : 12;
       setScanDiscount(avgDiscount);
 
+      const allInvCurrent = db.getInventory(brand, true);
       const parsedRows: ParsedAIScanRow[] = rawItems.map((item: any) => {
         const pNo = String(item.partNumber || "").trim().toUpperCase();
         const pName = String(item.name || "").trim();
         const qty = Number(item.quantity) || 1;
         const priceMrp = Number(item.mrp) || 0;
-        const isMatched = inventoryList.some(inv => inv.part_no.toLowerCase() === pNo.toLowerCase());
+        const status = getPartMatchStatus(pNo, allInvCurrent);
         
         return {
           part_no: pNo,
           part_name: pName,
-          hsn: "87089900", // Automobile parts standard code fallback
+          hsn: String(item.hsn || "87089900"),
           quantity: qty,
           mrp: priceMrp,
-          isNewPart: !isMatched
+          matchStatus: status,
+          isNewPart: status === 'new'
         };
       });
 
@@ -365,13 +505,15 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   };
 
   const handleAIScanRowChange = (index: number, field: keyof ParsedAIScanRow, val: any) => {
+    const currentInv = db.getInventory(brand, true);
     setScanRows(scanRows.map((row, i) => {
       if (i === index) {
         const copy = { ...row, [field]: val };
-        // Check dynamically if matches schema inventory
+        // Dynamically check if matches active inventory, archived inventory, or new
         if (field === 'part_no') {
-          const mat = inventoryList.some(inv => inv.part_no.toLowerCase() === String(val).trim().toLowerCase());
-          copy.isNewPart = !mat;
+          const status = getPartMatchStatus(String(val), currentInv);
+          copy.matchStatus = status;
+          copy.isNewPart = status === 'new';
         }
         return copy;
       }
@@ -755,6 +897,42 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
               </div>
 
               {/* Scanned spare parts table list */}
+              <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3 text-xs text-amber-900 flex items-start gap-2.5">
+                <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                <div className="space-y-0.5">
+                  <p className="font-bold">MRP Policy Protected</p>
+                  <p className="text-[11px] text-amber-800 leading-relaxed">
+                    Invoice MRP is used solely to compute purchase invoice totals, dealer discounts, and bill item records. 
+                    <strong> Inventory retail MRP is never modified from purchases</strong> and can strictly only be updated via the <strong>Bulk Update &gt; MRP Update</strong> tool.
+                  </p>
+                </div>
+              </div>
+
+              {/* Scan Match Recognition Status Bar */}
+              <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-slate-700">Recognition Status:</span>
+                  <span className="text-xs text-slate-500 font-medium">({scanRows.length} total invoice parts)</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold bg-emerald-100 text-emerald-850 border border-emerald-300 shadow-xs">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <span>{scanRows.filter(r => r.matchStatus === 'matched').length} Matched</span>
+                    <span className="text-[10px] font-normal text-emerald-700">(Active Part)</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold bg-purple-100 text-purple-850 border border-purple-300 shadow-xs">
+                    <Archive className="w-3.5 h-3.5 text-purple-600 shrink-0" />
+                    <span>{scanRows.filter(r => r.matchStatus === 'archived').length} Archived</span>
+                    <span className="text-[10px] font-normal text-purple-700">(In Spares)</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold bg-blue-100 text-blue-850 border border-blue-300 shadow-xs">
+                    <PlusCircle className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                    <span>{scanRows.filter(r => r.matchStatus === 'new').length} New</span>
+                    <span className="text-[10px] font-normal text-blue-700">(New Part)</span>
+                  </span>
+                </div>
+              </div>
+
               <div className="overflow-x-auto pt-2">
                 <table className="min-w-full divide-y divide-slate-100 text-left text-xs font-semibold">
                   <thead className="bg-slate-50 text-slate-550 uppercase text-[9px]">
@@ -764,7 +942,10 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                       <th className="p-3">Part Name</th>
                       <th className="p-3">HSN Code</th>
                       <th className="p-3 text-center">Qty to Add</th>
-                      <th className="p-3 text-center">MRP (INR)</th>
+                      <th className="p-3 text-center">
+                        <div>Invoice MRP (INR)</div>
+                        <div className="text-[8px] font-normal text-slate-400 capitalize">Bill Total Only</div>
+                      </th>
                       <th className="p-3 text-right">Row Total</th>
                       <th className="p-3 text-center">Remove</th>
                     </tr>
@@ -775,13 +956,33 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                       return (
                         <tr key={idx} className="hover:bg-slate-50/50">
                           <td className="p-3">
-                            <span className={`inline-flex px-1.5 py-0.5 rounded text-[9px] font-bold ${
-                              row.isNewPart 
-                                ? 'bg-amber-100 text-amber-800 border border-amber-200' 
-                                : 'bg-emerald-100 text-emerald-850 border border-emerald-250'
-                            }`}>
-                              {row.isNewPart ? 'New Part' : 'Matched'}
-                            </span>
+                            {row.matchStatus === 'matched' && (
+                              <span 
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 shadow-xs"
+                                title="Matched with an active inventory part"
+                              >
+                                <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                                <span>Matched</span>
+                              </span>
+                            )}
+                            {row.matchStatus === 'archived' && (
+                              <span 
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-purple-100 text-purple-800 border border-purple-300 shadow-xs"
+                                title="Part is in archived parts. Syncing will automatically unarchive it with incoming stock."
+                              >
+                                <Archive className="w-3 h-3 text-purple-600 shrink-0" />
+                                <span>Archived</span>
+                              </span>
+                            )}
+                            {row.matchStatus === 'new' && (
+                              <span 
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-300 shadow-xs"
+                                title="Part not found in inventory. Syncing will register it as a new active part."
+                              >
+                                <PlusCircle className="w-3 h-3 text-blue-600 shrink-0" />
+                                <span>New</span>
+                              </span>
+                            )}
                           </td>
                           <td className="p-3 font-mono">
                             <input
@@ -869,7 +1070,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                     onClick={handleAIScanCompleteSync}
                     className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl text-xs font-black shadow transition cursor-pointer text-center"
                   >
-                    Confirm &amp; Sync Scanned Parts to Inventory
+                    Confirm &amp; Sync Stock Quantity (MRP Protected &amp; Untouched)
                   </button>
                 </div>
               </div>
@@ -933,7 +1134,12 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
 
           {/* lines edit */}
           <div className="space-y-3">
-            <h4 className="text-xs uppercase font-extrabold tracking-widest text-slate-400">Line Items</h4>
+            <div className="flex items-center justify-between">
+              <h4 className="text-xs uppercase font-extrabold tracking-widest text-slate-400">Line Items</h4>
+              <span className="text-[10px] text-amber-800 bg-amber-50 px-2 py-0.5 rounded-lg border border-amber-200">
+                Invoice MRP is used for purchase totals only • Inventory MRP is protected
+              </span>
+            </div>
             
             <div className="space-y-3.5 text-xs font-semibold">
               {manualLines.map((line, idx) => (
@@ -988,7 +1194,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                   </div>
 
                   <div className="sm:col-span-2">
-                    <label className="block text-slate-450 text-[10px] mb-1">Part MRP (INR)</label>
+                    <label className="block text-slate-450 text-[10px] mb-1">Invoice MRP (INR)</label>
                     <input
                       type="number"
                       className="w-full p-2 border border-slate-200 rounded-xl text-right font-mono"

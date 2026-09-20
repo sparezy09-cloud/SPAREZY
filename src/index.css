@@ -6,6 +6,12 @@
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
 }
 
+/* Focus Mode: Style changes applied to selected element */
+div#root:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > main:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > div:nth-of-type(1) > button:nth-of-type(1) {
+  color: #000000;
+  font-weight: bold;
+}
+
 /* Print utility behaviors to guarantee high-quality layout paper */
 @media print {
   body {
