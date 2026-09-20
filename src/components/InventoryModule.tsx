@@ -539,28 +539,6 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
         </div>
       </div>
 
-      {/* Manager Read-Only Mode Notice Banner */}
-      {isReadOnly && (
-        <div className="bg-amber-50/90 border border-amber-200/90 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-amber-950 shadow-xs">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-amber-100 flex items-center justify-center text-amber-700 shrink-0 border border-amber-200">
-              <Lock className="w-4.5 h-4.5" />
-            </div>
-            <div>
-              <div className="font-bold text-xs flex items-center gap-2">
-                <span>Manager Access &mdash; Inventory Read-Only Mode</span>
-                <span className="text-[10px] font-bold uppercase tracking-wider bg-amber-200/80 text-amber-900 px-2 py-0.5 rounded-md border border-amber-300/80">
-                  Read Only
-                </span>
-              </div>
-              <p className="text-[11px] text-amber-800 leading-snug mt-0.5">
-                You have view-only access to browse spare parts, stock levels, HSN codes, and historical movement logs. Part creation, stock edits, and deletion are restricted.
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Filter and Search Bar Card */}
       <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-3">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
