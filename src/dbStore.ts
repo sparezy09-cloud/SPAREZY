@@ -1400,11 +1400,22 @@ export const db = {
     address?: string,
     startingBalance: number = 0,
     startingBalanceType: 'To Receive' | 'To Give' = 'To Receive',
-    user?: User
+    user?: User,
+    notes?: string
   ): Promise<Customer> => {
     const activeUser = user || db.getActiveUser();
     const userId = activeUser ? activeUser.id : 'system';
     const userName = activeUser ? activeUser.name : 'System';
+
+    // Normalize opening balance (can be supplied as positive or negative number, or via type)
+    let rawBal = Number(startingBalance) || 0;
+    let resolvedType: 'To Receive' | 'To Give' = startingBalanceType || 'To Receive';
+    if (rawBal < 0) {
+      resolvedType = 'To Give';
+    }
+    const numericBal = Math.abs(rawBal);
+    const isDebit = resolvedType === 'To Receive';
+    const signedCurrentBal = isDebit ? numericBal : -numericBal;
 
     const newCust: Customer = {
       id: uuid(),
@@ -1412,9 +1423,9 @@ export const db = {
       customer_category: category,
       phone: phone?.trim() || '',
       address: address?.trim() || '',
-      starting_balance: startingBalance,
-      starting_balance_type: startingBalanceType,
-      current_balance: startingBalanceType === 'To Receive' ? startingBalance : -startingBalance,
+      starting_balance: numericBal,
+      starting_balance_type: resolvedType,
+      current_balance: signedCurrentBal,
       created_at: new Date().toISOString()
     };
     cache.customers.unshift(newCust);
@@ -1438,8 +1449,7 @@ export const db = {
     }
 
     // If starting balance is provided, automatically record a Starting Balance entry in customer_ledger
-    if (startingBalance > 0) {
-      const isDebit = startingBalanceType === 'To Receive';
+    if (numericBal > 0) {
       const ledgerEntry: CustomerLedgerEntry = {
         id: uuid(),
         customer_id: newCust.id,
@@ -1448,10 +1458,10 @@ export const db = {
         date: newCust.created_at,
         entry_type: 'Starting Balance',
         reference_no: 'START-BAL',
-        debit: isDebit ? startingBalance : 0,
-        credit: isDebit ? 0 : startingBalance,
-        balance: isDebit ? startingBalance : -startingBalance,
-        notes: `Starting balance record (${startingBalanceType})`,
+        debit: isDebit ? numericBal : 0,
+        credit: isDebit ? 0 : numericBal,
+        balance: signedCurrentBal,
+        notes: notes?.trim() || `Opening balance (${isDebit ? 'Customer Owes / Debit' : 'Advance Credit / To Give'})`,
         created_by: userName,
         created_at: newCust.created_at
       };
@@ -1463,7 +1473,7 @@ export const db = {
       }
     }
     
-    db.logTransaction(userId, userName, 'Create Customer', 'Customer Ledger', `Created customer ${name} (${category}) with starting balance ₹${startingBalance} (${startingBalanceType})`, null, newCust);
+    db.logTransaction(userId, userName, 'Create Customer', 'Customer Ledger', `Created customer ${name} (${category}) with opening balance ${isDebit ? '+' : '-'}₹${numericBal} (${resolvedType})`, null, newCust);
     db.notify();
     return newCust;
   },
@@ -1472,18 +1482,31 @@ export const db = {
     customerId: string,
     balance: number,
     type: 'To Receive' | 'To Give',
-    user: User
+    user: User,
+    notes?: string
   ): Promise<void> => {
     const cust = cache.customers.find(c => c.id === customerId);
     if (!cust) throw new Error("Customer not found");
+
+    let rawBal = Number(balance) || 0;
+    let resolvedType = type || 'To Receive';
+    if (rawBal < 0) {
+      resolvedType = 'To Give';
+    }
+    const numericBal = Math.abs(rawBal);
+    const isDebit = resolvedType === 'To Receive';
+    const signedCurrentBal = isDebit ? numericBal : -numericBal;
+
     const oldBalance = cust.starting_balance;
-    cust.starting_balance = balance;
-    cust.starting_balance_type = type;
+    const oldType = cust.starting_balance_type;
+    cust.starting_balance = numericBal;
+    cust.starting_balance_type = resolvedType;
+    cust.current_balance = signedCurrentBal;
 
     if (isSupabaseConfigured && supabase) {
       await supabase.from('customers').update({
-        starting_balance: balance,
-        starting_balance_type: type
+        starting_balance: numericBal,
+        starting_balance_type: resolvedType
       }).eq('id', customerId);
     } else {
       localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(cache.customers));
@@ -1491,16 +1514,15 @@ export const db = {
 
     // Also update or add the starting balance ledger entry
     const existingStartEntry = cache.customer_ledger.find(e => e.customer_id === customerId && e.entry_type === 'Starting Balance');
-    const isDebit = type === 'To Receive';
     if (existingStartEntry) {
-      existingStartEntry.debit = isDebit ? balance : 0;
-      existingStartEntry.credit = isDebit ? 0 : balance;
-      existingStartEntry.balance = isDebit ? balance : -balance;
-      existingStartEntry.notes = `Updated starting balance record (${type})`;
+      existingStartEntry.debit = isDebit ? numericBal : 0;
+      existingStartEntry.credit = isDebit ? 0 : numericBal;
+      existingStartEntry.balance = signedCurrentBal;
+      existingStartEntry.notes = notes?.trim() || `Updated opening balance (${resolvedType})`;
       if (isSupabaseConfigured && supabase) {
         supabase.from('customer_ledger').update(existingStartEntry).eq('id', existingStartEntry.id).then();
       }
-    } else if (balance > 0) {
+    } else if (numericBal > 0) {
       const newEntry: CustomerLedgerEntry = {
         id: uuid(),
         customer_id: cust.id,
@@ -1509,10 +1531,10 @@ export const db = {
         date: new Date().toISOString(),
         entry_type: 'Starting Balance',
         reference_no: 'START-BAL',
-        debit: isDebit ? balance : 0,
-        credit: isDebit ? 0 : balance,
-        balance: isDebit ? balance : -balance,
-        notes: `Starting balance record (${type})`,
+        debit: isDebit ? numericBal : 0,
+        credit: isDebit ? 0 : numericBal,
+        balance: signedCurrentBal,
+        notes: notes?.trim() || `Opening balance record (${resolvedType})`,
         created_by: user.name,
         created_at: new Date().toISOString()
       };
@@ -1521,8 +1543,8 @@ export const db = {
         supabase.from('customer_ledger').insert(newEntry).then();
       }
     }
-
-    db.logTransaction(user.id, user.name, 'Update Customer Balance', 'Customer Ledger', `Updated starting balance for ${cust.customer_name} from ₹${oldBalance} to ₹${balance} (${type})`, null, cust);
+    localStorage.setItem(KEY_LEDGER, JSON.stringify(cache.customer_ledger));
+    db.logTransaction(user.id, user.name, 'Update Customer Balance', 'Customer Ledger', `Updated starting balance for ${cust.customer_name} from ₹${oldBalance} (${oldType}) to ${isDebit ? '+' : '-'}₹${numericBal} (${resolvedType})`, null, cust);
     db.notify();
   },
 
