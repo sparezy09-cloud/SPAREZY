@@ -3,9 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>Sparezy</title>
+    <title>Remix: Remix: Sparezy MIS Dashboard</title>
     <meta name="description" content="Automobile Spare Parts MIS Dashboard for Hyundai and Mahindra brands with egress bandwidth optimizations, dedicated Owner Transactions oversight tab for tracking all manager and owner activities, sales slips, purchases, and role-based permissions." />
-    <meta property="og:title" content="Sparezy" />
+    <meta property="og:title" content="Remix: Remix: Sparezy MIS Dashboard" />
     <meta property="og:description" content="Automobile Spare Parts MIS Dashboard for Hyundai and Mahindra brands with egress bandwidth optimizations, dedicated Owner Transactions oversight tab for tracking all manager and owner activities, sales slips, purchases, and role-based permissions." />
     
     <!-- PWA Configurations -->
@@ -16,9 +16,58 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="mobile-web-app-capable" content="yes" />
+
+    <script>
+      // 1. Immediately purge any Service Workers & clear caches so preview never gets intercepted
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(registrations) {
+          for (var i = 0; i < registrations.length; i++) {
+            registrations[i].unregister();
+          }
+        }).catch(function() {});
+      }
+      if ('caches' in window) {
+        caches.keys().then(function(keys) {
+          for (var i = 0; i < keys.length; i++) {
+            caches.delete(keys[i]);
+          }
+        }).catch(function() {});
+      }
+      // 2. Polyfill window.matchMedia immediately if missing in sandboxed iframe
+      if (typeof window !== 'undefined' && typeof window.matchMedia !== 'function') {
+        window.matchMedia = function(query) {
+          return {
+            matches: false,
+            media: query,
+            onchange: null,
+            addListener: function() {},
+            removeListener: function() {},
+            addEventListener: function() {},
+            removeEventListener: function() {},
+            dispatchEvent: function() { return false; }
+          };
+        };
+      }
+    </script>
   </head>
-  <body>
-    <div id="root"></div>
+  <body style="margin:0; background-color: #020617; color: #f8fafc; font-family: system-ui, -apple-system, sans-serif;">
+    <div id="root">
+      <div style="min-height: 100vh; background-color: #020617; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #94a3b8; text-align: center; padding: 24px; box-sizing: border-box;">
+        <div style="width: 52px; height: 52px; border-radius: 16px; background: #4f46e5; color: white; display: flex; align-items: center; justify-content: center; font-size: 26px; font-weight: 900; margin-bottom: 20px; box-shadow: 0 10px 25px -5px rgba(79, 70, 229, 0.45);">S</div>
+        <h2 style="font-size: 22px; font-weight: 800; color: #f8fafc; margin: 0 0 8px 0; letter-spacing: -0.025em;">Sparezy MIS Portal</h2>
+        <p style="font-size: 13px; color: #818cf8; font-weight: 600; text-transform: uppercase; letter-spacing: 0.1em; margin: 0 0 16px 0;">Automobile Spares &amp; Schema Management</p>
+        <div style="width: 140px; height: 3px; background: #1e293b; border-radius: 999px; overflow: hidden; position: relative;">
+          <div style="width: 40%; height: 100%; background: #6366f1; border-radius: 999px; position: absolute; animation: loadPulse 1.2s infinite ease-in-out;"></div>
+        </div>
+      </div>
+      <style>
+        @keyframes loadPulse {
+          0% { left: -40%; }
+          50% { left: 50%; }
+          100% { left: 100%; }
+        }
+      </style>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

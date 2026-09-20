@@ -28,63 +28,110 @@ function createMemoryStorage(): Storage {
   } as Storage;
 }
 
-// Check and polyfill localStorage
-try {
-  if (typeof window !== 'undefined') {
+// Check and polyfill localStorage safely
+if (typeof window !== 'undefined') {
+  let localStorageWorking = false;
+  try {
     const testKey = '__storage_test__';
     window.localStorage.setItem(testKey, testKey);
     window.localStorage.removeItem(testKey);
+    localStorageWorking = true;
+  } catch (e) {
+    console.warn("⚠️ LocalStorage is blocked or partitioned in iframe. Using in-memory fallback.", e);
   }
-} catch (e) {
-  console.warn("⚠️ LocalStorage is blocked or unsupported in this context. Using in-memory fallback.", e);
-  const fallback = createMemoryStorage();
-  try {
-    Object.defineProperty(window, 'localStorage', {
-      value: fallback,
-      writable: true,
-      configurable: true
-    });
-  } catch (err) {
+
+  if (!localStorageWorking) {
+    const fallback = createMemoryStorage();
     try {
-      (window as any).localStorage = fallback;
-    } catch (_) {}
+      Object.defineProperty(window, 'localStorage', {
+        value: fallback,
+        writable: true,
+        configurable: true
+      });
+    } catch (_) {
+      try {
+        (window as any).localStorage = fallback;
+      } catch (_) {}
+    }
   }
 }
 
-// Check and polyfill sessionStorage
-try {
-  if (typeof window !== 'undefined') {
+// Check and polyfill sessionStorage safely
+if (typeof window !== 'undefined') {
+  let sessionStorageWorking = false;
+  try {
     const testKey = '__storage_test__';
     window.sessionStorage.setItem(testKey, testKey);
     window.sessionStorage.removeItem(testKey);
+    sessionStorageWorking = true;
+  } catch (e) {
+    console.warn("⚠️ SessionStorage is blocked or partitioned in iframe. Using in-memory fallback.", e);
   }
-} catch (e) {
-  console.warn("⚠️ SessionStorage is blocked or unsupported in this context. Using in-memory fallback.", e);
-  const fallback = createMemoryStorage();
-  try {
-    Object.defineProperty(window, 'sessionStorage', {
-      value: fallback,
-      writable: true,
-      configurable: true
-    });
-  } catch (err) {
+
+  if (!sessionStorageWorking) {
+    const fallback = createMemoryStorage();
     try {
-      (window as any).sessionStorage = fallback;
-    } catch (_) {}
+      Object.defineProperty(window, 'sessionStorage', {
+        value: fallback,
+        writable: true,
+        configurable: true
+      });
+    } catch (_) {
+      try {
+        (window as any).sessionStorage = fallback;
+      } catch (_) {}
+    }
   }
 }
 
-// Check and polyfill BroadcastChannel for older browsers or restricted sandboxes
-if (typeof window !== 'undefined' && !('BroadcastChannel' in window)) {
+// Check and polyfill BroadcastChannel safely (especially for cross-origin iframes)
+if (typeof window !== 'undefined') {
+  let bcWorking = false;
   try {
-    (window as any).BroadcastChannel = class BroadcastChannelMock {
+    if ('BroadcastChannel' in window) {
+      const testBc = new window.BroadcastChannel('__test_bc__');
+      testBc.close();
+      bcWorking = true;
+    }
+  } catch (_) {
+    bcWorking = false;
+  }
+
+  if (!bcWorking) {
+    class SafeBroadcastChannelMock {
       name: string;
       onmessage: ((this: any, ev: MessageEvent) => any) | null = null;
       constructor(name: string) {
         this.name = name;
       }
-      postMessage(message: any) {}
+      postMessage(_message: any) {}
       close() {}
-    };
-  } catch (_) {}
+      addEventListener() {}
+      removeEventListener() {}
+      dispatchEvent() { return true; }
+    }
+    try {
+      (window as any).BroadcastChannel = SafeBroadcastChannelMock;
+    } catch (_) {}
+  }
 }
+
+// Check and polyfill window.matchMedia safely (crucial for sandboxed iframe environments)
+if (typeof window !== 'undefined') {
+  if (typeof window.matchMedia !== 'function') {
+    window.matchMedia = function (query: string): MediaQueryList {
+      return {
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: () => {},
+        removeEventListener: () => {},
+        dispatchEvent: () => false,
+      } as any;
+    };
+  }
+}
+
+

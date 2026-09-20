@@ -9,7 +9,7 @@ CREATE SCHEMA IF NOT EXISTS hyundai;
 CREATE SCHEMA IF NOT EXISTS mahindra;
 
 -- ====================================================================
--- 2. PUBLIC SCHEMA TABLES (User Management, Customers, Global Audits)
+-- 2. PUBLIC SCHEMA TABLES (User Management, Customers, Khatabook Ledger, Attendance, Audits)
 -- ====================================================================
 
 -- User Management Table
@@ -19,16 +19,71 @@ CREATE TABLE IF NOT EXISTS public.users (
     email TEXT UNIQUE NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('Owner', 'Admin', 'Manager')),
     status TEXT NOT NULL DEFAULT 'Active' CHECK (status IN ('Active', 'Disabled')),
+    per_day_salary NUMERIC(10,2) DEFAULT 600.00,
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
--- Customer ledger registration
+-- Customer ledger registration with Starting Balance (Khatabook format)
 CREATE TABLE IF NOT EXISTS public.customers (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     customer_name TEXT NOT NULL,
-    customer_category TEXT NOT NULL CHECK (customer_category IN ('Walk-in', 'Mistri', 'Retailer', 'Garage')),
+    customer_category TEXT NOT NULL CHECK (customer_category IN ('Mistri', 'Garage', 'Walk-in', 'Retailer')),
     phone TEXT,
+    address TEXT,
+    starting_balance NUMERIC(12,2) DEFAULT 0.00,
+    starting_balance_type TEXT DEFAULT 'To Receive' CHECK (starting_balance_type IN ('To Receive', 'To Give')),
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Khatabook Customer Ledger Entries (Running Balance, Debits, Credits)
+CREATE TABLE IF NOT EXISTS public.customer_ledger (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id UUID REFERENCES public.customers(id) ON DELETE CASCADE,
+    customer_name TEXT NOT NULL,
+    brand TEXT NOT NULL CHECK (brand IN ('Hyundai', 'Mahindra')),
+    date TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    entry_type TEXT NOT NULL, -- 'Starting Balance', 'Sale Bill', 'Payment Received', 'Item Return Credit', 'Manual Adjustment'
+    reference_no TEXT,
+    debit NUMERIC(12,2) DEFAULT 0.00, -- Amount customer owes / You Gave
+    credit NUMERIC(12,2) DEFAULT 0.00, -- Amount paid / return credit / You Got
+    balance NUMERIC(12,2) DEFAULT 0.00, -- Running net balance
+    payment_mode TEXT, -- 'UPI', 'Cash', 'Bank Transfer'
+    notes TEXT,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Order Requests (Manager requests parts, Owner accepts/orders without changing inventory)
+CREATE TABLE IF NOT EXISTS public.order_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    brand TEXT NOT NULL CHECK (brand IN ('Hyundai', 'Mahindra')),
+    part_no TEXT NOT NULL,
+    part_name TEXT NOT NULL,
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
+    urgency TEXT DEFAULT 'Normal' CHECK (urgency IN ('Normal', 'High', 'Emergency')),
+    notes TEXT,
+    requested_by TEXT NOT NULL,
+    manager_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending', 'Accepted', 'Rejected', 'Ordered')),
+    accepted_by TEXT,
+    action_notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Staff / Manager Monthly Attendance System
+CREATE TABLE IF NOT EXISTS public.staff_attendance (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id TEXT NOT NULL,
+    user_name TEXT NOT NULL,
+    date DATE NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('Present', 'Absent', 'Half Day', 'Paid Leave')),
+    per_day_salary NUMERIC(10,2) NOT NULL DEFAULT 600.00,
+    salary_earned NUMERIC(10,2) NOT NULL DEFAULT 0.00,
+    notes TEXT,
+    marked_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    UNIQUE(user_id, date)
 );
 
 -- Global Transaction/Activity Audit Logging
@@ -66,6 +121,7 @@ CREATE TABLE IF NOT EXISTS hyundai.inventory (
 -- Hyundai Customer Sales Table
 CREATE TABLE IF NOT EXISTS hyundai.sales (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    invoice_no TEXT,
     customer_id UUID REFERENCES public.customers(id),
     customer_name TEXT NOT NULL,
     customer_category TEXT NOT NULL,
@@ -74,9 +130,12 @@ CREATE TABLE IF NOT EXISTS hyundai.sales (
     discount_percentage NUMERIC(5,2) DEFAULT 0.00,
     discount_amount NUMERIC(12,2) DEFAULT 0.00,
     total_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    payment_type TEXT DEFAULT 'Cash',
     payment_status TEXT NOT NULL CHECK (payment_status IN ('Paid', 'Pending', 'Custom Amount')),
     paid_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     pending_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    has_return BOOLEAN DEFAULT false,
+    returned_items_count INTEGER DEFAULT 0,
     created_by TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
 );
@@ -89,6 +148,8 @@ CREATE TABLE IF NOT EXISTS hyundai.sale_items (
     part_name TEXT NOT NULL,
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     mrp NUMERIC(12,2) NOT NULL,
+    is_net_price BOOLEAN DEFAULT false,
+    net_price NUMERIC(12,2),
     discount_percentage NUMERIC(5,2) DEFAULT 0.00,
     final_amount NUMERIC(12,2) NOT NULL,
     returned_quantity INTEGER DEFAULT 0 CHECK (returned_quantity >= 0),
@@ -101,11 +162,15 @@ CREATE TABLE IF NOT EXISTS hyundai.returns (
     sale_id UUID REFERENCES hyundai.sales(id),
     sale_item_id UUID REFERENCES hyundai.sale_items(id),
     customer_id UUID REFERENCES public.customers(id),
+    customer_name TEXT NOT NULL,
     part_no TEXT NOT NULL,
     part_name TEXT NOT NULL,
     returned_quantity INTEGER NOT NULL CHECK (returned_quantity > 0),
+    unit_price NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     refund_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    payment_treatment TEXT NOT NULL DEFAULT 'Refund Paid (Cash/UPI)',
     return_date TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    notes TEXT,
     created_by TEXT NOT NULL
 );
 
@@ -185,6 +250,7 @@ CREATE TABLE IF NOT EXISTS mahindra.inventory (
 -- Mahindra Customer Sales Table
 CREATE TABLE IF NOT EXISTS mahindra.sales (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    invoice_no TEXT,
     customer_id UUID REFERENCES public.customers(id),
     customer_name TEXT NOT NULL,
     customer_category TEXT NOT NULL,
@@ -193,9 +259,12 @@ CREATE TABLE IF NOT EXISTS mahindra.sales (
     discount_percentage NUMERIC(5,2) DEFAULT 0.00,
     discount_amount NUMERIC(12,2) DEFAULT 0.00,
     total_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    payment_type TEXT DEFAULT 'Cash',
     payment_status TEXT NOT NULL CHECK (payment_status IN ('Paid', 'Pending', 'Custom Amount')),
     paid_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     pending_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    has_return BOOLEAN DEFAULT false,
+    returned_items_count INTEGER DEFAULT 0,
     created_by TEXT NOT NULL,
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
 );
@@ -208,6 +277,8 @@ CREATE TABLE IF NOT EXISTS mahindra.sale_items (
     part_name TEXT NOT NULL,
     quantity INTEGER NOT NULL CHECK (quantity > 0),
     mrp NUMERIC(12,2) NOT NULL,
+    is_net_price BOOLEAN DEFAULT false,
+    net_price NUMERIC(12,2),
     discount_percentage NUMERIC(5,2) DEFAULT 0.00,
     final_amount NUMERIC(12,2) NOT NULL,
     returned_quantity INTEGER DEFAULT 0 CHECK (returned_quantity >= 0),
@@ -220,11 +291,15 @@ CREATE TABLE IF NOT EXISTS mahindra.returns (
     sale_id UUID REFERENCES mahindra.sales(id),
     sale_item_id UUID REFERENCES mahindra.sale_items(id),
     customer_id UUID REFERENCES public.customers(id),
+    customer_name TEXT NOT NULL,
     part_no TEXT NOT NULL,
     part_name TEXT NOT NULL,
     returned_quantity INTEGER NOT NULL CHECK (returned_quantity > 0),
+    unit_price NUMERIC(12,2) NOT NULL DEFAULT 0.00,
     refund_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    payment_treatment TEXT NOT NULL DEFAULT 'Refund Paid (Cash/UPI)',
     return_date TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    notes TEXT,
     created_by TEXT NOT NULL
 );
 
@@ -399,6 +474,42 @@ DROP POLICY IF EXISTS manager_full_control_customers ON public.customers;
 CREATE POLICY manager_full_control_customers ON public.customers 
     FOR ALL 
     USING (public.is_manager());
+
+-- public.customer_ledger Policies
+ALTER TABLE public.customer_ledger ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS owner_full_control_ledger ON public.customer_ledger;
+CREATE POLICY owner_full_control_ledger ON public.customer_ledger 
+    FOR ALL 
+    USING (public.is_owner());
+
+DROP POLICY IF EXISTS manager_full_control_ledger ON public.customer_ledger;
+CREATE POLICY manager_full_control_ledger ON public.customer_ledger 
+    FOR ALL 
+    USING (public.is_manager());
+
+-- public.order_requests Policies
+ALTER TABLE public.order_requests ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS owner_full_control_orders ON public.order_requests;
+CREATE POLICY owner_full_control_orders ON public.order_requests 
+    FOR ALL 
+    USING (public.is_owner());
+
+DROP POLICY IF EXISTS manager_full_control_orders ON public.order_requests;
+CREATE POLICY manager_full_control_orders ON public.order_requests 
+    FOR ALL 
+    USING (public.is_manager());
+
+-- public.staff_attendance Policies
+ALTER TABLE public.staff_attendance ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS owner_full_control_attendance ON public.staff_attendance;
+CREATE POLICY owner_full_control_attendance ON public.staff_attendance 
+    FOR ALL 
+    USING (public.is_owner());
+
+DROP POLICY IF EXISTS manager_attendance_policy ON public.staff_attendance;
+CREATE POLICY manager_attendance_policy ON public.staff_attendance 
+    FOR SELECT 
+    USING (public.is_active_operator());
 
 -- public.transaction_logs Policies
 DROP POLICY IF EXISTS owner_full_control_logs ON public.transaction_logs;
@@ -735,4 +846,14 @@ BEGIN
   RETURN affected_count;
 END;
 $$;
+
+-- Grant access on all newly created tables to authenticated & anon roles
+GRANT ALL ON TABLE public.customers TO authenticated, anon;
+GRANT ALL ON TABLE public.customer_ledger TO authenticated, anon;
+GRANT ALL ON TABLE public.order_requests TO authenticated, anon;
+GRANT ALL ON TABLE public.staff_attendance TO authenticated, anon;
+GRANT ALL ON TABLE public.users TO authenticated, anon;
+GRANT ALL ON TABLE public.transaction_logs TO authenticated, anon;
+GRANT ALL ON ALL TABLES IN SCHEMA hyundai TO authenticated, anon;
+GRANT ALL ON ALL TABLES IN SCHEMA mahindra TO authenticated, anon;
 

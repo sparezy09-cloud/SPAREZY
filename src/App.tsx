@@ -14,12 +14,14 @@ import BulkUpdateModule from './components/BulkUpdateModule';
 import LedgerModule from './components/LedgerModule';
 import TransactionsModule from './components/TransactionsModule';
 import SettingsModule from './components/SettingsModule';
+import OrderRequestsModule from './components/OrderRequestsModule';
+import AttendanceModule from './components/AttendanceModule';
 
 // Menu icons
 import { 
   CarFront, LayoutDashboard, Layers, ShoppingBag, RotateCcw, 
   FileText, FileSpreadsheet, Users, Terminal, Shield, LogOut, Menu, X, CheckCircle,
-  AlertTriangle, RefreshCw, Download, Receipt
+  AlertTriangle, RefreshCw, Download, Receipt, ClipboardList, CalendarCheck
 } from 'lucide-react';
 
 export default function App() {
@@ -60,9 +62,14 @@ export default function App() {
     window.addEventListener('appinstalled', handleAppInstalled);
 
     // Initial check for standalone mode
-    if (window.matchMedia('(display-mode: standalone)').matches || (window.navigator as any).standalone) {
-      setShowInstallBtn(false);
-    }
+    try {
+      if (
+        (typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)')?.matches) ||
+        (typeof window !== 'undefined' && (window.navigator as any)?.standalone)
+      ) {
+        setShowInstallBtn(false);
+      }
+    } catch (_) {}
 
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
@@ -339,16 +346,18 @@ export default function App() {
     }
   };
 
-  // 10 modules routing translation
+  // Complete navigation items
   const sidebarItems = [
     { name: 'Dashboard', icon: LayoutDashboard },
     { name: 'Inventory', icon: Layers },
     { name: 'Sales', icon: ShoppingBag },
     { name: 'Returns', icon: RotateCcw },
     { name: 'Purchases', icon: FileText },
+    { name: 'Order Requests', icon: ClipboardList },
     { name: 'Bulk Updates', icon: FileSpreadsheet, ownerOnly: true },
     { name: 'Customer & Dealer Ledgers', icon: Users },
     { name: 'Owner Transactions', icon: Receipt, ownerOnly: true },
+    { name: 'Staff Attendance', icon: CalendarCheck },
     { name: 'Settings / User Management', icon: Shield },
   ];
 
@@ -364,6 +373,8 @@ export default function App() {
             onNavigateToModule={(mod) => {
               if (mod === 'Ledgers' || mod === 'Customer Ledger') {
                 setActiveModule('Customer & Dealer Ledgers');
+              } else if (mod === 'Sale POS') {
+                setActiveModule('Sales');
               } else {
                 setActiveModule(mod);
               }
@@ -373,11 +384,14 @@ export default function App() {
       case 'Inventory':
         return <InventoryModule brand={activeBrand} user={activeUser} />;
       case 'Sales':
+      case 'Sale POS':
         return <SalesModule brand={activeBrand} user={activeUser} />;
       case 'Returns':
         return <ReturnModule brand={activeBrand} user={activeUser} />;
       case 'Purchases':
         return <PurchaseModule brand={activeBrand} user={activeUser} />;
+      case 'Order Requests':
+        return <OrderRequestsModule brand={activeBrand} user={activeUser} />;
       case 'Bulk Updates':
         return <BulkUpdateModule brand={activeBrand} user={activeUser} />;
       case 'Customer & Dealer Ledgers':
@@ -385,6 +399,8 @@ export default function App() {
       case 'Owner Transactions':
       case 'Transaction Records':
         return <TransactionsModule brand={activeBrand} user={activeUser} />;
+      case 'Staff Attendance':
+        return <AttendanceModule user={activeUser} />;
       case 'Settings / User Management':
         return <SettingsModule brand={activeBrand} user={activeUser} />;
       default:

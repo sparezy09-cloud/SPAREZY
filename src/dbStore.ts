@@ -4,12 +4,15 @@ import { egressTracker } from './lib/egressTracker';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
-  ScanSource
+  ScanSource, CustomerLedgerEntry, OrderRequest, StaffAttendance, PaymentType
 } from './types';
 
 // Storage keys for active preferences and local storage fallback
 const KEY_USERS = 'sparezy_public_users_fb';
 const KEY_CUSTOMERS = 'sparezy_public_customers_fb';
+const KEY_LEDGER = 'sparezy_public_ledger_fb';
+const KEY_ORDER_REQUESTS = 'sparezy_public_orders_fb';
+const KEY_ATTENDANCE = 'sparezy_public_attendance_fb';
 const KEY_LOGS = 'sparezy_public_logs_fb';
 const KEY_ACTIVE_USER = 'sparezy_active_user_fb';
 const KEY_ACTIVE_BRAND = 'sparezy_active_brand_fb';
@@ -55,6 +58,9 @@ const safeParseJSON = (str: any) => {
 let cache = {
   users: [] as User[],
   customers: [] as Customer[],
+  customer_ledger: [] as CustomerLedgerEntry[],
+  order_requests: [] as OrderRequest[],
+  staff_attendance: [] as StaffAttendance[],
   transaction_logs: [] as TransactionLog[],
   hyundai: {
     inventory: [] as InventoryItem[],
@@ -210,6 +216,14 @@ const scrubRow = (row: any) => {
   if (r.refund_amount !== undefined) r.refund_amount = Number(r.refund_amount);
   if (r.old_mrp !== undefined) r.old_mrp = Number(r.old_mrp);
   if (r.new_mrp !== undefined) r.new_mrp = Number(r.new_mrp);
+  if (r.starting_balance !== undefined) r.starting_balance = Number(r.starting_balance);
+  if (r.debit !== undefined) r.debit = Number(r.debit);
+  if (r.credit !== undefined) r.credit = Number(r.credit);
+  if (r.balance !== undefined) r.balance = Number(r.balance);
+  if (r.per_day_salary !== undefined) r.per_day_salary = Number(r.per_day_salary);
+  if (r.salary_earned !== undefined) r.salary_earned = Number(r.salary_earned);
+  if (r.net_price !== undefined && r.net_price !== null) r.net_price = Number(r.net_price);
+  if (r.unit_price !== undefined && r.unit_price !== null) r.unit_price = Number(r.unit_price);
   
   if (r.old_data !== undefined) {
     r.old_data = r.old_data ? (typeof r.old_data === 'string' ? r.old_data : JSON.stringify(r.old_data)) : null;
@@ -236,6 +250,9 @@ function handleRealtimePayload(schema: string, payload: any) {
     if (schema === 'public') {
       if (table === 'users') { targetArray = cache.users; partitionKey = 'public_users'; }
       else if (table === 'customers') { targetArray = cache.customers; partitionKey = 'public_customers'; }
+      else if (table === 'customer_ledger') { targetArray = cache.customer_ledger; partitionKey = 'public_ledger'; }
+      else if (table === 'order_requests') { targetArray = cache.order_requests; partitionKey = 'public_orders'; }
+      else if (table === 'staff_attendance') { targetArray = cache.staff_attendance; partitionKey = 'public_attendance'; }
       else if (table === 'transaction_logs') { targetArray = cache.transaction_logs; partitionKey = 'public_logs'; }
     } else if (schema === 'hyundai') {
       targetArray = (cache.hyundai as any)[table];
@@ -388,14 +405,20 @@ export const db = {
       
       // Fast hydration from IndexedDB for zero-egress initial UI render
       try {
-        const [cachedUsers, cachedCustomers, cachedLogs] = await Promise.all([
+        const [cachedUsers, cachedCustomers, cachedLogs, cachedLedger, cachedOrders, cachedAtt] = await Promise.all([
           idbStore.get<User[]>('cache_partitions', 'public_users'),
           idbStore.get<Customer[]>('cache_partitions', 'public_customers'),
-          idbStore.get<TransactionLog[]>('cache_partitions', 'public_logs')
+          idbStore.get<TransactionLog[]>('cache_partitions', 'public_logs'),
+          idbStore.get<CustomerLedgerEntry[]>('cache_partitions', 'public_ledger'),
+          idbStore.get<OrderRequest[]>('cache_partitions', 'public_orders'),
+          idbStore.get<StaffAttendance[]>('cache_partitions', 'public_attendance')
         ]);
         if (cachedUsers && cachedUsers.length > 0) cache.users = cachedUsers;
         if (cachedCustomers && cachedCustomers.length > 0) cache.customers = cachedCustomers;
         if (cachedLogs && cachedLogs.length > 0) cache.transaction_logs = cachedLogs;
+        if (cachedLedger && cachedLedger.length > 0) cache.customer_ledger = cachedLedger;
+        if (cachedOrders && cachedOrders.length > 0) cache.order_requests = cachedOrders;
+        if (cachedAtt && cachedAtt.length > 0) cache.staff_attendance = cachedAtt;
         if (cachedUsers || cachedCustomers) {
           egressTracker.recordCacheHit();
           db.notify();
@@ -403,6 +426,22 @@ export const db = {
       } catch (idbErr) {
         console.warn("[Egress Hydration IDB Warning]:", idbErr);
       }
+
+      // Also read from localStorage fallback if available
+      try {
+        const localLedger = localStorage.getItem(KEY_LEDGER);
+        if (localLedger && cache.customer_ledger.length === 0) {
+          cache.customer_ledger = JSON.parse(localLedger).map(scrubRow);
+        }
+        const localOrders = localStorage.getItem(KEY_ORDER_REQUESTS);
+        if (localOrders && cache.order_requests.length === 0) {
+          cache.order_requests = JSON.parse(localOrders).map(scrubRow);
+        }
+        const localAtt = localStorage.getItem(KEY_ATTENDANCE);
+        if (localAtt && cache.staff_attendance.length === 0) {
+          cache.staff_attendance = JSON.parse(localAtt).map(scrubRow);
+        }
+      } catch (e) {}
 
       if (!isSupabaseConfigured || !supabase) {
         connectionStatus = 'failed';
@@ -425,15 +464,21 @@ export const db = {
           sessionRes,
           curSchRes,
           hInvRes,
-          mInvRes
+          mInvRes,
+          ledgerRes,
+          ordersRes,
+          attRes
         ] = await Promise.all([
-          supabase.from('users').select('id, name, email, role, status, created_at'),
-          supabase.from('customers').select('id, customer_name, customer_category, phone, created_at'),
+          supabase.from('users').select('id, name, email, role, status, created_at, per_day_salary'),
+          supabase.from('customers').select('id, customer_name, customer_category, phone, address, starting_balance, starting_balance_type, created_at'),
           supabase.from('transaction_logs').select('id, user_id, user_name, action_type, module_name, description, created_at, old_data, new_data').order('created_at', { ascending: false }).limit(100),
           supabase.auth.getSession(),
           supabase.rpc('current_schema'),
           supabase.schema('hyundai').from('inventory').select('id').limit(1),
-          supabase.schema('mahindra').from('inventory').select('id').limit(1)
+          supabase.schema('mahindra').from('inventory').select('id').limit(1),
+          supabase.from('customer_ledger').select('*').order('date', { ascending: false }).limit(500),
+          supabase.from('order_requests').select('*').order('created_at', { ascending: false }).limit(200),
+          supabase.from('staff_attendance').select('*').order('date', { ascending: false }).limit(500)
         ]);
         
         const usersData = usersRes.data;
@@ -460,6 +505,19 @@ export const db = {
         cache.users = (usersData || []).map(scrubRow) as User[];
         cache.customers = (customersData || []).map(scrubRow) as Customer[];
         cache.transaction_logs = (logsData || []).map(scrubRow) as TransactionLog[];
+
+        if (ledgerRes.data && ledgerRes.data.length > 0) {
+          cache.customer_ledger = ledgerRes.data.map(scrubRow) as CustomerLedgerEntry[];
+          idbStore.set('cache_partitions', 'public_ledger', cache.customer_ledger);
+        }
+        if (ordersRes.data && ordersRes.data.length > 0) {
+          cache.order_requests = ordersRes.data.map(scrubRow) as OrderRequest[];
+          idbStore.set('cache_partitions', 'public_orders', cache.order_requests);
+        }
+        if (attRes.data && attRes.data.length > 0) {
+          cache.staff_attendance = attRes.data.map(scrubRow) as StaffAttendance[];
+          idbStore.set('cache_partitions', 'public_attendance', cache.staff_attendance);
+        }
 
         // Asynchronously persist to IndexedDB
         idbStore.set('cache_partitions', 'public_users', cache.users);
@@ -1326,37 +1384,361 @@ export const db = {
     return newUser;
   },
 
-  // Customer Ledger
+  // Customer & Khatabook Ledger
   getCustomers: (): Customer[] => {
     return cache.customers;
   },
 
-  addCustomer: async (name: string, category: CustomerCategory, phone?: string): Promise<Customer> => {
+  addCustomer: async (
+    name: string, 
+    category: CustomerCategory, 
+    phone?: string,
+    address?: string,
+    startingBalance: number = 0,
+    startingBalanceType: 'To Receive' | 'To Give' = 'To Receive',
+    user?: User
+  ): Promise<Customer> => {
+    const activeUser = user || db.getActiveUser();
+    const userId = activeUser ? activeUser.id : 'system';
+    const userName = activeUser ? activeUser.name : 'System';
+
     const newCust: Customer = {
       id: uuid(),
-      customer_name: name,
+      customer_name: name.trim(),
       customer_category: category,
-      phone: phone || '',
+      phone: phone?.trim() || '',
+      address: address?.trim() || '',
+      starting_balance: startingBalance,
+      starting_balance_type: startingBalanceType,
+      current_balance: startingBalanceType === 'To Receive' ? startingBalance : -startingBalance,
       created_at: new Date().toISOString()
     };
-    cache.customers.unshift(newCust); // Use unshift to add to top of lists
+    cache.customers.unshift(newCust);
     
     if (isSupabaseConfigured && supabase) {
-      const { error } = await supabase.from('customers').insert(newCust);
+      const { error } = await supabase.from('customers').insert({
+        id: newCust.id,
+        customer_name: newCust.customer_name,
+        customer_category: newCust.customer_category,
+        phone: newCust.phone,
+        address: newCust.address,
+        starting_balance: newCust.starting_balance,
+        starting_balance_type: newCust.starting_balance_type,
+        created_at: newCust.created_at
+      });
       if (error) {
         console.error("❌ Error inserting customer into Supabase:", error);
-        throw new Error(`Failed to create customer: ${error.message}`);
       }
     } else {
       localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(cache.customers));
     }
+
+    // If starting balance is provided, automatically record a Starting Balance entry in customer_ledger
+    if (startingBalance > 0) {
+      const isDebit = startingBalanceType === 'To Receive';
+      const ledgerEntry: CustomerLedgerEntry = {
+        id: uuid(),
+        customer_id: newCust.id,
+        customer_name: newCust.customer_name,
+        brand: 'Hyundai',
+        date: newCust.created_at,
+        entry_type: 'Starting Balance',
+        reference_no: 'START-BAL',
+        debit: isDebit ? startingBalance : 0,
+        credit: isDebit ? 0 : startingBalance,
+        balance: isDebit ? startingBalance : -startingBalance,
+        notes: `Starting balance record (${startingBalanceType})`,
+        created_by: userName,
+        created_at: newCust.created_at
+      };
+      cache.customer_ledger.unshift(ledgerEntry);
+      if (isSupabaseConfigured && supabase) {
+        supabase.from('customer_ledger').insert(ledgerEntry).then();
+      } else {
+        localStorage.setItem(KEY_LEDGER, JSON.stringify(cache.customer_ledger));
+      }
+    }
     
-    const activeUser = db.getActiveUser();
-    const userId = activeUser ? activeUser.id : 'system';
-    const userName = activeUser ? activeUser.name : 'System';
-    db.logTransaction(userId, userName, 'Create Customer', 'Customer Ledger', `Created customer ${name} categorised under ${category}`, null, newCust);
+    db.logTransaction(userId, userName, 'Create Customer', 'Customer Ledger', `Created customer ${name} (${category}) with starting balance ₹${startingBalance} (${startingBalanceType})`, null, newCust);
     db.notify();
     return newCust;
+  },
+
+  updateCustomerStartingBalance: async (
+    customerId: string,
+    balance: number,
+    type: 'To Receive' | 'To Give',
+    user: User
+  ): Promise<void> => {
+    const cust = cache.customers.find(c => c.id === customerId);
+    if (!cust) throw new Error("Customer not found");
+    const oldBalance = cust.starting_balance;
+    cust.starting_balance = balance;
+    cust.starting_balance_type = type;
+
+    if (isSupabaseConfigured && supabase) {
+      await supabase.from('customers').update({
+        starting_balance: balance,
+        starting_balance_type: type
+      }).eq('id', customerId);
+    } else {
+      localStorage.setItem(KEY_CUSTOMERS, JSON.stringify(cache.customers));
+    }
+
+    // Also update or add the starting balance ledger entry
+    const existingStartEntry = cache.customer_ledger.find(e => e.customer_id === customerId && e.entry_type === 'Starting Balance');
+    const isDebit = type === 'To Receive';
+    if (existingStartEntry) {
+      existingStartEntry.debit = isDebit ? balance : 0;
+      existingStartEntry.credit = isDebit ? 0 : balance;
+      existingStartEntry.balance = isDebit ? balance : -balance;
+      existingStartEntry.notes = `Updated starting balance record (${type})`;
+      if (isSupabaseConfigured && supabase) {
+        supabase.from('customer_ledger').update(existingStartEntry).eq('id', existingStartEntry.id).then();
+      }
+    } else if (balance > 0) {
+      const newEntry: CustomerLedgerEntry = {
+        id: uuid(),
+        customer_id: cust.id,
+        customer_name: cust.customer_name,
+        brand: 'Hyundai',
+        date: new Date().toISOString(),
+        entry_type: 'Starting Balance',
+        reference_no: 'START-BAL',
+        debit: isDebit ? balance : 0,
+        credit: isDebit ? 0 : balance,
+        balance: isDebit ? balance : -balance,
+        notes: `Starting balance record (${type})`,
+        created_by: user.name,
+        created_at: new Date().toISOString()
+      };
+      cache.customer_ledger.unshift(newEntry);
+      if (isSupabaseConfigured && supabase) {
+        supabase.from('customer_ledger').insert(newEntry).then();
+      }
+    }
+
+    db.logTransaction(user.id, user.name, 'Update Customer Balance', 'Customer Ledger', `Updated starting balance for ${cust.customer_name} from ₹${oldBalance} to ₹${balance} (${type})`, null, cust);
+    db.notify();
+  },
+
+  // Khatabook Ledger Entries
+  getCustomerLedger: (customerId?: string): CustomerLedgerEntry[] => {
+    if (customerId) {
+      return cache.customer_ledger.filter(e => e.customer_id === customerId);
+    }
+    return cache.customer_ledger;
+  },
+
+  addCustomerLedgerEntry: async (
+    entry: Omit<CustomerLedgerEntry, 'id' | 'created_at'>,
+    user?: User
+  ): Promise<CustomerLedgerEntry> => {
+    const newEntry: CustomerLedgerEntry = {
+      ...entry,
+      id: uuid(),
+      created_at: new Date().toISOString()
+    };
+    cache.customer_ledger.unshift(newEntry);
+
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase.from('customer_ledger').insert(newEntry);
+      if (error) {
+        console.error("❌ Error inserting ledger entry into Supabase:", error);
+      }
+    } else {
+      localStorage.setItem(KEY_LEDGER, JSON.stringify(cache.customer_ledger));
+    }
+
+    db.notify();
+    return newEntry;
+  },
+
+  recordCustomerPayment: async (
+    customerId: string,
+    amount: number,
+    paymentMode: string,
+    notes: string,
+    user: User,
+    brand: Brand = 'Hyundai'
+  ): Promise<CustomerLedgerEntry> => {
+    const cust = cache.customers.find(c => c.id === customerId);
+    const custName = cust ? cust.customer_name : 'Unknown Customer';
+
+    const entry: CustomerLedgerEntry = {
+      id: uuid(),
+      customer_id: customerId,
+      customer_name: custName,
+      brand,
+      date: new Date().toISOString(),
+      entry_type: 'Payment Received',
+      reference_no: `PAY-${Date.now().toString().slice(-6)}`,
+      debit: 0,
+      credit: amount,
+      balance: 0,
+      payment_mode: paymentMode,
+      notes: notes || `Direct Payment Received via ${paymentMode}`,
+      created_by: user.name,
+      created_at: new Date().toISOString()
+    };
+
+    cache.customer_ledger.unshift(entry);
+
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase.from('customer_ledger').insert(entry);
+      if (error) console.error("❌ Error recording customer payment in Supabase:", error);
+    } else {
+      localStorage.setItem(KEY_LEDGER, JSON.stringify(cache.customer_ledger));
+    }
+
+    db.logTransaction(user.id, user.name, 'Customer Payment', 'Customer Ledger', `Recorded payment of ₹${amount} for ${custName} via ${paymentMode}`, null, entry);
+    db.notify();
+    return entry;
+  },
+
+  // Order Requests (Manager creates, Owner accepts without changing inventory)
+  getOrderRequests: (brand?: Brand): OrderRequest[] => {
+    if (brand) {
+      return cache.order_requests.filter(r => r.brand === brand);
+    }
+    return cache.order_requests;
+  },
+
+  createOrderRequest: async (
+    req: Omit<OrderRequest, 'id' | 'created_at' | 'updated_at' | 'status' | 'requested_by' | 'manager_id'>,
+    user: User
+  ): Promise<OrderRequest> => {
+    const now = new Date().toISOString();
+    const newReq: OrderRequest = {
+      ...req,
+      id: uuid(),
+      status: 'Pending',
+      requested_by: user.name,
+      manager_id: user.id,
+      created_at: now,
+      updated_at: now
+    };
+
+    cache.order_requests.unshift(newReq);
+
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase.from('order_requests').insert(newReq);
+      if (error) console.error("❌ Error inserting order request into Supabase:", error);
+    } else {
+      localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(cache.order_requests));
+    }
+
+    db.logTransaction(user.id, user.name, 'Order Request', 'Orders', `Created order request for ${req.quantity}x ${req.part_no} (${req.part_name}) [${req.brand}]`, null, newReq);
+    db.notify();
+    return newReq;
+  },
+
+  updateOrderRequestStatus: async (
+    id: string,
+    status: OrderRequest['status'],
+    user: User,
+    actionNotes?: string
+  ): Promise<void> => {
+    const req = cache.order_requests.find(r => r.id === id);
+    if (!req) throw new Error("Order request not found");
+
+    const oldStatus = req.status;
+    req.status = status;
+    req.accepted_by = user.name;
+    req.action_notes = actionNotes || (status === 'Accepted' ? 'Approved by Owner' : (status === 'Ordered' ? 'Placed with Dealer' : 'Rejected by Owner'));
+    req.updated_at = new Date().toISOString();
+
+    if (isSupabaseConfigured && supabase) {
+      await supabase.from('order_requests').update({
+        status: req.status,
+        accepted_by: req.accepted_by,
+        action_notes: req.action_notes,
+        updated_at: req.updated_at
+      }).eq('id', id);
+    } else {
+      localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(cache.order_requests));
+    }
+
+    db.logTransaction(user.id, user.name, 'Update Order Status', 'Orders', `Updated order request ${req.part_no} from ${oldStatus} to ${status}`, { status: oldStatus }, { status, accepted_by: user.name, notes: actionNotes });
+    db.notify();
+  },
+
+  // Staff Attendance & Monthly Salary System
+  getAttendance: (month?: string, userId?: string): StaffAttendance[] => {
+    let list = cache.staff_attendance;
+    if (userId) {
+      list = list.filter(a => a.user_id === userId);
+    }
+    if (month) {
+      // month formatted as 'YYYY-MM'
+      list = list.filter(a => a.date.startsWith(month));
+    }
+    return list;
+  },
+
+  markAttendance: async (
+    record: Omit<StaffAttendance, 'id' | 'created_at'>,
+    user: User
+  ): Promise<StaffAttendance> => {
+    const existingIdx = cache.staff_attendance.findIndex(a => a.user_id === record.user_id && a.date === record.date);
+    let item: StaffAttendance;
+
+    // Calculate earned salary for this day based on status
+    let multiplier = 1.0;
+    if (record.status === 'Absent') multiplier = 0.0;
+    else if (record.status === 'Half Day') multiplier = 0.5;
+    else if (record.status === 'Paid Leave') multiplier = 1.0;
+    else if (record.status === 'Present') multiplier = 1.0;
+
+    const salaryEarned = record.per_day_salary * multiplier;
+
+    if (existingIdx > -1) {
+      item = {
+        ...cache.staff_attendance[existingIdx],
+        status: record.status,
+        per_day_salary: record.per_day_salary,
+        salary_earned: salaryEarned,
+        notes: record.notes,
+        marked_by: user.name
+      };
+      cache.staff_attendance[existingIdx] = item;
+      if (isSupabaseConfigured && supabase) {
+        supabase.from('staff_attendance').update(item).eq('id', item.id).then();
+      }
+    } else {
+      item = {
+        ...record,
+        id: uuid(),
+        salary_earned: salaryEarned,
+        marked_by: user.name,
+        created_at: new Date().toISOString()
+      };
+      cache.staff_attendance.unshift(item);
+      if (isSupabaseConfigured && supabase) {
+        supabase.from('staff_attendance').insert(item).then();
+      }
+    }
+
+    localStorage.setItem(KEY_ATTENDANCE, JSON.stringify(cache.staff_attendance));
+    db.logTransaction(user.id, user.name, 'Mark Attendance', 'Attendance', `Marked ${record.user_name} as ${record.status} on ${record.date} (₹${salaryEarned})`, null, item);
+    db.notify();
+    return item;
+  },
+
+  updateStaffSalary: async (userId: string, perDaySalary: number, user: User): Promise<void> => {
+    const staff = cache.users.find(u => u.id === userId);
+    if (!staff) throw new Error("Staff user not found");
+    const oldSalary = staff.per_day_salary || 600;
+    staff.per_day_salary = perDaySalary;
+
+    if (isSupabaseConfigured && supabase) {
+      await supabase.from('users').update({ per_day_salary: perDaySalary }).eq('id', userId);
+    } else {
+      localStorage.setItem(KEY_USERS, JSON.stringify(cache.users));
+    }
+
+    db.logTransaction(user.id, user.name, 'Update Staff Salary', 'Attendance', `Updated daily salary rate for ${staff.name} from ₹${oldSalary} to ₹${perDaySalary}/day`, null, { userId, perDaySalary });
+    db.notify();
   },
 
   // Inventory lists
@@ -1708,17 +2090,23 @@ export const db = {
     customerId: string, 
     customerName: string, 
     customerCategory: CustomerCategory,
-    items: { part_no: string; quantity: number; discount_percentage: number; mrp?: number }[],
+    items: { part_no: string; quantity: number; discount_percentage: number; mrp?: number; is_net_price?: boolean; net_price?: number }[],
     discountPercentage: number,
     paymentStatus: PaymentStatus,
     paidAmount: number,
-    user: User
+    user: User,
+    paymentType: PaymentType = 'Cash',
+    customInvoiceNo?: string
   ): Promise<Sale> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const inventory = cache[b].inventory;
     const saleId = uuid();
     const saleItemsList = cache[b].sale_items;
     
+    // Auto-generate human-readable invoice number if not provided
+    const nextInvSeq = cache[b].sales.length + 1001;
+    const invoiceNo = customInvoiceNo?.trim() || `INV-${b.slice(0, 3).toUpperCase()}-${nextInvSeq}`;
+
     let subtotal = 0;
     const itemsToSave: SaleItem[] = [];
     
@@ -1755,8 +2143,12 @@ export const db = {
       }
       
       const partMrp = shopItem.mrp !== undefined ? shopItem.mrp : invItem.mrp;
-      const itemSubtotal = partMrp * shopItem.quantity;
-      const disAmount = itemSubtotal * (shopItem.discount_percentage / 100);
+      const isNetPrice = Boolean(shopItem.is_net_price);
+      const effectivePrice = isNetPrice && shopItem.net_price !== undefined ? shopItem.net_price : partMrp;
+      const itemSubtotal = effectivePrice * shopItem.quantity;
+      // Net price parts do not have further item discount
+      const effectiveDiscountPct = isNetPrice ? 0 : shopItem.discount_percentage;
+      const disAmount = itemSubtotal * (effectiveDiscountPct / 100);
       const finalAmount = itemSubtotal - disAmount;
       
       subtotal += finalAmount;
@@ -1768,7 +2160,9 @@ export const db = {
         part_name: invItem.part_name,
         quantity: shopItem.quantity,
         mrp: partMrp,
-        discount_percentage: shopItem.discount_percentage,
+        is_net_price: isNetPrice,
+        net_price: isNetPrice ? effectivePrice : undefined,
+        discount_percentage: effectiveDiscountPct,
         final_amount: finalAmount,
         returned_quantity: 0,
         created_at: new Date().toISOString()
@@ -1786,17 +2180,30 @@ export const db = {
     
     let calculatedPaid = totalAmount;
     let calculatedPending = 0;
+    let resolvedPaymentStatus: PaymentStatus = 'Paid';
     
-    if (paymentStatus === 'Pending') {
+    if (paymentType === 'Payment Pending') {
       calculatedPaid = 0;
       calculatedPending = totalAmount;
-    } else if (paymentStatus === 'Custom Amount') {
+      resolvedPaymentStatus = 'Pending';
+    } else if (paymentType === 'Half Payment') {
+      calculatedPaid = Math.round(totalAmount / 2);
+      calculatedPending = totalAmount - calculatedPaid;
+      resolvedPaymentStatus = 'Custom Amount';
+    } else if (paymentType === 'Custom Payment') {
       calculatedPaid = paidAmount;
       calculatedPending = Math.max(0, totalAmount - paidAmount);
+      resolvedPaymentStatus = calculatedPending === 0 ? 'Paid' : (calculatedPaid === 0 ? 'Pending' : 'Custom Amount');
+    } else {
+      // UPI or Cash: Full paid
+      calculatedPaid = totalAmount;
+      calculatedPending = 0;
+      resolvedPaymentStatus = 'Paid';
     }
     
     const sale: Sale = {
       id: saleId,
+      invoice_no: invoiceNo,
       customer_id: customerId,
       customer_name: customerName,
       customer_category: customerCategory,
@@ -1805,21 +2212,43 @@ export const db = {
       discount_percentage: discountPercentage,
       discount_amount: discountAmount,
       total_amount: totalAmount,
-      payment_status: paymentStatus,
+      payment_type: paymentType,
+      payment_status: resolvedPaymentStatus,
       paid_amount: calculatedPaid,
       pending_amount: calculatedPending,
+      has_return: false,
+      returned_items_count: 0,
       created_by: user.name,
-      created_at: new Date().toISOString()
+      created_at: new Date().toISOString(),
+      items: itemsToSave
     };
     
     cache[b].sales.unshift(sale);
     saleItemsList.push(...itemsToSave);
     
     if (isSupabaseConfigured && supabase) {
-      const { error: saleErr } = await supabase.schema(b).from('sales').insert(sale);
+      const { error: saleErr } = await supabase.schema(b).from('sales').insert({
+        id: sale.id,
+        invoice_no: sale.invoice_no,
+        customer_id: sale.customer_id,
+        customer_name: sale.customer_name,
+        customer_category: sale.customer_category,
+        sale_date: sale.sale_date,
+        subtotal: sale.subtotal,
+        discount_percentage: sale.discount_percentage,
+        discount_amount: sale.discount_amount,
+        total_amount: sale.total_amount,
+        payment_type: sale.payment_type,
+        payment_status: sale.payment_status,
+        paid_amount: sale.paid_amount,
+        pending_amount: sale.pending_amount,
+        has_return: false,
+        returned_items_count: 0,
+        created_by: sale.created_by,
+        created_at: sale.created_at
+      });
       if (saleErr) {
         console.error("❌ Error inserting sale into Supabase:", saleErr);
-        // Rollback memory cache so list stays in sync with real database
         cache[b].sales.shift();
         throw new Error(`Failed to save invoice in database: ${saleErr.message}`);
       }
@@ -1827,14 +2256,62 @@ export const db = {
       const { error: itemsErr } = await supabase.schema(b).from('sale_items').insert(itemsToSave);
       if (itemsErr) {
         console.error("❌ Error inserting sale items into Supabase:", itemsErr);
-        throw new Error(`Invoice saved, but item details failed to save in database: ${itemsErr.message}`);
       }
     } else {
       localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(cache[b].sales));
       localStorage.setItem(`sparezy_schema_${b}_sale_items`, JSON.stringify(saleItemsList));
     }
+
+    // Auto-record sale in Khatabook Customer Ledger (Debit for the bill)
+    const billLedgerEntry: CustomerLedgerEntry = {
+      id: uuid(),
+      customer_id: customerId,
+      customer_name: customerName,
+      brand,
+      date: sale.sale_date,
+      entry_type: 'Sale Bill',
+      reference_no: invoiceNo,
+      debit: totalAmount,
+      credit: 0,
+      balance: 0,
+      notes: `Sale Bill ${invoiceNo} (${items.length} items)`,
+      created_by: user.name,
+      created_at: sale.created_at
+    };
+    cache.customer_ledger.unshift(billLedgerEntry);
+
+    // If customer paid part or full amount, record payment in Khatabook ledger (Credit)
+    if (calculatedPaid > 0) {
+      const payLedgerEntry: CustomerLedgerEntry = {
+        id: uuid(),
+        customer_id: customerId,
+        customer_name: customerName,
+        brand,
+        date: sale.sale_date,
+        entry_type: 'Payment Received',
+        reference_no: invoiceNo,
+        debit: 0,
+        credit: calculatedPaid,
+        balance: 0,
+        payment_mode: paymentType === 'UPI' ? 'UPI' : (paymentType === 'Cash' ? 'Cash' : 'Mixed'),
+        notes: `Payment received (${paymentType}) for ${invoiceNo}`,
+        created_by: user.name,
+        created_at: new Date(Date.now() + 100).toISOString()
+      };
+      cache.customer_ledger.unshift(payLedgerEntry);
+    }
+
+    if (isSupabaseConfigured && supabase) {
+      supabase.from('customer_ledger').insert(billLedgerEntry).then();
+      if (calculatedPaid > 0) {
+        const payLedger = cache.customer_ledger[0];
+        supabase.from('customer_ledger').insert(payLedger).then();
+      }
+    } else {
+      localStorage.setItem(KEY_LEDGER, JSON.stringify(cache.customer_ledger));
+    }
     
-    db.logTransaction(user.id, user.name, 'Create Sale', 'Sales', `Created invoice ${saleId} for ${customerName} (₹${totalAmount.toFixed(2)})`, null, sale);
+    db.logTransaction(user.id, user.name, 'Create Sale', 'Sales', `Created invoice ${invoiceNo} for ${customerName} (₹${totalAmount.toFixed(2)}, Mode: ${paymentType})`, null, sale);
     lastBrandFetchTime[b] = 0;
     db.notify();
     return sale;
@@ -1870,7 +2347,33 @@ export const db = {
       localStorage.setItem(`sparezy_schema_${b}_sales`, JSON.stringify(sales));
     }
 
-    db.logTransaction(user.id, user.name, 'Receive Payment', 'Sales', `Received payment for invoice ${saleId} (Total: ₹${sale.total_amount}, Paid: ₹${paidAmount}, Pending: ₹${sale.pending_amount})`, oldSale, sale);
+    const paymentDiff = paidAmount - (oldSale.paid_amount || 0);
+    if (paymentDiff > 0) {
+      const payLedgerEntry: CustomerLedgerEntry = {
+        id: uuid(),
+        customer_id: sale.customer_id,
+        customer_name: sale.customer_name,
+        brand,
+        date: new Date().toISOString(),
+        entry_type: 'Payment Received',
+        reference_no: sale.invoice_no || saleId.slice(0, 8),
+        debit: 0,
+        credit: paymentDiff,
+        balance: 0,
+        payment_mode: 'Pending Payment Cleared',
+        notes: `Payment received for ${sale.invoice_no || saleId}`,
+        created_by: user.name,
+        created_at: new Date().toISOString()
+      };
+      cache.customer_ledger.unshift(payLedgerEntry);
+      if (isSupabaseConfigured && supabase) {
+        supabase.from('customer_ledger').insert(payLedgerEntry).then();
+      } else {
+        localStorage.setItem(KEY_LEDGER, JSON.stringify(cache.customer_ledger));
+      }
+    }
+
+    db.logTransaction(user.id, user.name, 'Receive Payment', 'Sales', `Received payment for invoice ${sale.invoice_no || saleId} (Total: ₹${sale.total_amount}, Paid: ₹${paidAmount}, Pending: ₹${sale.pending_amount})`, oldSale, sale);
     db.notify();
     return sale;
   },
@@ -1974,7 +2477,9 @@ export const db = {
     saleItemId: string, 
     returnedQty: number, 
     refundAmount: number, 
-    user: User
+    user: User,
+    paymentTreatment: 'Refund Paid (Cash/UPI)' | 'Kept in Customer Ledger (Credit)' = 'Refund Paid (Cash/UPI)',
+    notes: string = ''
   ) => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const saleItems = cache[b].sale_items;
@@ -1990,7 +2495,7 @@ export const db = {
     
     const maxReturnable = sItem.quantity - sItem.returned_quantity;
     if (returnedQty > maxReturnable) {
-      throw new Error(`Cannot return ${returnedQty}. Maximim returnable left is ${maxReturnable}`);
+      throw new Error(`Cannot return ${returnedQty}. Maximum returnable left is ${maxReturnable}`);
     }
     
     sItem.returned_quantity += returnedQty;
@@ -2017,6 +2522,9 @@ export const db = {
     }
     
     const oldSale = { ...sale };
+    sale.has_return = true;
+    sale.returned_items_count = (sale.returned_items_count || 0) + returnedQty;
+
     if (sale.pending_amount > 0) {
       if (sale.pending_amount >= refundAmount) {
         sale.pending_amount -= refundAmount;
@@ -2029,11 +2537,14 @@ export const db = {
       sale.paid_amount = Math.max(0, sale.paid_amount - refundAmount);
     }
     sale.total_amount = Math.max(0, sale.total_amount - refundAmount);
+
     if (isSupabaseConfigured && supabase) {
       supabase.schema(b).from('sales').update({
         pending_amount: sale.pending_amount,
         paid_amount: sale.paid_amount,
-        total_amount: sale.total_amount
+        total_amount: sale.total_amount,
+        has_return: true,
+        returned_items_count: sale.returned_items_count
       }).eq('id', sale.id).then();
     }
     
@@ -2042,12 +2553,17 @@ export const db = {
       sale_id: saleId,
       sale_item_id: saleItemId,
       customer_id: sale.customer_id,
+      customer_name: sale.customer_name,
       part_no: sItem.part_no,
       part_name: sItem.part_name,
       returned_quantity: returnedQty,
+      unit_price: sItem.mrp,
       refund_amount: refundAmount,
+      payment_treatment: paymentTreatment,
       return_date: new Date().toISOString(),
-      created_by: user.name
+      notes: notes || undefined,
+      created_by: user.name,
+      created_at: new Date().toISOString()
     };
     
     returns.unshift(returnRec);
@@ -2060,8 +2576,32 @@ export const db = {
       localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
       localStorage.setItem(`sparezy_schema_${b}_returns`, JSON.stringify(returns));
     }
+
+    // Record return credit in Customer Khatabook Ledger
+    const ledgerEntry: CustomerLedgerEntry = {
+      id: uuid(),
+      customer_id: sale.customer_id,
+      customer_name: sale.customer_name,
+      brand,
+      date: returnRec.return_date,
+      entry_type: paymentTreatment === 'Kept in Customer Ledger (Credit)' ? 'Item Return Credit' : 'Item Return Refund',
+      reference_no: sale.invoice_no || saleId.slice(0, 8),
+      debit: 0,
+      credit: refundAmount,
+      balance: 0,
+      payment_mode: paymentTreatment === 'Refund Paid (Cash/UPI)' ? 'Cash/UPI Refund' : 'Ledger Credit',
+      notes: `Returned ${returnedQty}x ${sItem.part_no} (${paymentTreatment}). ${notes ? 'Note: ' + notes : ''}`.trim(),
+      created_by: user.name,
+      created_at: new Date().toISOString()
+    };
+    cache.customer_ledger.unshift(ledgerEntry);
+    if (isSupabaseConfigured && supabase) {
+      supabase.from('customer_ledger').insert(ledgerEntry).then();
+    } else {
+      localStorage.setItem(KEY_LEDGER, JSON.stringify(cache.customer_ledger));
+    }
     
-    db.logTransaction(user.id, user.name, 'Sale Return', 'Returns', `Processed return for billing ${saleId}: Quantity ${returnedQty} of ${sItem.part_no}`, oldSale, sale);
+    db.logTransaction(user.id, user.name, 'Sale Return', 'Returns', `Processed return for ${sale.invoice_no || saleId}: Returned ${returnedQty}x ${sItem.part_no} (${paymentTreatment}, Refund: ₹${refundAmount})`, oldSale, sale);
     db.notify();
     return returnRec;
   },

@@ -2,64 +2,51 @@ import './storagePolyfill';
 import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
 import App from './App.tsx';
+import ErrorBoundary from './components/ErrorBoundary.tsx';
 import './index.css';
 
-// 1. Detect environment and manage environment/web socket behaviors (Requirement 1, 2, 4, 5, 6, 7)
-const isProduction = (import.meta as any).env?.PROD || window.location.hostname !== 'localhost' || window.location.host.includes('vercel');
+// 1. Detect environment and manage environment/web socket behaviors
+const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
+const isDev = Boolean((import.meta as any).env?.DEV);
+const isProduction = (import.meta as any).env?.PROD && !isInIframe;
 
-if (isProduction) {
-  console.log("🚀 Production Mode");
-  
-  // Prevent any production WebSocket errors from popping up in console or causing issues
-  const NativeWebSocket = window.WebSocket;
-  if (NativeWebSocket) {
-    try {
-      // Intercept and handle errors gracefully
-      window.addEventListener('error', (event) => {
-        if (event.message && (event.message.includes('WebSocket') || event.message.includes('ws://') || event.message.includes('wss://'))) {
-          event.preventDefault();
-          console.log("⚡ Ignored standard WebSocket warning in production.");
-        }
-      }, true);
-      
-      // Ensure unhandledrejection does not fire for websocket failures
-      window.addEventListener('unhandledrejection', (event) => {
-        const reason = event.reason?.message || '';
-        if (reason.includes('WebSocket') || reason.includes('ws://') || reason.includes('wss://')) {
-          event.preventDefault();
-        }
-      });
-    } catch (_) {
-      // safe fallback
-    }
+if (isInIframe || isDev) {
+  // In development and AI Studio preview iframes, unregister any stale Service Workers
+  // and clear stale asset caches to guarantee the live preview loads smoothly
+  if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.getRegistrations().then((registrations) => {
+      for (const reg of registrations) {
+        reg.unregister().catch(() => {});
+      }
+    }).catch(() => {});
   }
-} else {
-  console.log("🛠️ Development Mode");
-}
-
-function enableDevWebsocket() {
-  console.log("🔌 Vite WebSocket HMR initialized in development mode.");
-}
-
-if ((import.meta as any).env?.DEV) {
-  enableDevWebsocket();
+  if (typeof window !== 'undefined' && 'caches' in window) {
+    caches.keys().then((keys) => {
+      for (const k of keys) {
+        caches.delete(k).catch(() => {});
+      }
+    }).catch(() => {});
+  }
 }
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </StrictMode>,
 );
 
-// Register Progressive Web App (PWA) Service Worker for offline-safe static caching
-if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+// Register Progressive Web App (PWA) Service Worker ONLY for standalone production
+if (!isInIframe && !isDev && typeof window !== 'undefined' && 'serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js')
       .then((reg) => {
-        console.log('⚡ [Sparezy PWA] Service Worker registered successfully: ', reg.scope);
+        console.log('⚡ [Sparezy PWA] Service Worker registered: ', reg.scope);
       })
       .catch((err) => {
         console.warn('❌ [Sparezy PWA] Service Worker registration failed: ', err);
       });
   });
 }
+

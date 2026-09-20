@@ -19,7 +19,11 @@ interface SelectedCheckoutPart {
   available_qty: number;
   qty_to_sell: number;
   discount_percentage: number;
+  is_net_price?: boolean;
+  net_price?: number;
 }
+
+export type CheckoutPaymentType = 'UPI' | 'Cash' | 'Payment Pending' | 'Half Payment' | 'Custom Payment';
 
 export default function SalesModule({ brand, user }: SalesModuleProps) {
   const [activeTab, setActiveTab] = useState<'checkout' | 'history'>('checkout');
@@ -29,13 +33,25 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const [customerName, setCustomerName] = useState('');
   const [phone, setPhone] = useState('');
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
+  const [customerSearchQuery, setCustomerSearchQuery] = useState('');
   
+  // Add Customer Modal
+  const [isAddCustomerModalOpen, setIsAddCustomerModalOpen] = useState(false);
+  const [newCustName, setNewCustName] = useState('');
+  const [newCustCategory, setNewCustCategory] = useState<CustomerCategory>('Mistri');
+  const [newCustPhone, setNewCustPhone] = useState('');
+  const [newCustAddress, setNewCustAddress] = useState('');
+  const [newCustStartingBalance, setNewCustStartingBalance] = useState<number>(0);
+  const [newCustBalanceType, setNewCustBalanceType] = useState<'To Receive' | 'To Give'>('To Receive');
+
   // Selected Parts for Checkout
   const [checkoutParts, setCheckoutParts] = useState<SelectedCheckoutPart[]>([]);
   const [partSearchInput, setPartSearchInput] = useState('');
   const [partSearch, setPartSearch] = useState('');
   const [globalDiscount, setGlobalDiscount] = useState<number>(0);
-  const [paymentStatus, setPaymentStatus] = useState<PaymentStatus>('Paid');
+  
+  // Payment Type
+  const [checkoutPaymentType, setCheckoutPaymentType] = useState<CheckoutPaymentType>('UPI');
   const [customPaidAmount, setCustomPaidAmount] = useState<number>(0);
 
   // History states
@@ -269,9 +285,73 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     }));
   };
 
+  const handleToggleNetPrice = (partNo: string) => {
+    setCheckoutParts(checkoutParts.map(p => {
+      if (p.part_no === partNo) {
+        const nextIsNet = !p.is_net_price;
+        const defaultNetPrice = nextIsNet 
+          ? Math.round(p.mrp * (1 - (p.discount_percentage / 100))) 
+          : p.mrp;
+        return { 
+          ...p, 
+          is_net_price: nextIsNet,
+          net_price: defaultNetPrice
+        };
+      }
+      return p;
+    }));
+  };
+
+  const handleUpdateNetPrice = (partNo: string, val: number) => {
+    setCheckoutParts(checkoutParts.map(p => {
+      if (p.part_no === partNo) {
+        return { ...p, net_price: Math.max(0, val) };
+      }
+      return p;
+    }));
+  };
+
+  const handleQuickCreateCustomer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newCustName.trim()) {
+      alert("Customer name is required.");
+      return;
+    }
+    try {
+      const created = await db.addCustomer(
+        newCustName.trim(), 
+        newCustCategory, 
+        newCustPhone.trim() || undefined,
+        newCustAddress.trim() || undefined,
+        newCustStartingBalance,
+        newCustBalanceType,
+        user
+      );
+      refreshComponentData();
+      setSelectedCustomerId(created.id);
+      setCustomerName(created.customer_name);
+      setCustomerCategory(created.customer_category);
+      setPhone(created.phone || '');
+      setIsAddCustomerModalOpen(false);
+      setNewCustName('');
+      setNewCustCategory('Mistri');
+      setNewCustPhone('');
+      setNewCustAddress('');
+      setNewCustStartingBalance(0);
+      setNewCustBalanceType('To Receive');
+      triggerToast(`Customer ${created.customer_name} added & selected!`);
+    } catch (err: any) {
+      alert(err.message || "Failed to add customer");
+    }
+  };
+
   // Math Calculations
   const checkoutSubtotal = useMemo(() => {
     return checkoutParts.reduce((acc, p) => {
+      if (p.is_net_price) {
+        const net = typeof p.net_price === 'number' ? p.net_price : p.mrp;
+        return acc + (net * p.qty_to_sell);
+      }
       const lineCost = p.mrp * p.qty_to_sell;
       const lineDiscount = lineCost * (p.discount_percentage / 100);
       return acc + (lineCost - lineDiscount);
@@ -279,21 +359,58 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   }, [checkoutParts]);
 
   const checkoutTotal = useMemo(() => {
-    const dis = checkoutSubtotal * (globalDiscount / 100);
-    return Math.max(0, checkoutSubtotal - dis);
-  }, [checkoutSubtotal, globalDiscount]);
+    const nonNetSubtotal = checkoutParts.reduce((acc, p) => {
+      if (p.is_net_price) return acc;
+      const lineCost = p.mrp * p.qty_to_sell;
+      const lineDiscount = lineCost * (p.discount_percentage / 100);
+      return acc + (lineCost - lineDiscount);
+    }, 0);
+    const netSubtotal = checkoutParts.reduce((acc, p) => {
+      if (!p.is_net_price) return acc;
+      const net = typeof p.net_price === 'number' ? p.net_price : p.mrp;
+      return acc + (net * p.qty_to_sell);
+    }, 0);
 
-  const actualCustomPaid = paymentStatus === 'Paid' 
-    ? checkoutTotal 
-    : paymentStatus === 'Pending' 
-      ? 0 
-      : customPaidAmount;
+    const globalDiscountAmount = nonNetSubtotal * (globalDiscount / 100);
+    return Math.max(0, (nonNetSubtotal - globalDiscountAmount) + netSubtotal);
+  }, [checkoutParts, globalDiscount]);
 
-  const actualCustomPending = paymentStatus === 'Paid'
-    ? 0
-    : paymentStatus === 'Pending'
-      ? checkoutTotal
-      : Math.max(0, checkoutTotal - customPaidAmount);
+  // Payment Calculation
+  const { calculatedPaid, calculatedPending, effectivePaymentStatus, effectiveCustomAmount } = useMemo(() => {
+    if (checkoutPaymentType === 'UPI' || checkoutPaymentType === 'Cash') {
+      return {
+        calculatedPaid: checkoutTotal,
+        calculatedPending: 0,
+        effectivePaymentStatus: 'Paid' as PaymentStatus,
+        effectiveCustomAmount: 0
+      };
+    }
+    if (checkoutPaymentType === 'Payment Pending') {
+      return {
+        calculatedPaid: 0,
+        calculatedPending: checkoutTotal,
+        effectivePaymentStatus: 'Pending' as PaymentStatus,
+        effectiveCustomAmount: 0
+      };
+    }
+    if (checkoutPaymentType === 'Half Payment') {
+      const half = Math.round((checkoutTotal / 2) * 100) / 100;
+      return {
+        calculatedPaid: half,
+        calculatedPending: checkoutTotal - half,
+        effectivePaymentStatus: 'Custom Amount' as PaymentStatus,
+        effectiveCustomAmount: half
+      };
+    }
+    // Custom Payment
+    const paid = Math.min(checkoutTotal, Math.max(0, customPaidAmount));
+    return {
+      calculatedPaid: paid,
+      calculatedPending: Math.max(0, checkoutTotal - paid),
+      effectivePaymentStatus: (paid >= checkoutTotal ? 'Paid' : paid <= 0 ? 'Pending' : 'Custom Amount') as PaymentStatus,
+      effectiveCustomAmount: paid
+    };
+  }, [checkoutPaymentType, checkoutTotal, customPaidAmount]);
 
   // SAVE BILL DISPATCH
   const handleSaveBill = async (e: React.FormEvent) => {
@@ -320,8 +437,8 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       const payloadItems = checkoutParts.map(p => ({
         part_no: p.part_no,
         quantity: p.qty_to_sell,
-        discount_percentage: p.discount_percentage,
-        mrp: p.mrp
+        discount_percentage: p.is_net_price ? 0 : p.discount_percentage,
+        mrp: p.is_net_price && typeof p.net_price === 'number' ? p.net_price : p.mrp
       }));
 
       const newSale = await db.createSale(
@@ -331,8 +448,8 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
         customerCategory,
         payloadItems,
         globalDiscount,
-        paymentStatus,
-        paymentStatus === 'Custom Amount' ? customPaidAmount : 0,
+        effectivePaymentStatus,
+        effectiveCustomAmount,
         user
       );
 
@@ -343,6 +460,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       setPhone('');
       setGlobalDiscount(0);
       setCustomPaidAmount(0);
+      setCheckoutPaymentType('UPI');
 
       refreshComponentData();
       triggerToast(`Saved checkout successfully! Invoice: ${newSale.id}`);
@@ -486,25 +604,37 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
           {/* Checkout Steps Form */}
           <div className="lg:col-span-2 space-y-6">
             
-            {/* Step 1: Customer category & Registration */}
+            {/* Step 1: Customer category & Selection */}
             <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
-                <span className="w-5 h-5 rounded-full bg-indigo-50 text-indigo-600 inline-flex items-center justify-center font-bold text-xs">
-                  1
-                </span>
-                Customer Profile Information
-              </h3>
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                  <span className="w-5 h-5 rounded-full bg-indigo-50 text-indigo-600 inline-flex items-center justify-center font-bold text-xs">
+                    1
+                  </span>
+                  Customer Selection & Profile
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setIsAddCustomerModalOpen(true)}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-bold transition cursor-pointer border border-indigo-200"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  + Add New Customer
+                </button>
+              </div>
 
               <div className="space-y-3 font-semibold text-slate-700 text-xs">
                 <div>
-                  <label className="block text-slate-500 mb-1">Select Customer Category</label>
+                  <label className="block text-slate-500 mb-1">Customer Category</label>
                   <div className="grid grid-cols-4 gap-2">
                     {(['Walk-in', 'Mistri', 'Retailer', 'Garage'] as CustomerCategory[]).map((cat) => (
                       <button
                         key={cat}
                         type="button"
-                        onClick={() => setCustomerCategory(cat)}
-                        className={`p-2.5 rounded-xl border text-center transition ${
+                        onClick={() => {
+                          setCustomerCategory(cat);
+                        }}
+                        className={`p-2 rounded-xl border text-center transition ${
                           customerCategory === cat
                             ? 'border-indigo-600 bg-indigo-50/50 text-indigo-900 font-bold'
                             : 'border-slate-200 text-slate-600 bg-white hover:border-slate-350'
@@ -516,21 +646,32 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-slate-500 mb-1">Customer Name</label>
-                    <input
-                      type="text"
-                      className="w-full p-2.5 border border-slate-200 rounded-xl font-medium"
-                      placeholder="e.g. Ramesh Chandra Auto Sales"
-                      value={customerName}
-                      onChange={(e) => setCustomerName(e.target.value)}
-                    />
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="space-y-1">
+                    <label className="block text-slate-500">Customer Name *</label>
+                    <div className="relative">
+                      <input
+                        type="text"
+                        className="w-full p-2.5 border border-slate-200 rounded-xl font-medium"
+                        placeholder="Search or enter customer name..."
+                        value={customerName}
+                        onChange={(e) => {
+                          setCustomerName(e.target.value);
+                          setCustomerSearchQuery(e.target.value);
+                        }}
+                      />
+                      {selectedCustomerId && (
+                        <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] font-bold bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-full">
+                          Existing
+                        </span>
+                      )}
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-slate-500 mb-1">Phone Number (Optional)</label>
+
+                  <div className="space-y-1">
+                    <label className="block text-slate-500">Phone Number (Optional)</label>
                     <input
-                      type="text"
+                      type="tel"
                       className="w-full p-2.5 border border-slate-200 rounded-xl"
                       placeholder="e.g. 9876543210"
                       value={phone}
@@ -539,31 +680,56 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                   </div>
                 </div>
 
-                {/* Quick Auto-complete matches */}
-                <div className="bg-slate-50 p-3 rounded-xl space-y-2">
-                  <p className="text-[10px] uppercase font-bold tracking-wider text-slate-400">Match existing clients list</p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {customersList.filter(c => c.customer_category === customerCategory).slice(0, 4).map(c => (
+                {/* Quick Auto-complete / Search matches */}
+                <div className="bg-slate-50 p-3 rounded-xl space-y-2 border border-slate-150">
+                  <div className="flex items-center justify-between">
+                    <p className="text-[10px] uppercase font-bold tracking-wider text-slate-400">
+                      Select From Saved Customers ({customersList.length} Total)
+                    </p>
+                    {selectedCustomerId && (
                       <button
-                        key={c.id}
                         type="button"
-                        onClick={() => handleSelectExistingCustomer(c)}
-                        className={`px-2 py-1.5 rounded-lg border text-[11px] font-normal flex items-center gap-1 ${
-                          selectedCustomerId === c.id 
-                            ? 'bg-indigo-600 text-white border-transparent' 
-                            : 'bg-white text-slate-600 border-slate-200 hover:border-indigo-300'
-                        }`}
+                        onClick={() => {
+                          setSelectedCustomerId('');
+                          setCustomerName('');
+                          setPhone('');
+                        }}
+                        className="text-[10px] text-rose-500 hover:underline font-bold"
                       >
-                        <UserCheck className="w-3 h-3" />
-                        {c.customer_name}
+                        Clear Selection
                       </button>
-                    ))}
+                    )}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto">
+                    {customersList
+                      .filter(c => {
+                        if (!customerSearchQuery) return c.customer_category === customerCategory;
+                        return c.customer_name.toLowerCase().includes(customerSearchQuery.toLowerCase()) ||
+                               (c.phone && c.phone.includes(customerSearchQuery));
+                      })
+                      .slice(0, 8)
+                      .map(c => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => handleSelectExistingCustomer(c)}
+                          className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-medium flex items-center gap-1.5 transition cursor-pointer ${
+                            selectedCustomerId === c.id 
+                              ? 'bg-indigo-600 text-white border-transparent font-bold shadow-xs' 
+                              : 'bg-white text-slate-700 border-slate-200 hover:border-indigo-300 hover:bg-slate-50'
+                          }`}
+                        >
+                          <UserCheck className="w-3.5 h-3.5" />
+                          <span>{c.customer_name}</span>
+                          <span className="text-[9px] opacity-75 font-normal">({c.customer_category})</span>
+                        </button>
+                      ))}
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* Step 2: Sale Items search and grid */}
+            {/* Step 2: Sale Items search and grid with Net Price options */}
             <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4">
               <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
                 <span className="w-5 h-5 rounded-full bg-indigo-50 text-indigo-600 inline-flex items-center justify-center font-bold text-xs">
@@ -580,9 +746,12 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                   <input
                     type="text"
                     className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-xl font-medium focus:outline-none focus:ring-1 focus:ring-indigo-600/30"
-                    placeholder="Search e.g. brake pads, Air Filters..."
+                    placeholder="Search e.g. brake pads, Air Filters, part no..."
                     value={partSearchInput}
-                    onChange={(e) => setPartSearchInput(e.target.value)}
+                    onChange={(e) => {
+                      setPartSearchInput(e.target.value);
+                      setPartSearch(e.target.value);
+                    }}
                   />
                 </div>
 
@@ -618,9 +787,10 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                   <table className="min-w-full divide-y divide-slate-100 text-left text-xs font-semibold">
                     <thead>
                       <tr className="bg-slate-50 text-slate-500 text-[10px] uppercase">
-                        <th className="p-3">Matched Spare Part details</th>
-                        <th className="p-3 text-center">MRP (INR)</th>
-                        <th className="p-3 text-center">Checkout Qty</th>
+                        <th className="p-3">Spare Part Details</th>
+                        <th className="p-3 text-center">MRP (₹)</th>
+                        <th className="p-3 text-center">Qty</th>
+                        <th className="p-3 text-center">Net Price Option</th>
                         <th className="p-3 text-center">Dis %</th>
                         <th className="p-3 text-right">Final Amount</th>
                         <TH_PRINT />
@@ -629,28 +799,22 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                     <tbody className="divide-y divide-slate-100 text-slate-700">
                       {checkoutParts.map((item) => {
                         const lineVal = item.mrp * item.qty_to_sell;
-                        const finalLineVal = lineVal - (lineVal * (item.discount_percentage / 100));
+                        const lineDiscount = lineVal * (item.discount_percentage / 100);
+                        const finalLineVal = item.is_net_price 
+                          ? (item.net_price || item.mrp) * item.qty_to_sell
+                          : lineVal - lineDiscount;
+
                         return (
                           <tr key={item.part_no} className="hover:bg-slate-50/50">
-                            <td className="p-3 max-w-[200px]">
-                              <p className="font-bold font-mono text-slate-900 flex items-center gap-1.5 leading-tight">
+                            <td className="p-3 max-w-[180px]">
+                              <p className="font-bold font-mono text-slate-900 leading-tight">
                                 {item.part_no}
                               </p>
                               <p className="text-[10px] text-slate-400 font-normal leading-tight">{item.part_name}</p>
                             </td>
                             
                             <td className="p-3 text-center">
-                              <div className="inline-flex items-center gap-1 justify-center">
-                                <span className="text-slate-400 font-bold">₹</span>
-                                <input
-                                  type="number"
-                                  min="0"
-                                  step="any"
-                                  className="w-20 p-1 border border-slate-200 rounded text-center text-xs font-bold font-mono"
-                                  value={item.mrp}
-                                  onChange={(e) => handleUpdateCheckoutMRP(item.part_no, Number(e.target.value))}
-                                />
-                              </div>
+                              <span className="font-mono font-medium">₹{item.mrp}</span>
                             </td>
                             
                             <td className="p-3 text-center">
@@ -667,24 +831,60 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                               </div>
                             </td>
 
+                            {/* Net Price Option Column */}
+                            <td className="p-3 text-center">
+                              <div className="flex flex-col items-center gap-1">
+                                <label className="inline-flex items-center gap-1 text-[10px] font-bold text-slate-600 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={!!item.is_net_price}
+                                    onChange={() => handleToggleNetPrice(item.part_no)}
+                                    className="rounded text-indigo-600 focus:ring-indigo-500"
+                                  />
+                                  <span>Net Price</span>
+                                </label>
+                                {item.is_net_price && (
+                                  <div className="inline-flex items-center gap-0.5">
+                                    <span className="text-slate-400 font-bold text-[10px]">₹</span>
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      step="any"
+                                      value={item.net_price ?? item.mrp}
+                                      onChange={(e) => handleUpdateNetPrice(item.part_no, Number(e.target.value))}
+                                      className="w-16 p-0.5 border border-indigo-300 rounded text-center text-xs font-bold font-mono bg-indigo-50/50 text-indigo-900"
+                                      placeholder="Net ₹"
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+
                             <td className="p-3 text-center">
                               <input
                                 type="number"
                                 min="0"
                                 max="100"
-                                className="w-12 p-1 border border-slate-200 rounded text-center text-xs"
-                                value={item.discount_percentage || ''}
+                                disabled={!!item.is_net_price}
+                                className={`w-12 p-1 border rounded text-center text-xs ${
+                                  item.is_net_price 
+                                    ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'
+                                    : 'border-slate-200'
+                                }`}
+                                value={item.is_net_price ? 0 : (item.discount_percentage || '')}
                                 onChange={(e) => handleUpdateCheckoutDiscount(item.part_no, Number(e.target.value))}
                               />
                             </td>
 
-                            <td className="p-3 text-right font-bold text-slate-900">₹{finalLineVal.toFixed(2)}</td>
+                            <td className="p-3 text-right font-bold font-mono text-slate-900">
+                              ₹{finalLineVal.toFixed(2)}
+                            </td>
                             
                             <td className="p-3 text-center">
                               <button
                                 type="button"
                                 onClick={() => handleRemoveCheckoutPart(item.part_no)}
-                                className="text-red-500 hover:text-red-700 hover:bg-red-50 p-1.5 rounded-lg transition"
+                                className="text-red-500 hover:text-red-700 hover:bg-red-50 p-1.5 rounded-lg transition cursor-pointer"
                               >
                                 <Trash2 className="w-4 h-4" />
                               </button>
@@ -694,8 +894,8 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                       })}
                       {checkoutParts.length === 0 && (
                         <tr>
-                          <td colSpan={6} className="p-8 text-center text-slate-400 text-xs font-normal">
-                            No parts currently loaded in active sale slip.
+                          <td colSpan={7} className="p-8 text-center text-slate-400 text-xs font-normal">
+                            No parts currently loaded in active sale slip. Search above to add parts.
                           </td>
                         </tr>
                       )}
@@ -719,12 +919,12 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
               <div className="space-y-3.5 text-xs">
                 <div className="flex justify-between">
-                  <span className="text-slate-400">Pre-Discount subtotal</span>
+                  <span className="text-slate-400">Pre-Discount Subtotal</span>
                   <span className="font-mono">₹{checkoutSubtotal.toFixed(2)}</span>
                 </div>
                 
                 <div className="flex justify-between items-center bg-slate-800/40 p-2.5 rounded-xl border border-slate-800">
-                  <span className="text-slate-400 font-semibold">Special Order Discount %</span>
+                  <span className="text-slate-400 font-semibold">Bill Discount % (Non-Net Items)</span>
                   <input
                     type="number"
                     min="0"
@@ -736,49 +936,59 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                 </div>
 
                 <div className="border-t border-slate-800 pt-3 flex justify-between items-baseline">
-                  <span className="text-slate-400 font-extrabold text-sm">Final Payable Invoice Total</span>
+                  <span className="text-slate-400 font-extrabold text-sm">Payable Invoice Total</span>
                   <span className="text-xl font-bold font-mono text-emerald-400">₹{checkoutTotal.toLocaleString('en-IN')}</span>
                 </div>
               </div>
 
-              {/* Step 5: Choose Payment Status */}
+              {/* Step 3: Choose Payment Type */}
               <div className="space-y-3 pt-3 border-t border-slate-850 text-xs">
-                <label className="block text-slate-350 uppercase tracking-widest text-[10px] font-bold">Payment Status Type</label>
-                <div className="grid grid-cols-3 gap-2">
-                  {(['Paid', 'Pending', 'Custom Amount'] as PaymentStatus[]).map((st) => (
+                <label className="block text-slate-350 uppercase tracking-widest text-[10px] font-bold">
+                  Select Payment Type
+                </label>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {(['UPI', 'Cash', 'Payment Pending', 'Half Payment', 'Custom Payment'] as CheckoutPaymentType[]).map((pt) => (
                     <button
-                      key={st}
+                      key={pt}
                       type="button"
-                      onClick={() => setPaymentStatus(st)}
-                      className={`py-2 rounded-xl text-[10px] font-bold text-center border transition ${
-                        paymentStatus === st
-                          ? 'bg-emerald-600 text-white border-transparent'
+                      onClick={() => setCheckoutPaymentType(pt)}
+                      className={`py-2 px-1 rounded-xl text-[10px] font-bold text-center border transition cursor-pointer ${
+                        checkoutPaymentType === pt
+                          ? 'bg-emerald-600 text-white border-transparent shadow-sm'
                           : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-750'
                       }`}
                     >
-                      {st === 'Custom Amount' ? 'Custom' : st}
+                      {pt}
                     </button>
                   ))}
                 </div>
 
-                {paymentStatus === 'Custom Amount' && (
+                {checkoutPaymentType === 'Custom Payment' && (
                   <div className="space-y-2 bg-slate-850/80 p-3 rounded-xl border border-slate-800">
-                    <label className="block text-slate-400">Enter Cash Received (INR)</label>
+                    <label className="block text-slate-400">Enter Cash/UPI Paid (₹)</label>
                     <input
                       type="number"
-                      min="0.5"
-                      step="0.5"
+                      min="0"
+                      step="any"
                       max={checkoutTotal}
-                      className="w-full p-2.5 rounded-xl border border-slate-700 bg-slate-900 text-white font-mono font-bold"
+                      className="w-full p-2 rounded-xl border border-slate-700 bg-slate-900 text-white font-mono font-bold"
                       value={customPaidAmount || ''}
                       onChange={(e) => setCustomPaidAmount(Number(e.target.value))}
+                      placeholder="Amount collected now..."
                     />
-                    <div className="flex justify-between text-[11px] font-normal text-slate-400 pt-1">
-                      <span>Calculated Pending:</span>
-                      <span className="font-mono text-red-400 font-semibold">₹{(checkoutTotal - customPaidAmount).toFixed(2)}</span>
-                    </div>
                   </div>
                 )}
+
+                <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-800 space-y-1 font-mono text-[11px]">
+                  <div className="flex justify-between text-emerald-400">
+                    <span>Paid Now:</span>
+                    <span>₹{calculatedPaid.toLocaleString('en-IN')}</span>
+                  </div>
+                  <div className="flex justify-between text-amber-400">
+                    <span>Pending Due:</span>
+                    <span>₹{calculatedPending.toLocaleString('en-IN')}</span>
+                  </div>
+                </div>
               </div>
 
               {/* Dispatch Action */}
@@ -787,17 +997,17 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                 onClick={handleSaveBill}
                 className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-3 rounded-xl text-xs font-extrabold shadow-lg hover:shadow-indigo-500/10 transition flex items-center justify-center gap-1.5 cursor-pointer"
               >
-                <span>Complete Billing Slip</span>
+                <span>Save Invoice &amp; Deduct Stock</span>
                 <ChevronRight className="w-4.5 h-4.5" />
               </button>
             </div>
 
             <div className="border border-slate-200 bg-white p-4 rounded-2xl text-xs text-slate-400">
-              <p>On finishing the slip:</p>
+              <p className="font-bold text-slate-600">On completing the bill:</p>
               <ul className="list-disc pl-4 mt-2 space-y-1">
-                <li>Inventory items are deducted instantly.</li>
-                <li>Ledger balances are recorded dynamically.</li>
-                <li>Printer ready invoice receipt pops up directly.</li>
+                <li>Inventory items are deducted immediately.</li>
+                <li>Customer ledger is updated with transaction entries.</li>
+                <li>Invoice receipt slip opens automatically for printing/sharing.</li>
               </ul>
             </div>
 
@@ -1359,6 +1569,139 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {/* ADD CUSTOMER MODAL */}
+      {isAddCustomerModalOpen && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md border border-slate-200 overflow-hidden text-xs">
+            <div className="bg-slate-50 px-5 py-4 border-b border-slate-200 flex justify-between items-center">
+              <div>
+                <span className="text-[10px] uppercase font-bold text-indigo-600 tracking-wider">New Customer Registration</span>
+                <h3 className="font-extrabold text-slate-900 text-sm">Add Customer &amp; Open Khatabook</h3>
+              </div>
+              <button 
+                onClick={() => setIsAddCustomerModalOpen(false)}
+                className="p-1 hover:bg-slate-200 rounded text-slate-500 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleQuickCreateCustomer} className="p-6 space-y-4">
+              <div>
+                <label className="block text-slate-500 font-bold mb-1">Customer Category *</label>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {(['Mistri', 'Garage', 'Walk-in', 'Retailer'] as CustomerCategory[]).map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setNewCustCategory(cat)}
+                      className={`p-2 rounded-xl border text-center text-xs font-bold transition cursor-pointer ${
+                        newCustCategory === cat
+                          ? 'border-indigo-600 bg-indigo-50 text-indigo-900 shadow-xs'
+                          : 'border-slate-200 text-slate-600 bg-white hover:border-slate-350'
+                      }`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-500 font-bold mb-1">Customer Name *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Pappu Garage / Sunil Mistri"
+                  className="w-full p-2.5 border border-slate-200 rounded-xl font-medium focus:ring-1 focus:ring-indigo-600"
+                  value={newCustName}
+                  onChange={(e) => setNewCustName(e.target.value)}
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-500 font-bold mb-1">Phone Number</label>
+                  <input
+                    type="tel"
+                    placeholder="10-digit mobile"
+                    className="w-full p-2.5 border border-slate-200 rounded-xl"
+                    value={newCustPhone}
+                    onChange={(e) => setNewCustPhone(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-500 font-bold mb-1">Address / Location</label>
+                  <input
+                    type="text"
+                    placeholder="City / Area"
+                    className="w-full p-2.5 border border-slate-200 rounded-xl"
+                    value={newCustAddress}
+                    onChange={(e) => setNewCustAddress(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 space-y-2">
+                <div className="flex justify-between items-center">
+                  <label className="text-slate-600 font-bold text-[11px]">Opening Balance (₹)</label>
+                  <div className="inline-flex rounded-lg border border-slate-200 bg-white p-0.5 text-[10px]">
+                    <button
+                      type="button"
+                      onClick={() => setNewCustBalanceType('To Receive')}
+                      className={`px-2 py-1 rounded font-bold transition ${
+                        newCustBalanceType === 'To Receive' 
+                          ? 'bg-rose-500 text-white' 
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      To Receive
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewCustBalanceType('To Give')}
+                      className={`px-2 py-1 rounded font-bold transition ${
+                        newCustBalanceType === 'To Give' 
+                          ? 'bg-emerald-600 text-white' 
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      To Give (Advance)
+                    </button>
+                  </div>
+                </div>
+                <input
+                  type="number"
+                  min="0"
+                  step="any"
+                  placeholder="0.00"
+                  className="w-full p-2 border border-slate-200 rounded-lg font-mono font-bold bg-white"
+                  value={newCustStartingBalance || ''}
+                  onChange={(e) => setNewCustStartingBalance(Number(e.target.value))}
+                />
+              </div>
+
+              <div className="pt-2 flex gap-2">
+                <button
+                  type="submit"
+                  className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl font-bold cursor-pointer transition flex items-center justify-center gap-1.5 shadow-sm"
+                >
+                  <Check className="w-4 h-4" />
+                  Save &amp; Select Customer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsAddCustomerModalOpen(false)}
+                  className="px-4 bg-slate-100 text-slate-600 hover:bg-slate-200 py-2.5 rounded-xl cursor-pointer transition font-medium"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
