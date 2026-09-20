@@ -98,10 +98,17 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
     }
   };
 
-  const handleFileUpload = (file: File) => {
+  const handleFileUpload = async (file: File) => {
     setFileName(file.name);
     setIsParsing(true);
     setParsedLoaded(false);
+
+    // Pre-load current brand data into memory so all active & archived parts are available for matching
+    try {
+      await db.loadBrandData(brand);
+    } catch (e) {
+      console.warn("Brand preload notice:", e);
+    }
 
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -127,10 +134,92 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
 
         // Get complete inventory list to match parts (including archived parts)
         const currentInventory = db.getInventory(brand, true);
-        const inventoryMap = new Map<string, InventoryItem>();
+        const exactMap = new Map<string, InventoryItem>();
+        const alphaMap = new Map<string, InventoryItem>();
+
         for (const item of currentInventory) {
-          inventoryMap.set(item.part_no.toUpperCase(), item);
+          if (!item || !item.part_no) continue;
+          const cleanNo = String(item.part_no).trim().toUpperCase();
+          const alphaNo = cleanNo.replace(/[^A-Z0-9]/g, '');
+
+          if (!exactMap.has(cleanNo)) {
+            exactMap.set(cleanNo, item);
+          }
+          if (alphaNo && !alphaMap.has(alphaNo)) {
+            alphaMap.set(alphaNo, item);
+          }
         }
+
+        const findExistingPart = (rawPartNo: any): InventoryItem | undefined => {
+          if (rawPartNo === null || rawPartNo === undefined) return undefined;
+          let str = String(rawPartNo).trim().toUpperCase();
+          if (!str) return undefined;
+          // Strip trailing .0 from Excel numeric parsing
+          if (/^\d+\.0$/.test(str)) {
+            str = str.replace(/\.0$/, '');
+          }
+          if (exactMap.has(str)) return exactMap.get(str);
+          const alpha = str.replace(/[^A-Z0-9]/g, '');
+          if (alpha && alphaMap.has(alpha)) return alphaMap.get(alpha);
+          return undefined;
+        };
+
+        const cleanKey = (k: string) => k.toLowerCase().replace(/[\r\n\t_.\-\s#]+/g, '');
+
+        const findPartKey = (keys: string[]) => {
+          // 1. Exact standard part number headers
+          const p1 = keys.find(k => [
+            'partno', 'partnumber', 'partnum', 'itemcode', 'itemno', 'itemnumber',
+            'partcode', 'sku', 'materialno', 'materialnumber', 'sparepartno', 'sparespartno'
+          ].includes(cleanKey(k)));
+          if (p1) return p1;
+
+          // 2. Headers containing part and no/number without being name or desc
+          const p2 = keys.find(k => {
+            const c = cleanKey(k);
+            const isNonPart = c.includes('name') || c.includes('desc') || c.includes('qty') || c.includes('quantity') || c.includes('mrp') || c.includes('price') || c.includes('hsn') || c.includes('sr');
+            return !isNonPart && (/^(part|item|spare|material|sku)/i.test(c));
+          });
+          if (p2) return p2;
+
+          // 3. Regex matching part_no, part.no, etc.
+          const p3 = keys.find(k => /part[_\-\s.]?no|item[_\-\s.]?no|part[_\-\s.]?num/i.test(k));
+          if (p3) return p3;
+
+          // 4. Headers with 'part' that are not name/description
+          const p4 = keys.find(k => /part/i.test(k) && !/name|desc|title/i.test(k));
+          if (p4) return p4;
+
+          return undefined;
+        };
+
+        const findNameKey = (keys: string[], detectedPartKey: string) => {
+          return keys.find(k => {
+            if (k === detectedPartKey) return false;
+            const c = cleanKey(k);
+            return c.includes('name') || c.includes('desc') || c.includes('description') || c.includes('title');
+          });
+        };
+
+        const findHsnKey = (keys: string[]) => {
+          return keys.find(k => /hsn/i.test(cleanKey(k)));
+        };
+
+        const findQtyKey = (keys: string[]) => {
+          return keys.find(k => {
+            const c = cleanKey(k);
+            return ['qty', 'quantity', 'stock', 'count', 'units', 'pcs', 'newqty', 'newquantity', 'physicalstock'].includes(c) ||
+                   /^(qty|quantity|stock)/i.test(c);
+          });
+        };
+
+        const findMrpKey = (keys: string[]) => {
+          return keys.find(k => {
+            const c = cleanKey(k);
+            return ['mrp', 'price', 'newmrp', 'newprice', 'rate', 'unitprice', 'mrpprice'].includes(c) ||
+                   /^(mrp|newmrp|price)/i.test(c);
+          });
+        };
 
         if (updateType === 'MRP') {
           const parsed: ParsedBulkMRPRow[] = [];
@@ -140,16 +229,14 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
             const keys = Object.keys(row);
             if (keys.length === 0) continue;
 
-            const partKey = keys.find(k => 
-              /^(part[_\-\s]?no|part[_\-\s]?number|sku|item[_\-\s]?code|part_number|partno|part\s*no\.?)$/i.test(k.trim())
-            ) || keys.find(k => /part/i.test(k.trim())) || keys[0];
+            const partKey = findPartKey(keys);
+            if (!partKey) {
+              throw new Error(`Part Number column not detected. Detected headers in your sheet: [${keys.join(', ')}]. Please ensure your sheet has a 'PART NO' or 'Part Number' column.`);
+            }
 
-            const mrpKey = keys.find(k => 
-              /^(mrp|new[_\-\s]?mrp|price|new[_\-\s]?price|mrp_price|value|mrp\s*value|mrp\s*price|maximum\s*retail\s*price)$/i.test(k.trim())
-            );
-
+            const mrpKey = findMrpKey(keys);
             if (!mrpKey) {
-              throw new Error("MRP price column not detected. Please make sure your sheet has an 'MRP' or 'New Price' column with valid header values.");
+              throw new Error(`MRP price column not detected. Detected headers: [${keys.join(', ')}]. Please ensure your sheet has an 'MRP' or 'New Price' column.`);
             }
 
             const partNoVal = String(row[partKey] || '').trim().toUpperCase();
@@ -164,18 +251,14 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
               throw new Error(`Row ${i + 2}: Invalid MRP value "${mrpValRaw}" for part "${partNoVal}". MRP must be a positive number.`);
             }
 
-            // Optional naming and HSN headers
-            const nameKey = keys.find(k => 
-              /^(part[_\-\s]?name|name|description|desc|item[_\-\s]?name|partname|part\s*name)$/i.test(k.trim())
-            );
-            const hsnKey = keys.find(k => 
-              /^(hsn|hsn[_\-\s]?code|hsncode|hsn_code|hsn\s*code)$/i.test(k.trim())
-            );
+            const nameKey = findNameKey(keys, partKey);
+            const hsnKey = findHsnKey(keys);
 
             const partName = nameKey ? String(row[nameKey] || '').trim() : undefined;
             const hsn = hsnKey ? String(row[hsnKey] || '').trim() : undefined;
 
-            const existingItem = inventoryMap.get(partNoVal);
+            const existingItem = findExistingPart(partNoVal);
+            const isArchived = existingItem ? (existingItem.is_active === false || !!existingItem.archived_at) : false;
 
             parsed.push({
               part_no: existingItem ? existingItem.part_no : partNoVal,
@@ -184,7 +267,7 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
               hsn: existingItem ? existingItem.hsn : (hsn || ''),
               mrp: mrpNum,
               matched: !!existingItem,
-              is_archived: existingItem ? !existingItem.is_active : false,
+              is_archived: isArchived,
               current_mrp: existingItem?.mrp
             });
           }
@@ -204,24 +287,14 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
             const keys = Object.keys(row);
             if (keys.length === 0) continue;
 
-            const partKey = keys.find(k => 
-              /^(part[_\-\s.]?no|part[_\-\s.]?number|sku|item[_\-\s.]?code|part_number|partno|part\s*no\.?)$/i.test(k.trim())
-            ) || keys.find(k => /part/i.test(k.trim())) || keys[0];
+            const partKey = findPartKey(keys);
+            if (!partKey) {
+              throw new Error(`Part Number column not detected. Detected headers in your sheet: [${keys.join(', ')}]. Please ensure your sheet has a 'PART NO' or 'Part Number' column.`);
+            }
 
-            const nameKey = keys.find(k => 
-              /^(part[_\-\s.]?name|item[_\-\s.]?name|partname|part\s*name|name|description|desc)$/i.test(k.trim())
-            );
-
-            const hsnKey = keys.find(k => 
-              /^(hsn|hsn[_\-\s.]?code|hsncode|hsn_code|hsn\s*code)$/i.test(k.trim())
-            );
-
-            const qtyKey = keys.find(k => 
-              /^(quantity|qty|stock|count|new[_\-\s.]?qty|new[_\-\s.]?quantity|quantity_to_set|units|pcs|quantity\s*level)$/i.test(k.trim())
-            );
-
+            const qtyKey = findQtyKey(keys);
             if (!qtyKey) {
-              throw new Error("Quantity column not detected. Please make sure your sheet has a 'QUANTITY' or 'Qty' column with valid header values.");
+              throw new Error(`Quantity column not detected. Detected headers: [${keys.join(', ')}]. Please ensure your sheet has a 'QUANTITY' or 'Qty' column.`);
             }
 
             const partNoVal = String(row[partKey] || '').trim().toUpperCase();
@@ -236,10 +309,14 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
               throw new Error(`Row ${i + 2}: Invalid Quantity value "${qtyValRaw}" for part "${partNoVal}". Quantity must be a non-negative integer.`);
             }
 
+            const nameKey = findNameKey(keys, partKey);
+            const hsnKey = findHsnKey(keys);
+
             const partName = nameKey ? String(row[nameKey] || '').trim() : undefined;
             const hsn = hsnKey ? String(row[hsnKey] || '').trim() : undefined;
 
-            const existingItem = inventoryMap.get(partNoVal);
+            const existingItem = findExistingPart(partNoVal);
+            const isArchived = existingItem ? (existingItem.is_active === false || !!existingItem.archived_at) : false;
 
             parsed.push({
               part_no: existingItem ? existingItem.part_no : partNoVal,
@@ -248,7 +325,7 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
               hsn: existingItem ? existingItem.hsn : (hsn || ''),
               quantity: qtyNum,
               matched: !!existingItem,
-              is_archived: existingItem ? !existingItem.is_active : false,
+              is_archived: isArchived,
               current_qty: existingItem?.quantity
             });
           }
@@ -417,6 +494,68 @@ export default function BulkUpdateModule({ brand, user }: BulkUpdateModuleProps)
 
   return (
     <div className="space-y-6">
+
+      {/* Real-Time Modal Overlay Progress Bar (0% to 100%) */}
+      {isApplying && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 max-w-lg w-full p-6 space-y-5 animate-in fade-in zoom-in duration-200">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 shadow-sm">
+                  <RefreshCw className="w-5 h-5 animate-spin" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-slate-900 text-base">
+                    Applying Bulk {updateType} Update
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    {updateType === 'Stock'
+                      ? 'Updating inventory stock quantities & unarchiving items...'
+                      : 'Updating MRP price list without unarchiving parts...'}
+                  </p>
+                </div>
+              </div>
+              <div className="text-right">
+                <span className="font-mono font-black text-2xl text-indigo-600">
+                  {Math.round(updateProgress)}%
+                </span>
+              </div>
+            </div>
+
+            {/* Dynamic Animated Progress Bar */}
+            <div className="space-y-2">
+              <div className="w-full bg-slate-100 rounded-full h-4 overflow-hidden p-0.5 border border-slate-200 shadow-inner">
+                <div
+                  className={`h-full rounded-full transition-all duration-300 ease-out shadow-sm ${
+                    updateProgress === 100
+                      ? 'bg-emerald-500'
+                      : updateType === 'MRP'
+                        ? 'bg-gradient-to-r from-emerald-500 via-teal-500 to-indigo-600'
+                        : 'bg-gradient-to-r from-indigo-500 via-blue-500 to-cyan-500'
+                  }`}
+                  style={{ width: `${Math.min(100, Math.max(0, updateProgress))}%` }}
+                />
+              </div>
+              <div className="flex justify-between items-center text-[11px] text-slate-400 font-medium px-1">
+                <span>0% Initiated</span>
+                <span className="font-semibold text-slate-700 truncate max-w-[280px]">
+                  {updateStatusMessage || 'Synchronizing database...'}
+                </span>
+                <span>100% Completed</span>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 rounded-2xl p-3 border border-slate-100 text-[11px] text-slate-500 flex items-center justify-between">
+              <span className="font-mono font-semibold text-slate-700 truncate">
+                File: {fileName}
+              </span>
+              <span className="text-[10px] bg-indigo-50 text-indigo-700 font-bold px-2 py-0.5 rounded-full border border-indigo-100">
+                Live Transaction Safe
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Local Toast banner */}
       {toastMessageLocal && (

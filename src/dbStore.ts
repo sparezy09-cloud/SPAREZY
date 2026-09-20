@@ -2860,10 +2860,20 @@ export const db = {
       const updatedOriginals: any[] = [];
       const insertedIds: string[] = [];
 
-      // Build inventory lookup map O(1)
+      // Build inventory lookup maps O(1) with exact trimmed lowercase + alphanumeric fallback
       const inventoryLookupMap = new Map<string, { item: InventoryItem; idx: number }>();
+      const inventoryAlphaMap = new Map<string, { item: InventoryItem; idx: number }>();
       for (let i = 0; i < inventory.length; i++) {
-        inventoryLookupMap.set(inventory[i].part_no.toLowerCase(), { item: inventory[i], idx: i });
+        const item = inventory[i];
+        if (!item || !item.part_no) continue;
+        const cleanNo = String(item.part_no).trim().toLowerCase();
+        const alphaNo = cleanNo.replace(/[^a-z0-9]/g, '');
+        if (!inventoryLookupMap.has(cleanNo)) {
+          inventoryLookupMap.set(cleanNo, { item, idx: i });
+        }
+        if (alphaNo && !inventoryAlphaMap.has(alphaNo)) {
+          inventoryAlphaMap.set(alphaNo, { item, idx: i });
+        }
       }
 
       for (let rIdx = 0; rIdx < rows.length; rIdx++) {
@@ -2877,8 +2887,12 @@ export const db = {
           continue;
         }
 
-        const cleanPartNo = row.part_no.trim();
-        const matched = inventoryLookupMap.get(cleanPartNo.toLowerCase());
+        const cleanPartNo = String(row.part_no).trim();
+        const lowerPartNo = cleanPartNo.toLowerCase();
+        const alphaPartNo = lowerPartNo.replace(/[^a-z0-9]/g, '');
+
+        // Match against exact lowercase first, then alphanumeric fallback
+        const matched = inventoryLookupMap.get(lowerPartNo) || (alphaPartNo ? inventoryAlphaMap.get(alphaPartNo) : undefined);
 
         if (matched) {
           const matchedItem = matched.item;
@@ -2908,7 +2922,7 @@ export const db = {
 
             const mrpRec = {
               id: uuid(),
-              part_no: cleanPartNo,
+              part_no: matchedItem.part_no || cleanPartNo,
               old_mrp: oldMrp,
               new_mrp: newMrp,
               changed_by: `${user.name} (Bulk UPDATE)`,
@@ -2924,7 +2938,7 @@ export const db = {
           }
           successCount++;
         } else {
-          const previousInsert = itemsToInsertMap.get(cleanPartNo.toLowerCase());
+          const previousInsert = itemsToInsertMap.get(lowerPartNo);
           const initialQty = (row as any).quantity !== undefined ? Number((row as any).quantity) : 0;
           const isZeroQty = initialQty === 0;
 
@@ -2956,7 +2970,7 @@ export const db = {
               updated_at: new Date().toISOString()
             };
 
-            itemsToInsertMap.set(cleanPartNo.toLowerCase(), newPartItem);
+            itemsToInsertMap.set(lowerPartNo, newPartItem);
             insertedIds.push(newId);
           }
           successCount++;
@@ -3084,7 +3098,96 @@ export const db = {
       db.notify();
       return bulkRec;
     } else {
-      throw new Error("Supabase is not configured. Live database transactions are required.");
+      // Offline / Local storage fallback
+      const inventoryLookupMap = new Map<string, { item: InventoryItem; idx: number }>();
+      const inventoryAlphaMap = new Map<string, { item: InventoryItem; idx: number }>();
+      for (let i = 0; i < inventory.length; i++) {
+        const item = inventory[i];
+        if (!item || !item.part_no) continue;
+        const cleanNo = String(item.part_no).trim().toLowerCase();
+        const alphaNo = cleanNo.replace(/[^a-z0-9]/g, '');
+        if (!inventoryLookupMap.has(cleanNo)) inventoryLookupMap.set(cleanNo, { item, idx: i });
+        if (alphaNo && !inventoryAlphaMap.has(alphaNo)) inventoryAlphaMap.set(alphaNo, { item, idx: i });
+      }
+
+      const updatedOriginals: any[] = [];
+      const insertedIds: string[] = [];
+
+      for (let rIdx = 0; rIdx < rows.length; rIdx++) {
+        const row = rows[rIdx];
+        if (!row.part_no) { failedCount++; continue; }
+        const cleanPartNo = String(row.part_no).trim();
+        const lowerPartNo = cleanPartNo.toLowerCase();
+        const alphaPartNo = lowerPartNo.replace(/[^a-z0-9]/g, '');
+        const matched = inventoryLookupMap.get(lowerPartNo) || (alphaPartNo ? inventoryAlphaMap.get(alphaPartNo) : undefined);
+
+        if (matched) {
+          const matchedItem = matched.item;
+          const oldMrp = matchedItem.mrp;
+          const newMrp = row.mrp;
+          if (oldMrp !== newMrp) {
+            updatedOriginals.push({ ...matchedItem });
+            matchedItem.mrp = newMrp;
+            matchedItem.updated_at = new Date().toISOString();
+            const mrpRec = {
+              id: uuid(),
+              part_no: matchedItem.part_no,
+              old_mrp: oldMrp,
+              new_mrp: newMrp,
+              changed_by: `${user.name} (Bulk UPDATE)`,
+              changed_at: new Date().toISOString()
+            };
+            mrpHistory.unshift(mrpRec);
+          }
+          successCount++;
+        } else {
+          const newId = uuid();
+          const initialQty = (row as any).quantity !== undefined ? Number((row as any).quantity) : 0;
+          const isZeroQty = initialQty === 0;
+          const newPartItem: InventoryItem = {
+            id: newId,
+            part_no: cleanPartNo,
+            part_name: row.part_name?.trim() || 'Bulk Introduced Part',
+            quantity: initialQty,
+            hsn: row.hsn?.trim() || '',
+            mrp: row.mrp,
+            brand,
+            is_active: !isZeroQty,
+            archived_at: isZeroQty ? new Date().toISOString() : null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          };
+          inventory.push(newPartItem);
+          insertedIds.push(newId);
+          successCount++;
+        }
+      }
+
+      localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
+      localStorage.setItem(`sparezy_schema_${b}_mrp_history`, JSON.stringify(mrpHistory));
+      idbStore.set('cache_partitions', `${b}_inventory`, inventory);
+      idbStore.set('cache_partitions', `${b}_mrp`, mrpHistory);
+
+      const bulkId = uuid();
+      const backupData = JSON.stringify({ updatedOriginals, insertedIds });
+      const bulkRec: BulkUpdateHistory = {
+        id: bulkId,
+        update_type: 'MRP Update',
+        file_name: fileName,
+        total_rows: rows.length,
+        success_rows: successCount,
+        failed_rows: failedCount,
+        created_by: user.name,
+        created_at: new Date().toISOString(),
+        can_undo: true,
+        backup_data_json: backupData
+      };
+      bulkHistory.unshift(bulkRec);
+      localStorage.setItem(`sparezy_schema_${b}_bulk_update_history`, JSON.stringify(bulkHistory));
+      db.logTransaction(user.id, user.name, 'Bulk Update', 'Bulk Updates', `Completed bulk MRP update using ${fileName}: ${successCount} successful rows, ${failedCount} failing`, null, bulkRec);
+      onProgress?.(100, "MRP Bulk update completed successfully!");
+      db.notify();
+      return bulkRec;
     }
   },
 
@@ -3105,10 +3208,20 @@ export const db = {
       const updatedOriginals: any[] = [];
       const insertedIds: string[] = [];
 
-      // Build inventory lookup map O(1)
+      // Build inventory lookup maps O(1) with exact trimmed lowercase + alphanumeric fallback
       const inventoryLookupMap = new Map<string, { item: InventoryItem; idx: number }>();
+      const inventoryAlphaMap = new Map<string, { item: InventoryItem; idx: number }>();
       for (let i = 0; i < inventory.length; i++) {
-        inventoryLookupMap.set(inventory[i].part_no.toLowerCase(), { item: inventory[i], idx: i });
+        const item = inventory[i];
+        if (!item || !item.part_no) continue;
+        const cleanNo = String(item.part_no).trim().toLowerCase();
+        const alphaNo = cleanNo.replace(/[^a-z0-9]/g, '');
+        if (!inventoryLookupMap.has(cleanNo)) {
+          inventoryLookupMap.set(cleanNo, { item, idx: i });
+        }
+        if (alphaNo && !inventoryAlphaMap.has(alphaNo)) {
+          inventoryAlphaMap.set(alphaNo, { item, idx: i });
+        }
       }
 
       for (let rIdx = 0; rIdx < rows.length; rIdx++) {
@@ -3122,8 +3235,12 @@ export const db = {
           continue;
         }
 
-        const cleanPartNo = row.part_no.trim();
-        const matched = inventoryLookupMap.get(cleanPartNo.toLowerCase());
+        const cleanPartNo = String(row.part_no).trim();
+        const lowerPartNo = cleanPartNo.toLowerCase();
+        const alphaPartNo = lowerPartNo.replace(/[^a-z0-9]/g, '');
+
+        // Match against exact lowercase first, then alphanumeric fallback
+        const matched = inventoryLookupMap.get(lowerPartNo) || (alphaPartNo ? inventoryAlphaMap.get(alphaPartNo) : undefined);
 
         if (matched) {
           const matchedItem = matched.item;
@@ -3151,7 +3268,7 @@ export const db = {
           successCount++;
         } else {
           // New part present in Excel - add directly to inventory in active mode
-          const previousInsert = itemsToInsertMap.get(cleanPartNo.toLowerCase());
+          const previousInsert = itemsToInsertMap.get(lowerPartNo);
           if (previousInsert) {
             previousInsert.quantity = row.quantity;
             if (row.part_name?.trim()) previousInsert.part_name = row.part_name.trim();
@@ -3176,7 +3293,7 @@ export const db = {
               updated_at: new Date().toISOString()
             };
 
-            itemsToInsertMap.set(cleanPartNo.toLowerCase(), newPartItem);
+            itemsToInsertMap.set(lowerPartNo, newPartItem);
             insertedIds.push(newId);
           }
           successCount++;
@@ -3278,7 +3395,82 @@ export const db = {
       db.notify();
       return bulkRec;
     } else {
-      throw new Error("Supabase is not configured. Live database transactions are required.");
+      // Offline / Local storage fallback
+      const inventoryLookupMap = new Map<string, { item: InventoryItem; idx: number }>();
+      const inventoryAlphaMap = new Map<string, { item: InventoryItem; idx: number }>();
+      for (let i = 0; i < inventory.length; i++) {
+        const item = inventory[i];
+        if (!item || !item.part_no) continue;
+        const cleanNo = String(item.part_no).trim().toLowerCase();
+        const alphaNo = cleanNo.replace(/[^a-z0-9]/g, '');
+        if (!inventoryLookupMap.has(cleanNo)) inventoryLookupMap.set(cleanNo, { item, idx: i });
+        if (alphaNo && !inventoryAlphaMap.has(alphaNo)) inventoryAlphaMap.set(alphaNo, { item, idx: i });
+      }
+
+      const updatedOriginals: any[] = [];
+      const insertedIds: string[] = [];
+
+      for (let rIdx = 0; rIdx < rows.length; rIdx++) {
+        const row = rows[rIdx];
+        if (!row.part_no) { failedCount++; continue; }
+        const cleanPartNo = String(row.part_no).trim();
+        const lowerPartNo = cleanPartNo.toLowerCase();
+        const alphaPartNo = lowerPartNo.replace(/[^a-z0-9]/g, '');
+        const matched = inventoryLookupMap.get(lowerPartNo) || (alphaPartNo ? inventoryAlphaMap.get(alphaPartNo) : undefined);
+
+        if (matched) {
+          const matchedItem = matched.item;
+          updatedOriginals.push({ ...matchedItem });
+          // Overwrite ONLY quantity, unarchive if archived, keep part_name, part_no, hsn untouched
+          matchedItem.quantity = row.quantity;
+          matchedItem.is_active = true;
+          matchedItem.archived_at = null;
+          matchedItem.updated_at = new Date().toISOString();
+          successCount++;
+        } else {
+          const newId = uuid();
+          const newPartItem: InventoryItem = {
+            id: newId,
+            part_no: cleanPartNo,
+            part_name: row.part_name?.trim() || 'New Spares Part',
+            quantity: row.quantity,
+            hsn: row.hsn?.trim() || '',
+            mrp: 0,
+            brand,
+            is_active: true,
+            archived_at: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          };
+          inventory.push(newPartItem);
+          insertedIds.push(newId);
+          successCount++;
+        }
+      }
+
+      localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
+      idbStore.set('cache_partitions', `${b}_inventory`, inventory);
+
+      const bulkId = uuid();
+      const backupData = JSON.stringify({ updatedOriginals, insertedIds });
+      const bulkRec: BulkUpdateHistory = {
+        id: bulkId,
+        update_type: 'Stock Update',
+        file_name: fileName,
+        total_rows: rows.length,
+        success_rows: successCount,
+        failed_rows: failedCount,
+        created_by: user.name,
+        created_at: new Date().toISOString(),
+        can_undo: true,
+        backup_data_json: backupData
+      };
+      bulkHistory.unshift(bulkRec);
+      localStorage.setItem(`sparezy_schema_${b}_bulk_update_history`, JSON.stringify(bulkHistory));
+      db.logTransaction(user.id, user.name, 'Bulk Update', 'Bulk Updates', `Completed bulk Stock update using ${fileName}: ${successCount} items processed, ${failedCount} failed`, null, bulkRec);
+      onProgress?.(100, "Stock Bulk update completed successfully!");
+      db.notify();
+      return bulkRec;
     }
   },
 
