@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { User, Brand, isOwnerOrAdmin } from './types';
+import { useState, useEffect, useMemo } from 'react';
+import { User, UserRole, Brand, isOwnerOrAdmin } from './types';
 import { db } from './dbStore';
 import { supabase } from './lib/supabaseClient';
 
@@ -315,7 +315,8 @@ export default function App() {
     db.setActiveBrand(brand);
     setActiveBrand(brand);
     setActiveUser(user);
-    setActiveModule('Dashboard');
+    // Managers only have access to Inventory (read-only) and Order Requests
+    setActiveModule(user.role === 'Manager' ? 'Inventory' : 'Dashboard');
 
     // Lazily load the brand's dataset partitions in the background without blocking the screen
     try {
@@ -324,6 +325,15 @@ export default function App() {
       console.error("Error loading brand schema dynamic partition in background:", err);
     }
   };
+
+  // Enforce Manager role navigation restrictions
+  useEffect(() => {
+    if (activeUser?.role === 'Manager') {
+      if (activeModule !== 'Inventory' && activeModule !== 'Order Requests') {
+        setActiveModule('Inventory');
+      }
+    }
+  }, [activeUser?.role, activeModule]);
 
   const handleLogout = async () => {
     db.setActiveBrand(null);
@@ -350,24 +360,50 @@ export default function App() {
     }
   };
 
-  // Complete navigation items
-  const sidebarItems = [
-    { name: 'Dashboard', icon: LayoutDashboard },
-    { name: 'Inventory', icon: Layers },
-    { name: 'Sales', icon: ShoppingBag },
-    { name: 'Returns', icon: RotateCcw },
-    { name: 'Purchases', icon: FileText },
-    { name: 'Order Requests', icon: ClipboardList },
-    { name: 'Bulk Updates', icon: FileSpreadsheet, ownerOnly: true },
-    { name: 'Customer & Dealer Ledgers', icon: Users },
-    { name: 'Audit Trail', icon: History, ownerOnly: true },
-    { name: 'Owner Transactions', icon: Receipt, ownerOnly: true },
-    { name: 'Staff Attendance', icon: CalendarCheck },
-    { name: 'Settings / User Management', icon: Shield },
+  // Complete navigation items with role-based visibility
+  const sidebarItems: {
+    name: string;
+    icon: any;
+    ownerOnly?: boolean;
+    allowedRoles?: UserRole[];
+  }[] = [
+    { name: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['Owner', 'Admin'] },
+    { name: 'Inventory', icon: Layers, allowedRoles: ['Owner', 'Admin', 'Manager'] },
+    { name: 'Sales', icon: ShoppingBag, allowedRoles: ['Owner', 'Admin'] },
+    { name: 'Returns', icon: RotateCcw, allowedRoles: ['Owner', 'Admin'] },
+    { name: 'Purchases', icon: FileText, allowedRoles: ['Owner', 'Admin'] },
+    { name: 'Order Requests', icon: ClipboardList, allowedRoles: ['Owner', 'Admin', 'Manager'] },
+    { name: 'Bulk Updates', icon: FileSpreadsheet, ownerOnly: true, allowedRoles: ['Owner', 'Admin'] },
+    { name: 'Customer & Dealer Ledgers', icon: Users, allowedRoles: ['Owner', 'Admin'] },
+    { name: 'Audit Trail', icon: History, ownerOnly: true, allowedRoles: ['Owner', 'Admin'] },
+    { name: 'Owner Transactions', icon: Receipt, ownerOnly: true, allowedRoles: ['Owner'] },
+    { name: 'Staff Attendance', icon: CalendarCheck, allowedRoles: ['Owner', 'Admin'] },
+    { name: 'Settings / User Management', icon: Shield, allowedRoles: ['Owner', 'Admin'] },
   ];
+
+  // In Manager role only Inventory and Order Requests tabs are visible; hide all other tabs.
+  const visibleSidebarItems = useMemo(() => {
+    if (!activeUser) return [];
+    if (activeUser.role === 'Manager') {
+      return sidebarItems.filter(item => item.name === 'Inventory' || item.name === 'Order Requests');
+    }
+    return sidebarItems.filter(item => {
+      if (item.ownerOnly && !isOwnerOrAdmin(activeUser.role)) return false;
+      if (item.allowedRoles && !item.allowedRoles.includes(activeUser.role)) return false;
+      return true;
+    });
+  }, [activeUser?.role]);
 
   const renderModuleContent = () => {
     if (!activeBrand || !activeUser) return null;
+
+    // Strict Manager role enforcement: only Inventory in read-only mode and Order Requests can be rendered
+    if (activeUser.role === 'Manager') {
+      if (activeModule === 'Order Requests') {
+        return <OrderRequestsModule brand={activeBrand} user={activeUser} />;
+      }
+      return <InventoryModule brand={activeBrand} user={activeUser} readOnly={true} />;
+    }
 
     switch (activeModule) {
       case 'Dashboard':
@@ -547,8 +583,7 @@ export default function App() {
 
         {/* Navigation list in slate-900 sidebar */}
         <nav className="flex-1 px-4 space-y-1 text-sm overflow-y-auto">
-          {sidebarItems.map((item) => {
-            if (item.ownerOnly && !isOwnerOrAdmin(activeUser.role)) return null;
+          {visibleSidebarItems.map((item) => {
             const Icon = item.icon;
             const isSelected = activeModule === item.name;
 
@@ -780,8 +815,7 @@ export default function App() {
 
             {/* Links list */}
             <nav className="flex-1 px-4 py-4 space-y-1 font-bold text-xs overflow-y-auto">
-              {sidebarItems.map((item) => {
-                if (item.ownerOnly && !isOwnerOrAdmin(activeUser.role)) return null;
+              {visibleSidebarItems.map((item) => {
                 const Icon = item.icon;
                 const isSelected = activeModule === item.name;
 

@@ -909,6 +909,23 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                     </button>
                   ))}
                 </div>
+                <div className="mt-2 text-[11px] bg-slate-50 p-2.5 rounded-xl border border-slate-200 space-y-1">
+                  {formRole === 'Manager' && (
+                    <p className="text-amber-800 font-medium">
+                      🔒 <strong>Manager Scope:</strong> Restricted view. Only <strong>Inventory</strong> (in read-only mode) and <strong>Order Requests</strong> tabs are visible.
+                    </p>
+                  )}
+                  {formRole === 'Admin' && (
+                    <p className="text-slate-600 font-medium">
+                      🛡️ <strong>Admin Scope:</strong> Full operational access across POS Sales, Purchases, Returns, Inventory Management, Ledgers, and User Management.
+                    </p>
+                  )}
+                  {formRole === 'Owner' && (
+                    <p className="text-indigo-800 font-medium">
+                      👑 <strong>Owner Scope:</strong> Superuser privileges including Audit Trails, Owner Cashbook Transactions, Bulk Database Updates, and Permissions.
+                    </p>
+                  )}
+                </div>
               </div>
 
               <div className="flex gap-2 justify-end pt-4 border-t border-slate-200">

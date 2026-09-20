@@ -5,15 +5,17 @@ import * as XLSX from 'xlsx';
 import { 
   Search, EyeOff, Archive, CheckCircle2, Pencil, 
   Trash2, Plus, ArrowLeft, ArrowRight, X, Layers, Download, FileSpreadsheet,
-  AlertTriangle, History, Calendar
+  AlertTriangle, History, Calendar, Lock, Eye
 } from 'lucide-react';
 
 interface InventoryModuleProps {
   brand: Brand;
   user: User;
+  readOnly?: boolean;
 }
 
-export default function InventoryModule({ brand, user }: InventoryModuleProps) {
+export default function InventoryModule({ brand, user, readOnly = false }: InventoryModuleProps) {
+  const isReadOnly = readOnly || user.role === 'Manager';
   const [search, setSearch] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 50;
@@ -215,8 +217,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   };
 
   const handleBulkArchive = async (archive: boolean) => {
-    if (!isOwnerOrAdmin(user.role)) {
-      alert("Permission denied. Only Owner or Admin can modify parts.");
+    if (isReadOnly || !isOwnerOrAdmin(user.role)) {
+      alert("Permission denied. You have read-only access to inventory.");
       return;
     }
     setBulkError(null);
@@ -260,8 +262,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
 
   // Edit / Add Actions
   const handleOpenEdit = (item: InventoryItem) => {
-    if (!isOwnerOrAdmin(user.role)) {
-      alert("Permission denied. Only Owner or Admin can edit parts.");
+    if (isReadOnly || !isOwnerOrAdmin(user.role)) {
+      alert("Permission denied. You have read-only access to inventory.");
       return;
     }
     setEditingItem(item);
@@ -273,6 +275,10 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   };
 
   const handleOpenCreate = () => {
+    if (isReadOnly || !isOwnerOrAdmin(user.role)) {
+      alert("Permission denied. You have read-only access to inventory.");
+      return;
+    }
     setFormPartNo('');
     setFormPartName('');
     setFormHsn('');
@@ -283,8 +289,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
 
   const handleSaveEdit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isOwnerOrAdmin(user.role)) {
-      alert("Permission denied. Only Owner or Admin can edit parts.");
+    if (isReadOnly || !isOwnerOrAdmin(user.role)) {
+      alert("Permission denied. You have read-only access to inventory.");
       return;
     }
     if (!formPartNo || !formPartName) {
@@ -308,6 +314,10 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
 
   const handleSaveCreate = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isReadOnly || !isOwnerOrAdmin(user.role)) {
+      alert("Permission denied. You have read-only access to inventory.");
+      return;
+    }
     if (!formPartNo || !formPartName) {
       alert("Part Number and Name are required.");
       return;
@@ -353,8 +363,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   };
 
   const handleInlineSave = (item: InventoryItem) => {
-    if (!isOwnerOrAdmin(user.role)) {
-      alert("Permission denied. Only Owner or Admin can edit parts.");
+    if (isReadOnly || !isOwnerOrAdmin(user.role)) {
+      alert("Permission denied. You have read-only access to inventory.");
       return;
     }
     const edit = inlineEdits[item.id];
@@ -385,8 +395,8 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
   };
 
   const handleInlineDeleteConfirmed = (item: InventoryItem) => {
-    if (!isOwnerOrAdmin(user.role)) {
-      alert("Permission denied. Only Owner or Admin can delete parts.");
+    if (isReadOnly || !isOwnerOrAdmin(user.role)) {
+      alert("Permission denied. You have read-only access to inventory.");
       return;
     }
     db.deleteInventoryPart(brand, item.id, user);
@@ -489,7 +499,7 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
         </div>
 
         <div className="flex gap-2 self-start flex-wrap">
-          {isOwnerOrAdmin(user.role) && (
+          {!isReadOnly && isOwnerOrAdmin(user.role) && (
             <button
               onClick={() => {
                 setIsInlineEditMode(prev => !prev);
@@ -517,15 +527,39 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
             Export to Excel/CSV
           </button>
 
-          <button
-            onClick={handleOpenCreate}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-md hover:shadow-lg transition cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            Create New Part
-          </button>
+          {!isReadOnly && isOwnerOrAdmin(user.role) && (
+            <button
+              onClick={handleOpenCreate}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-md hover:shadow-lg transition cursor-pointer"
+            >
+              <Plus className="w-4 h-4" />
+              Create New Part
+            </button>
+          )}
         </div>
       </div>
+
+      {/* Manager Read-Only Mode Notice Banner */}
+      {isReadOnly && (
+        <div className="bg-amber-50/90 border border-amber-200/90 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-amber-950 shadow-xs">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-amber-100 flex items-center justify-center text-amber-700 shrink-0 border border-amber-200">
+              <Lock className="w-4.5 h-4.5" />
+            </div>
+            <div>
+              <div className="font-bold text-xs flex items-center gap-2">
+                <span>Manager Access &mdash; Inventory Read-Only Mode</span>
+                <span className="text-[10px] font-bold uppercase tracking-wider bg-amber-200/80 text-amber-900 px-2 py-0.5 rounded-md border border-amber-300/80">
+                  Read Only
+                </span>
+              </div>
+              <p className="text-[11px] text-amber-800 leading-snug mt-0.5">
+                You have view-only access to browse spare parts, stock levels, HSN codes, and historical movement logs. Part creation, stock edits, and deletion are restricted.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Filter and Search Bar Card */}
       <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-3">
@@ -601,7 +635,7 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
         </div>
 
         {/* Selected Items Utility Bar */}
-        {(selectedIds.length > 0 || selectionMode === 'all_filtered') && (
+        {!isReadOnly && (selectedIds.length > 0 || selectionMode === 'all_filtered') && (
           <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2 relative overflow-hidden transition-all">
             {isBulkProcessing && (
               <div className="absolute inset-0 bg-slate-50/95 flex flex-col md:flex-row items-center justify-center gap-2.5 font-bold text-indigo-700 animate-pulse z-10 text-xs text-center">
@@ -720,20 +754,22 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
           <table className="min-w-full divide-y divide-slate-200 text-left text-xs">
             <thead className="bg-slate-50 text-slate-500 uppercase font-semibold text-[10px] tracking-wider">
               <tr>
-                <th className="p-4 w-12 text-center">
-                  <input
-                    type="checkbox"
-                    className="rounded border-slate-300 text-indigo-600 h-4 w-4 focus:ring-0 cursor-pointer"
-                    checked={pageChecked}
-                    onChange={(e) => handleSelectPageCheckboxChange(e.target.checked)}
-                  />
-                </th>
+                {!isReadOnly && (
+                  <th className="p-4 w-12 text-center">
+                    <input
+                      type="checkbox"
+                      className="rounded border-slate-300 text-indigo-600 h-4 w-4 focus:ring-0 cursor-pointer"
+                      checked={pageChecked}
+                      onChange={(e) => handleSelectPageCheckboxChange(e.target.checked)}
+                    />
+                  </th>
+                )}
                 <th className="p-4">Part No</th>
                 <th className="p-4">Part Name</th>
                 <th className="p-4">Quantity in Stock</th>
                 <th className="p-4">HSN Code</th>
                 <th className="p-4">MRP (INR)</th>
-                <th className="p-4 text-right">Actions</th>
+                <th className="p-4 text-right">{isReadOnly ? 'Access' : 'Actions'}</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 text-slate-700">
@@ -742,14 +778,16 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
                   key={item.id} 
                   className={`hover:bg-slate-50/50 transition ${!item.is_active ? 'bg-slate-50/30' : ''}`}
                 >
-                  <td className="p-4 text-center">
-                    <input
-                      type="checkbox"
-                      className="rounded border-slate-300 text-indigo-600 h-4 w-4 focus:ring-0 cursor-pointer"
-                      checked={selectionMode === 'all_filtered' || selectedIds.includes(item.id)}
-                      onChange={(e) => handleSelectItem(item.id, e.target.checked)}
-                    />
-                  </td>
+                  {!isReadOnly && (
+                    <td className="p-4 text-center">
+                      <input
+                        type="checkbox"
+                        className="rounded border-slate-300 text-indigo-600 h-4 w-4 focus:ring-0 cursor-pointer"
+                        checked={selectionMode === 'all_filtered' || selectedIds.includes(item.id)}
+                        onChange={(e) => handleSelectItem(item.id, e.target.checked)}
+                      />
+                    </td>
+                  )}
                   <td 
                     onClick={() => setViewingPartDetails(item)}
                     className="p-4 font-mono font-bold text-slate-900 hover:text-indigo-600 hover:underline cursor-pointer group"
@@ -816,7 +854,12 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
                   <td className="p-4 text-slate-400 font-mono">{item.hsn || '-'}</td>
                   <td className="p-4 font-bold text-slate-800">₹{item.mrp.toLocaleString('en-IN')}</td>
                   <td className="p-4 text-right">
-                    {isInlineEditMode ? (
+                    {isReadOnly ? (
+                      <span className="text-slate-400 text-[10px] font-medium inline-flex items-center gap-1 px-2.5 py-1 bg-slate-100 rounded-lg border border-slate-200 select-none">
+                        <Eye className="w-3 h-3 text-slate-400" />
+                        View Only
+                      </span>
+                    ) : isInlineEditMode ? (
                       <div className="flex items-center justify-end gap-1.5">
                         <button
                           onClick={() => handleInlineSave(item)}
@@ -859,7 +902,7 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
               ))}
               {filteredList.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="p-12 text-center text-slate-400">
+                  <td colSpan={isReadOnly ? 6 : 7} className="p-12 text-center text-slate-400">
                     No results matched your search configurations.
                   </td>
                 </tr>
@@ -896,7 +939,7 @@ export default function InventoryModule({ brand, user }: InventoryModuleProps) {
       </div>
 
       {/* Manual Part Create / Edit Modal Popup */}
-      {(editingItem !== null || isNewModalOpen) && (
+      {!isReadOnly && (editingItem !== null || isNewModalOpen) && (
         <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg border border-slate-200 overflow-hidden transform transition duration-200">
             
