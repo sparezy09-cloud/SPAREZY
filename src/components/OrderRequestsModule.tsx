@@ -31,6 +31,9 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
   const [showFastDetails, setShowFastDetails] = useState(false);
   const [isFastSearchFocused, setIsFastSearchFocused] = useState(false);
   const fastSearchInputRef = useRef<HTMLInputElement>(null);
+  const fastQtyInputRef = useRef<HTMLInputElement>(null);
+  const [fastSelectedSuggestionIndex, setFastSelectedSuggestionIndex] = useState<number>(-1);
+  const [focusedRequestIndex, setFocusedRequestIndex] = useState<number>(-1);
 
   // Modal for new request
   const [isNewModalOpen, setIsNewModalOpen] = useState(false);
@@ -75,6 +78,11 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
       item.part_name.toLowerCase().includes(q)
     ).slice(0, 8);
   }, [fastSearch, inventoryList]);
+
+  // Reset active suggestion index when search query changes
+  useEffect(() => {
+    setFastSelectedSuggestionIndex(-1);
+  }, [fastSearch]);
 
   // Fast Add Handler (search -> add -> qty -> next)
   const handleFastAddPart = (targetPart?: InventoryItem, customQty?: number) => {
@@ -251,6 +259,67 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
     });
   }, [requests, search, statusFilter, urgencyFilter]);
 
+  // Global keyboard shortcuts (Ctrl+K, /, Arrow Navigation, Esc)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const activeEl = document.activeElement as HTMLElement | null;
+      const isTyping = activeEl && (
+        activeEl.tagName === 'INPUT' || 
+        activeEl.tagName === 'TEXTAREA' || 
+        activeEl.tagName === 'SELECT' || 
+        activeEl.isContentEditable
+      );
+
+      // Escape key handles dismissals globally
+      if (e.key === 'Escape') {
+        if (isNewModalOpen) {
+          setIsNewModalOpen(false);
+          return;
+        }
+        if (rejectingRequest) {
+          setRejectingRequest(null);
+          return;
+        }
+        if (isFastSearchFocused) {
+          setIsFastSearchFocused(false);
+          setFastSelectedSuggestionIndex(-1);
+          return;
+        }
+        setFocusedRequestIndex(-1);
+        return;
+      }
+
+      // Quick focus fast search bar with '/' or Ctrl+K / Cmd+K
+      if ((e.key === '/' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k')) && !isTyping) {
+        e.preventDefault();
+        fastSearchInputRef.current?.focus();
+        fastSearchInputRef.current?.select();
+        setIsFastSearchFocused(true);
+        return;
+      }
+
+      // Table row navigation when not actively typing
+      if (!isTyping && filteredRequests.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setFocusedRequestIndex(prev => (prev < filteredRequests.length - 1 ? prev + 1 : prev));
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setFocusedRequestIndex(prev => (prev > 0 ? prev - 1 : 0));
+        } else if (e.key === 'Home') {
+          e.preventDefault();
+          setFocusedRequestIndex(0);
+        } else if (e.key === 'End') {
+          e.preventDefault();
+          setFocusedRequestIndex(filteredRequests.length - 1);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [isNewModalOpen, rejectingRequest, isFastSearchFocused, filteredRequests]);
+
   const stats = useMemo(() => {
     const total = requests.length;
     const pending = requests.filter(r => r.status === 'Pending').length;
@@ -395,13 +464,58 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                   setIsFastSearchFocused(true);
                 }}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
+                  if (e.key === 'ArrowDown') {
+                    if (fastSearchResults.length > 0) {
+                      e.preventDefault();
+                      setIsFastSearchFocused(true);
+                      setFastSelectedSuggestionIndex(prev => (prev + 1) % fastSearchResults.length);
+                    }
+                  } else if (e.key === 'ArrowUp') {
+                    if (fastSearchResults.length > 0) {
+                      e.preventDefault();
+                      setIsFastSearchFocused(true);
+                      setFastSelectedSuggestionIndex(prev => (prev <= 0 ? fastSearchResults.length - 1 : prev - 1));
+                    }
+                  } else if (e.key === 'Enter') {
                     e.preventDefault();
-                    if (fastSearchResults.length > 0 && !selectedPart) {
-                      handleFastAddPart(fastSearchResults[0]);
+                    if (fastSelectedSuggestionIndex >= 0 && fastSearchResults[fastSelectedSuggestionIndex]) {
+                      const item = fastSearchResults[fastSelectedSuggestionIndex];
+                      setSelectedPart(item);
+                      setFastSearch(item.part_no);
+                      setFastPartName(item.part_name);
+                      setIsFastSearchFocused(false);
+                      setFastSelectedSuggestionIndex(-1);
+                      setTimeout(() => {
+                        fastQtyInputRef.current?.focus();
+                        fastQtyInputRef.current?.select();
+                      }, 50);
+                    } else if (selectedPart) {
+                      fastQtyInputRef.current?.focus();
+                      fastQtyInputRef.current?.select();
+                    } else if (fastSearchResults.length > 0) {
+                      const item = fastSearchResults[0];
+                      setSelectedPart(item);
+                      setFastSearch(item.part_no);
+                      setFastPartName(item.part_name);
+                      setIsFastSearchFocused(false);
+                      setFastSelectedSuggestionIndex(-1);
+                      setTimeout(() => {
+                        fastQtyInputRef.current?.focus();
+                        fastQtyInputRef.current?.select();
+                      }, 50);
                     } else {
                       handleFastAddPart();
                     }
+                  } else if (e.key === 'Escape') {
+                    setIsFastSearchFocused(false);
+                    setFastSelectedSuggestionIndex(-1);
+                  } else if (e.key === 'Tab' && fastSelectedSuggestionIndex >= 0 && fastSearchResults[fastSelectedSuggestionIndex]) {
+                    const item = fastSearchResults[fastSelectedSuggestionIndex];
+                    setSelectedPart(item);
+                    setFastSearch(item.part_no);
+                    setFastPartName(item.part_name);
+                    setIsFastSearchFocused(false);
+                    setFastSelectedSuggestionIndex(-1);
                   }
                 }}
                 placeholder="Search part number or name (e.g. 58101, filter, brake, clutch...)"
@@ -431,60 +545,78 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
               <div 
                 className="absolute left-0 right-0 top-full mt-1.5 bg-slate-900 border border-indigo-700/80 rounded-xl shadow-2xl z-40 overflow-hidden text-xs max-h-72 overflow-y-auto divide-y divide-slate-800"
               >
-                {fastSearchResults.map((part) => (
-                  <div
-                    key={part.id}
-                    className="p-2.5 hover:bg-indigo-900/50 flex items-center justify-between gap-3 transition cursor-pointer group"
-                    onClick={() => {
-                      setSelectedPart(part);
-                      setFastSearch(part.part_no);
-                      setFastPartName(part.part_name);
-                      setIsFastSearchFocused(false);
-                    }}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono font-bold text-indigo-300 group-hover:text-indigo-200">
-                          {part.part_no}
+                {fastSearchResults.map((part, idx) => {
+                  const isHighlighted = idx === fastSelectedSuggestionIndex;
+                  return (
+                    <div
+                      key={part.id}
+                      className={`p-2.5 flex items-center justify-between gap-3 transition cursor-pointer group ${
+                        isHighlighted 
+                          ? 'bg-indigo-600 text-white font-medium ring-1 ring-inset ring-indigo-300' 
+                          : 'hover:bg-indigo-900/50'
+                      }`}
+                      onClick={() => {
+                        setSelectedPart(part);
+                        setFastSearch(part.part_no);
+                        setFastPartName(part.part_name);
+                        setIsFastSearchFocused(false);
+                        setFastSelectedSuggestionIndex(-1);
+                        setTimeout(() => {
+                          fastQtyInputRef.current?.focus();
+                          fastQtyInputRef.current?.select();
+                        }, 50);
+                      }}
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className={`font-mono font-bold ${isHighlighted ? 'text-white' : 'text-indigo-300 group-hover:text-indigo-200'}`}>
+                            {part.part_no}
+                          </span>
+                          {part.quantity <= 0 ? (
+                            <span className={`px-1.5 py-0.5 text-[9px] font-bold rounded ${isHighlighted ? 'bg-rose-900 text-rose-200 border border-rose-400' : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'}`}>
+                              0 in Stock
+                            </span>
+                          ) : (
+                            <span className={`px-1.5 py-0.5 text-[9px] font-semibold rounded ${isHighlighted ? 'bg-emerald-900 text-emerald-200 border border-emerald-400' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'}`}>
+                              {part.quantity} in stock
+                            </span>
+                          )}
+                          {part.hsn && (
+                            <span className={`text-[9px] font-mono ${isHighlighted ? 'text-indigo-100' : 'text-slate-400'}`}>
+                              HSN: {part.hsn}
+                            </span>
+                          )}
+                        </div>
+                        <div className={`text-[11px] truncate mt-0.5 ${isHighlighted ? 'text-indigo-100' : 'text-slate-300'}`}>
+                          {part.part_name}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-3 shrink-0">
+                        <span className="font-mono font-bold text-white text-xs">
+                          ₹{part.mrp.toLocaleString('en-IN')}
                         </span>
-                        {part.quantity <= 0 ? (
-                          <span className="px-1.5 py-0.5 text-[9px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30 rounded">
-                            0 in Stock
+                        {isHighlighted ? (
+                          <span className="px-2 py-0.5 bg-white/20 text-white rounded text-[10px] font-bold flex items-center gap-1 border border-white/30">
+                            ↵ Enter
                           </span>
                         ) : (
-                          <span className="px-1.5 py-0.5 text-[9px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded">
-                            {part.quantity} in stock
-                          </span>
-                        )}
-                        {part.hsn && (
-                          <span className="text-[9px] font-mono text-slate-400">
-                            HSN: {part.hsn}
-                          </span>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleFastAddPart(part);
+                            }}
+                            className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer shadow-xs"
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                            <span>Add</span>
+                          </button>
                         )}
                       </div>
-                      <div className="text-[11px] text-slate-300 truncate mt-0.5">
-                        {part.part_name}
-                      </div>
                     </div>
-
-                    <div className="flex items-center gap-3 shrink-0">
-                      <span className="font-mono font-bold text-white text-xs">
-                        ₹{part.mrp.toLocaleString('en-IN')}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleFastAddPart(part);
-                        }}
-                        className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[11px] font-bold transition flex items-center gap-1 cursor-pointer shadow-xs"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        <span>Add</span>
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
 
                 {fastSearchResults.length === 0 && (
                   <div className="p-3 text-slate-300 text-xs flex items-center justify-between">
@@ -498,31 +630,57 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                     </button>
                   </div>
                 )}
+
+                {/* Keyboard Helper Footer */}
+                <div className="px-3 py-1.5 bg-slate-950/80 border-t border-indigo-900/60 text-[10px] text-indigo-300 flex items-center justify-between font-mono">
+                  <span>↑↓ Navigate suggestions</span>
+                  <span>↵ Select &amp; Set Qty</span>
+                  <span>Esc Dismiss</span>
+                </div>
               </div>
             )}
           </div>
 
-          {/* Quantity Controls */}
+          {/* Quantity Controls with Keyboard support */}
           <div className="flex items-center justify-between sm:justify-start gap-1.5 bg-slate-800/90 border border-indigo-700/60 rounded-xl p-1 shrink-0">
             <span className="text-[11px] font-bold text-indigo-300 px-2">Qty:</span>
             <button
               type="button"
               onClick={() => setFastQuantity(q => Math.max(1, q - 1))}
               className="w-7 h-7 flex items-center justify-center bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-bold transition cursor-pointer text-sm"
+              title="Decrease quantity (Down Arrow)"
             >
               -
             </button>
             <input
+              ref={fastQtyInputRef}
               type="number"
               min="1"
               value={fastQuantity}
               onChange={(e) => setFastQuantity(Math.max(1, parseInt(e.target.value) || 1))}
-              className="w-14 text-center font-mono font-bold text-white bg-transparent border-0 focus:outline-none text-xs"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  handleFastAddPart();
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setFastQuantity(q => q + 1);
+                } else if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setFastQuantity(q => Math.max(1, q - 1));
+                } else if (e.key === 'Escape') {
+                  fastSearchInputRef.current?.focus();
+                  fastSearchInputRef.current?.select();
+                }
+              }}
+              className="w-14 text-center font-mono font-bold text-white bg-transparent border-0 focus:outline-none focus:ring-1 focus:ring-indigo-400 rounded text-xs"
+              title="Press Enter to add, Up/Down to adjust"
             />
             <button
               type="button"
               onClick={() => setFastQuantity(q => q + 1)}
               className="w-7 h-7 flex items-center justify-center bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-bold transition cursor-pointer text-sm"
+              title="Increase quantity (Up Arrow)"
             >
               +
             </button>
@@ -542,6 +700,31 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
             <Plus className="w-4 h-4" />
             <span>+ Add to Request</span>
           </button>
+        </div>
+
+        {/* Keyboard Shortcuts Hint Pill Bar */}
+        <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-indigo-900/40 text-[10px] text-indigo-300/80 font-medium select-none">
+          <span className="font-bold text-indigo-200">⌨ Keyboard navigation:</span>
+          <span className="inline-flex items-center gap-1">
+            <kbd className="px-1.5 py-0.5 bg-slate-800 border border-indigo-700/50 rounded font-mono text-[9px] text-white">↑</kbd>
+            <kbd className="px-1.5 py-0.5 bg-slate-800 border border-indigo-700/50 rounded font-mono text-[9px] text-white">↓</kbd>
+            Browse suggestions / rows
+          </span>
+          <span className="text-indigo-500/50">•</span>
+          <span className="inline-flex items-center gap-1">
+            <kbd className="px-1.5 py-0.5 bg-slate-800 border border-indigo-700/50 rounded font-mono text-[9px] text-white">Enter</kbd>
+            Select &amp; Add
+          </span>
+          <span className="text-indigo-500/50">•</span>
+          <span className="inline-flex items-center gap-1">
+            <kbd className="px-1.5 py-0.5 bg-slate-800 border border-indigo-700/50 rounded font-mono text-[9px] text-white">Ctrl+K</kbd> / <kbd className="px-1.5 py-0.5 bg-slate-800 border border-indigo-700/50 rounded font-mono text-[9px] text-white">/</kbd>
+            Focus Search
+          </span>
+          <span className="text-indigo-500/50">•</span>
+          <span className="inline-flex items-center gap-1">
+            <kbd className="px-1.5 py-0.5 bg-slate-800 border border-indigo-700/50 rounded font-mono text-[9px] text-white">Esc</kbd>
+            Dismiss
+          </span>
         </div>
 
         {/* Expandable Optional Details */}
@@ -648,19 +831,34 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 text-slate-700">
-              {filteredRequests.map((req) => (
-                <tr key={req.id} className="hover:bg-slate-50/70 transition">
-                  <td className="p-3.5 px-4 align-top">
-                    <p className="font-mono text-[11px] text-slate-900 font-semibold">
-                      {new Date(req.created_at).toLocaleDateString()}
-                    </p>
-                    <p className="text-[10px] text-slate-400">
-                      {new Date(req.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </p>
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold border mt-1.5 ${urgencyColors[req.urgency]}`}>
-                      {req.urgency} Urgency
-                    </span>
-                  </td>
+              {filteredRequests.map((req, idx) => {
+                const isRowFocused = focusedRequestIndex === idx;
+                return (
+                  <tr 
+                    key={req.id} 
+                    onClick={() => setFocusedRequestIndex(idx)}
+                    className={`transition cursor-pointer ${
+                      isRowFocused 
+                        ? 'bg-indigo-50/80 ring-2 ring-indigo-500 ring-inset shadow-xs' 
+                        : 'hover:bg-slate-50/70'
+                    }`}
+                  >
+                    <td className="p-3.5 px-4 align-top">
+                      <div className="flex items-center gap-1.5">
+                        {isRowFocused && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0 animate-pulse" title="Active row" />
+                        )}
+                        <p className="font-mono text-[11px] text-slate-900 font-semibold">
+                          {new Date(req.created_at).toLocaleDateString()}
+                        </p>
+                      </div>
+                      <p className="text-[10px] text-slate-400 pl-3">
+                        {new Date(req.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </p>
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold border mt-1.5 ${urgencyColors[req.urgency]}`}>
+                        {req.urgency} Urgency
+                      </span>
+                    </td>
 
                   <td className="p-3.5 align-top">
                     <p className="font-mono font-bold text-slate-900">{req.part_no}</p>
@@ -768,7 +966,8 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                     )}
                   </td>
                 </tr>
-              ))}
+              );
+            })}
 
               {filteredRequests.length === 0 && (
                 <tr>

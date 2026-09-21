@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { Brand, User, InventoryItem, isOwnerOrAdmin } from '../types';
 import { db } from '../dbStore';
 import * as XLSX from 'xlsx';
@@ -10,7 +10,7 @@ import {
   ClipboardPlus
 } from 'lucide-react';
 
-export type SortColumn = 'part_no' | 'part_name' | 'quantity' | 'mrp' | null;
+export type SortColumn = 'part_no' | 'part_name' | 'quantity' | 'hsn' | 'mrp' | null;
 export type SortDirection = 'asc' | 'desc' | 'default';
 
 interface InventoryModuleProps {
@@ -24,6 +24,8 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
   const [search, setSearch] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 50;
+  const [focusedRowIndex, setFocusedRowIndex] = useState<number>(-1);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Selected state
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -68,7 +70,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
   const [inventoryList, setInventoryList] = useState<InventoryItem[]>(() => db.getInventory(brand, false));
 
   // Column Filters State & Dropdown Management
-  const [activeFilterDropdown, setActiveFilterDropdown] = useState<null | 'partNo' | 'partName' | 'quantity' | 'mrp'>(null);
+  const [activeFilterDropdown, setActiveFilterDropdown] = useState<null | 'partNo' | 'partName' | 'quantity' | 'hsn' | 'mrp'>(null);
   
   // Multi-state Column Sorting: asc -> desc -> default (coordinated with filtering)
   const [sortColumn, setSortColumn] = useState<SortColumn>(null);
@@ -86,6 +88,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
     hsnText: string;
     hsnStatus: 'all' | 'has_hsn' | 'no_hsn';
     selectedHsns: string[];
+    sortByHsn: 'none' | 'asc' | 'desc';
     pricePreset: 'all' | 'under_500' | '500_2000' | '2000_10000' | 'above_10000' | 'custom';
     minPrice: string;
     maxPrice: string;
@@ -102,6 +105,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
     hsnText: '',
     hsnStatus: 'all',
     selectedHsns: [],
+    sortByHsn: 'none',
     pricePreset: 'all',
     minPrice: '',
     maxPrice: '',
@@ -117,6 +121,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
         ...p,
         sortByName: col === 'part_name' ? 'asc' : 'none',
         sortByQuantity: col === 'quantity' ? 'asc' : 'none',
+        sortByHsn: col === 'hsn' ? 'asc' : 'none',
         sortByPrice: col === 'mrp' ? 'asc' : 'none',
       }));
     } else if (sortDirection === 'asc') {
@@ -125,6 +130,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
         ...p,
         sortByName: col === 'part_name' ? 'desc' : 'none',
         sortByQuantity: col === 'quantity' ? 'desc' : 'none',
+        sortByHsn: col === 'hsn' ? 'desc' : 'none',
         sortByPrice: col === 'mrp' ? 'desc' : 'none',
       }));
     } else {
@@ -135,6 +141,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
         ...p,
         sortByName: 'none',
         sortByQuantity: 'none',
+        sortByHsn: 'none',
         sortByPrice: 'none',
       }));
     }
@@ -151,6 +158,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
         ...p,
         sortByName: col === 'part_name' ? 'none' : p.sortByName,
         sortByQuantity: col === 'quantity' ? 'none' : p.sortByQuantity,
+        sortByHsn: col === 'hsn' ? 'none' : p.sortByHsn,
         sortByPrice: col === 'mrp' ? 'none' : p.sortByPrice,
       }));
     } else {
@@ -160,6 +168,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
         ...p,
         sortByName: col === 'part_name' ? dir : 'none',
         sortByQuantity: col === 'quantity' ? dir : 'none',
+        sortByHsn: col === 'hsn' ? dir : 'none',
         sortByPrice: col === 'mrp' ? dir : 'none',
       }));
     }
@@ -180,6 +189,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
       hsnText: '',
       hsnStatus: 'all',
       selectedHsns: [],
+      sortByHsn: 'none',
       pricePreset: 'all',
       minPrice: '',
       maxPrice: '',
@@ -791,6 +801,169 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
     triggerToast(`Successfully exported ${sourceData.length.toLocaleString()} parts to ${exportFormat.toUpperCase()}.`);
   };
 
+  const isAnyModalOpen = Boolean(
+    orderRequestingItem ||
+    viewingPartDetails ||
+    editingItem ||
+    isNewModalOpen ||
+    isExportModalOpen ||
+    deletingItemConfirm
+  );
+
+  // Keyboard navigation across inventory rows and global shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Escape handling
+      if (e.key === 'Escape') {
+        if (orderRequestingItem) {
+          setOrderRequestingItem(null);
+          return;
+        }
+        if (viewingPartDetails) {
+          setViewingPartDetails(null);
+          return;
+        }
+        if (editingItem) {
+          setEditingItem(null);
+          return;
+        }
+        if (isNewModalOpen) {
+          setIsNewModalOpen(false);
+          return;
+        }
+        if (isExportModalOpen) {
+          setIsExportModalOpen(false);
+          return;
+        }
+        if (deletingItemConfirm) {
+          setDeletingItemConfirm(null);
+          return;
+        }
+        if (activeFilterDropdown) {
+          setActiveFilterDropdown(null);
+          return;
+        }
+        if (focusedRowIndex !== -1) {
+          setFocusedRowIndex(-1);
+          return;
+        }
+      }
+
+      // Check if user is typing inside an input/textarea/select
+      const target = e.target as HTMLElement | null;
+      const isTyping = target && (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT' ||
+        target.isContentEditable
+      );
+
+      // Global shortcut: Ctrl+K or '/' to focus search (when not actively typing)
+      if (!isTyping && (e.key === '/' || (e.key === 'k' && (e.ctrlKey || e.metaKey)))) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
+
+      if (isTyping) return;
+      if (isAnyModalOpen) return;
+
+      // Table row arrow navigation
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setFocusedRowIndex(prev => {
+          if (prev < paginatedList.length - 1) {
+            return prev + 1;
+          }
+          if (currentPage < totalPages) {
+            setCurrentPage(p => p + 1);
+            return 0;
+          }
+          return prev;
+        });
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setFocusedRowIndex(prev => {
+          if (prev > 0) {
+            return prev - 1;
+          }
+          if (currentPage > 1) {
+            setCurrentPage(p => p - 1);
+            return Math.max(0, paginatedList.length - 1);
+          }
+          return prev;
+        });
+      } else if (e.key === 'ArrowLeft') {
+        if (currentPage > 1) {
+          e.preventDefault();
+          setCurrentPage(p => p - 1);
+          setFocusedRowIndex(0);
+        }
+      } else if (e.key === 'ArrowRight') {
+        if (currentPage < totalPages) {
+          e.preventDefault();
+          setCurrentPage(p => p + 1);
+          setFocusedRowIndex(0);
+        }
+      } else if (e.key === 'Home') {
+        e.preventDefault();
+        setFocusedRowIndex(0);
+      } else if (e.key === 'End') {
+        e.preventDefault();
+        setFocusedRowIndex(Math.max(0, paginatedList.length - 1));
+      } else if (e.key === 'Enter') {
+        if (focusedRowIndex >= 0 && paginatedList[focusedRowIndex]) {
+          e.preventDefault();
+          handleOpenOrderRequestModal(paginatedList[focusedRowIndex]);
+        }
+      } else if (e.key === ' ') {
+        // Space key toggles selection checkbox
+        if (focusedRowIndex >= 0 && paginatedList[focusedRowIndex] && !isReadOnly) {
+          e.preventDefault();
+          const item = paginatedList[focusedRowIndex];
+          const isCurrentlySelected = selectionMode === 'all_filtered' || selectedIds.includes(item.id);
+          handleSelectItem(item.id, !isCurrentlySelected);
+        }
+      } else if (e.key === 'o' || e.key === 'O') {
+        if (focusedRowIndex >= 0 && paginatedList[focusedRowIndex]) {
+          e.preventDefault();
+          handleOpenOrderRequestModal(paginatedList[focusedRowIndex]);
+        }
+      } else if (e.key === 'v' || e.key === 'V') {
+        if (focusedRowIndex >= 0 && paginatedList[focusedRowIndex]) {
+          e.preventDefault();
+          setViewingPartDetails(paginatedList[focusedRowIndex]);
+        }
+      } else if (e.key === 'e' || e.key === 'E') {
+        if (focusedRowIndex >= 0 && paginatedList[focusedRowIndex] && !isReadOnly && isOwnerOrAdmin(user.role)) {
+          e.preventDefault();
+          handleOpenEdit(paginatedList[focusedRowIndex]);
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    paginatedList, 
+    focusedRowIndex, 
+    currentPage, 
+    totalPages, 
+    isAnyModalOpen, 
+    orderRequestingItem, 
+    viewingPartDetails, 
+    editingItem, 
+    isNewModalOpen, 
+    isExportModalOpen, 
+    deletingItemConfirm, 
+    activeFilterDropdown,
+    selectionMode,
+    selectedIds,
+    isReadOnly,
+    user.role
+  ]);
+
   const pageChecked = selectionMode === 'all_filtered' || (currentIdsOnPage.length > 0 && currentIdsOnPage.every(id => selectedIds.includes(id)));
 
   return (
@@ -865,15 +1038,35 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
           <div className="relative flex-1">
             <Search className="absolute left-3 top-2.5 w-4.5 h-4.5 text-slate-400 pointer-events-none" />
             <input
+              ref={searchInputRef}
               type="text"
-              placeholder="Search inventory by Part No. or Part Name..."
-              className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-600/20"
+              placeholder="Search inventory by Part No. or Part Name... (Press '/' to focus)"
+              className="w-full pl-9 pr-14 py-2 border border-slate-200 rounded-xl text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-600/20"
               value={search}
               onChange={(e) => {
                 setSearch(e.target.value);
                 setCurrentPage(1);
+                setFocusedRowIndex(-1);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown' && paginatedList.length > 0) {
+                  e.preventDefault();
+                  setFocusedRowIndex(0);
+                  searchInputRef.current?.blur();
+                } else if (e.key === 'Escape') {
+                  if (search) {
+                    setSearch('');
+                  } else {
+                    searchInputRef.current?.blur();
+                  }
+                }
               }}
             />
+            <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1 pointer-events-none">
+              <kbd className="px-1.5 py-0.5 text-[9px] font-mono text-slate-400 bg-slate-100 border border-slate-200 rounded">
+                /
+              </kbd>
+            </div>
           </div>
 
           {/* Active / Archived & Low Stock Toggles */}
@@ -1917,43 +2110,63 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-200 text-slate-700">
-              {paginatedList.map((item) => (
-                <tr 
-                  key={item.id} 
-                  className={`hover:bg-slate-50/50 transition ${!item.is_active ? 'bg-slate-50/30' : ''}`}
-                >
-                  {!isReadOnly && (
-                    <td className="p-4 text-center">
-                      <input
-                        type="checkbox"
-                        className="rounded border-slate-300 text-indigo-600 h-4 w-4 focus:ring-0 cursor-pointer"
-                        checked={selectionMode === 'all_filtered' || selectedIds.includes(item.id)}
-                        onChange={(e) => handleSelectItem(item.id, e.target.checked)}
-                      />
-                    </td>
-                  )}
-                  <td 
-                    onClick={() => setViewingPartDetails(item)}
-                    className="p-4 font-mono font-bold text-slate-900 hover:text-indigo-600 cursor-pointer group"
-                    title="Click to view full part and movement details"
+              {paginatedList.map((item, idx) => {
+                const isRowFocused = focusedRowIndex === idx;
+                return (
+                  <tr 
+                    key={item.id} 
+                    onClick={() => setFocusedRowIndex(idx)}
+                    className={`transition cursor-pointer ${
+                      isRowFocused
+                        ? 'bg-indigo-50/90 ring-2 ring-indigo-500 ring-inset shadow-xs'
+                        : 'hover:bg-slate-50/50'
+                    } ${!item.is_active ? 'bg-slate-50/30' : ''}`}
                   >
-                    <div className="flex flex-col gap-1">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="text-indigo-600 group-hover:text-indigo-800 group-hover:underline transition duration-150">{item.part_no}</span>
-                        {item.is_active === false && (
-                          <span className="px-1.5 py-0.5 text-[8px] bg-amber-50 text-amber-700 rounded border border-amber-200/60 font-sans tracking-wide uppercase font-black">
-                            Archived
+                    {!isReadOnly && (
+                      <td className="p-4 text-center">
+                        <div className="flex items-center justify-center gap-1.5">
+                          {isRowFocused && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0 animate-pulse" title="Active row" />
+                          )}
+                          <input
+                            type="checkbox"
+                            className="rounded border-slate-300 text-indigo-600 h-4 w-4 focus:ring-0 cursor-pointer"
+                            checked={selectionMode === 'all_filtered' || selectedIds.includes(item.id)}
+                            onChange={(e) => handleSelectItem(item.id, e.target.checked)}
+                          />
+                        </div>
+                      </td>
+                    )}
+                    <td 
+                      onClick={() => setViewingPartDetails(item)}
+                      className="p-4 font-mono font-bold text-slate-900 hover:text-indigo-600 cursor-pointer group"
+                      title="Click to view full part and movement details"
+                    >
+                      <div className="flex flex-col gap-1">
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          {isReadOnly && isRowFocused && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 shrink-0 animate-pulse" title="Active row" />
+                          )}
+                          <span className="text-indigo-600 group-hover:text-indigo-800 group-hover:underline transition duration-150">{item.part_no}</span>
+                          {isRowFocused && (
+                            <span className="px-1.5 py-0.5 text-[8px] bg-indigo-600 text-white rounded font-sans uppercase font-black tracking-wide shadow-2xs">
+                              ↵ Order
+                            </span>
+                          )}
+                          {item.is_active === false && (
+                            <span className="px-1.5 py-0.5 text-[8px] bg-amber-50 text-amber-700 rounded border border-amber-200/60 font-sans tracking-wide uppercase font-black">
+                              Archived
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] font-sans font-semibold text-slate-400">HSN:</span>
+                          <span className="text-[10px] font-mono text-slate-600 bg-slate-100 group-hover:bg-indigo-50 group-hover:text-indigo-700 group-hover:border-indigo-200 px-1.5 py-0.5 rounded border border-slate-200 transition">
+                            {item.hsn || 'N/A'}
                           </span>
-                        )}
+                        </div>
                       </div>
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] font-sans font-semibold text-slate-400">HSN:</span>
-                        <span className="text-[10px] font-mono text-slate-600 bg-slate-100 group-hover:bg-indigo-50 group-hover:text-indigo-700 group-hover:border-indigo-200 px-1.5 py-0.5 rounded border border-slate-200 transition">
-                          {item.hsn || 'N/A'}
-                        </span>
-                      </div>
-                    </div>
-                  </td>
+                    </td>
                   <td 
                     onClick={() => {
                       if (!isInlineEditMode) {
@@ -2060,7 +2273,8 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                     )}
                   </td>
                 </tr>
-              ))}
+              );
+            })}
               {filteredList.length === 0 && (
                 <tr>
                   <td colSpan={isReadOnly ? 5 : 6} className="p-12 text-center text-slate-400">
@@ -2096,6 +2310,56 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>
+        </div>
+
+        {/* Keyboard Navigation Quick Help Pill Bar */}
+        <div className="bg-slate-100/80 border-t border-slate-200 px-4 py-2.5 flex flex-wrap items-center gap-2 text-[10px] text-slate-600 font-medium select-none">
+          <span className="font-bold text-slate-800">⌨ Keyboard shortcuts:</span>
+          <span className="inline-flex items-center gap-1">
+            <kbd className="px-1.5 py-0.5 bg-white border border-slate-300 rounded font-mono text-[9px] text-slate-800 shadow-2xs">↑</kbd>
+            <kbd className="px-1.5 py-0.5 bg-white border border-slate-300 rounded font-mono text-[9px] text-slate-800 shadow-2xs">↓</kbd>
+            Browse rows
+          </span>
+          <span className="text-slate-300">•</span>
+          <span className="inline-flex items-center gap-1">
+            <kbd className="px-1.5 py-0.5 bg-white border border-slate-300 rounded font-mono text-[9px] text-slate-800 shadow-2xs">Enter</kbd> / <kbd className="px-1.5 py-0.5 bg-white border border-slate-300 rounded font-mono text-[9px] text-slate-800 shadow-2xs">O</kbd>
+            Order Request
+          </span>
+          <span className="text-slate-300">•</span>
+          <span className="inline-flex items-center gap-1">
+            <kbd className="px-1.5 py-0.5 bg-white border border-slate-300 rounded font-mono text-[9px] text-slate-800 shadow-2xs">Space</kbd>
+            Toggle Select
+          </span>
+          <span className="text-slate-300">•</span>
+          <span className="inline-flex items-center gap-1">
+            <kbd className="px-1.5 py-0.5 bg-white border border-slate-300 rounded font-mono text-[9px] text-slate-800 shadow-2xs">V</kbd>
+            View Details
+          </span>
+          {!isReadOnly && isOwnerOrAdmin(user.role) && (
+            <>
+              <span className="text-slate-300">•</span>
+              <span className="inline-flex items-center gap-1">
+                <kbd className="px-1.5 py-0.5 bg-white border border-slate-300 rounded font-mono text-[9px] text-slate-800 shadow-2xs">E</kbd>
+                Edit Part
+              </span>
+            </>
+          )}
+          <span className="text-slate-300">•</span>
+          <span className="inline-flex items-center gap-1">
+            <kbd className="px-1.5 py-0.5 bg-white border border-slate-300 rounded font-mono text-[9px] text-slate-800 shadow-2xs">←</kbd>
+            <kbd className="px-1.5 py-0.5 bg-white border border-slate-300 rounded font-mono text-[9px] text-slate-800 shadow-2xs">→</kbd>
+            Prev/Next Page
+          </span>
+          <span className="text-slate-300">•</span>
+          <span className="inline-flex items-center gap-1">
+            <kbd className="px-1.5 py-0.5 bg-white border border-slate-300 rounded font-mono text-[9px] text-slate-800 shadow-2xs">Ctrl+K</kbd> / <kbd className="px-1.5 py-0.5 bg-white border border-slate-300 rounded font-mono text-[9px] text-slate-800 shadow-2xs">/</kbd>
+            Search
+          </span>
+          <span className="text-slate-300">•</span>
+          <span className="inline-flex items-center gap-1">
+            <kbd className="px-1.5 py-0.5 bg-white border border-slate-300 rounded font-mono text-[9px] text-slate-800 shadow-2xs">Esc</kbd>
+            Dismiss
+          </span>
         </div>
       </div>
 

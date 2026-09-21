@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo } from 'react';
 import { User, UserRole, Brand, isOwnerOrAdmin } from './types';
 import { db } from './dbStore';
 import { supabase } from './lib/supabaseClient';
+import { useAppUpdateChecker } from "./hooks/useAppUpdateChecker";
+import { UpdateAvailable } from "./components/UpdateAvailable";
 
 // Modules components
 import BrandSelector from './components/BrandSelector';
