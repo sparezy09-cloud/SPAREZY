@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { Brand, User, CustomerCategory, PaymentStatus, InventoryItem, Customer, Sale, SaleItem } from '../types';
 import { db } from '../dbStore';
 import { 
@@ -49,24 +49,6 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const [partSearchInput, setPartSearchInput] = useState('');
   const [partSearch, setPartSearch] = useState('');
   const [globalDiscount, setGlobalDiscount] = useState<number>(0);
-
-  // Staged part for quantity confirmation
-  const [stagedPart, setStagedPart] = useState<InventoryItem | null>(null);
-  const [stagedQty, setStagedQty] = useState<string | number>(1);
-  const [highlightedSearchIndex, setHighlightedSearchIndex] = useState<number>(0);
-
-  const partSearchInputRef = useRef<HTMLInputElement>(null);
-  const stagedQtyInputRef = useRef<HTMLInputElement>(null);
-
-  // Auto-focus staged quantity input when a part is picked
-  useEffect(() => {
-    if (stagedPart) {
-      setTimeout(() => {
-        stagedQtyInputRef.current?.focus();
-        stagedQtyInputRef.current?.select();
-      }, 40);
-    }
-  }, [stagedPart]);
   
   // Payment Type
   const [checkoutPaymentType, setCheckoutPaymentType] = useState<CheckoutPaymentType>('UPI');
@@ -102,38 +84,6 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   useEffect(() => {
     setSalesPage(1);
   }, [historySearch, historyCategory, historyPayment, brand]);
-
-  // Global POS keyboard shortcuts for fast checkout
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (activeTab !== 'checkout') return;
-
-      const activeEl = document.activeElement as HTMLElement | null;
-      const isTyping = activeEl && (
-        activeEl.tagName === 'INPUT' || 
-        activeEl.tagName === 'TEXTAREA' || 
-        activeEl.tagName === 'SELECT' || 
-        activeEl.isContentEditable
-      );
-
-      if (e.key === 'Escape') {
-        if (stagedPart) {
-          e.preventDefault();
-          handleCancelStagedPart();
-          return;
-        }
-      }
-
-      if (!isTyping && (e.key === '/' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k'))) {
-        e.preventDefault();
-        partSearchInputRef.current?.focus();
-        partSearchInputRef.current?.select();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeTab, stagedPart]);
 
   // Pending payment recording states
   const [paymentRecordingSale, setPaymentRecordingSale] = useState<Sale | null>(null);
@@ -242,14 +192,13 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
   // 1. Part search matching
   const matchedSearchParts = useMemo(() => {
-    const query = partSearchInput.trim().toLowerCase();
-    if (!query) return [];
+    if (!partSearch.trim()) return [];
     return inventoryList.filter(item => {
       return item.is_active && 
-        (item.part_no.toLowerCase().includes(query) || 
-         item.part_name.toLowerCase().includes(query));
-    }).slice(0, 8); // top 8 matches
-  }, [inventoryList, partSearchInput]);
+        (item.part_no.toLowerCase().includes(partSearch.toLowerCase()) || 
+         item.part_name.toLowerCase().includes(partSearch.toLowerCase()));
+    }).slice(0, 5); // top 5 matches
+  }, [inventoryList, partSearch]);
 
   const handleCreateNewCustomer = async () => {
     if (!customerName.trim()) return;
@@ -276,80 +225,32 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     setPhone(c.phone || '');
   };
 
-  // Start the stage & ask quantity process
-  const handleInitiatePartAdd = (inv: InventoryItem) => {
-    if (inv.quantity <= 0) {
-      alert(`Warning: Part ${inv.part_no} has 0 items remaining in stock!`);
+  const handleAddPartToCheckout = (inv: InventoryItem) => {
+    // If already in checkout
+    if (checkoutParts.some(p => p.part_no === inv.part_no)) {
+      triggerToast(`${inv.part_no} already added to card. Update quantity below.`);
+      setPartSearchInput('');
+      setPartSearch('');
       return;
     }
-    setStagedPart(inv);
-    setStagedQty(1);
-    setHighlightedSearchIndex(0);
-  };
 
-  const handleCancelStagedPart = () => {
-    setStagedPart(null);
-    setStagedQty(1);
-    setTimeout(() => {
-      partSearchInputRef.current?.focus();
-    }, 50);
-  };
-
-  // Confirm adding staged part with the requested quantity
-  const handleConfirmStagedPart = () => {
-    if (!stagedPart) return;
-
-    const askingVal = Math.max(1, parseInt(String(stagedQty), 10) || 1);
-
-    // Check if the part already exists in checkoutParts
-    const existingIndex = checkoutParts.findIndex(
-      p => p.part_no.toLowerCase() === stagedPart.part_no.toLowerCase()
-    );
-
-    if (existingIndex !== -1) {
-      // If same part no. comes again, increase the quantity of that part no. with the asking value
-      const existing = checkoutParts[existingIndex];
-      const newQty = existing.qty_to_sell + askingVal;
-
-      setCheckoutParts(prev => prev.map((p, idx) => {
-        if (idx === existingIndex) {
-          return {
-            ...p,
-            qty_to_sell: newQty
-          };
-        }
-        return p;
-      }));
-
-      triggerToast(`✓ Increased ${stagedPart.part_no} quantity to ${newQty} (+${askingVal}) in bill`);
-    } else {
-      // Add new part with the asking quantity
-      const newItem: SelectedCheckoutPart = {
-        part_no: stagedPart.part_no,
-        part_name: stagedPart.part_name,
-        mrp: stagedPart.mrp,
-        available_qty: stagedPart.quantity,
-        qty_to_sell: askingVal,
-        discount_percentage: 0
-      };
-
-      setCheckoutParts(prev => [...prev, newItem]);
-      triggerToast(`✓ Added ${askingVal}x ${stagedPart.part_no} to bill`);
+    if (inv.quantity <= 0) {
+      alert("This part has 0 items remaining in stock!");
+      return;
     }
 
-    setStagedPart(null);
-    setStagedQty(1);
+    const newItem: SelectedCheckoutPart = {
+      part_no: inv.part_no,
+      part_name: inv.part_name,
+      mrp: inv.mrp,
+      available_qty: inv.quantity,
+      qty_to_sell: 1,
+      discount_percentage: 0
+    };
+
+    setCheckoutParts([...checkoutParts, newItem]);
     setPartSearchInput('');
     setPartSearch('');
-    setHighlightedSearchIndex(0);
-
-    setTimeout(() => {
-      partSearchInputRef.current?.focus();
-    }, 50);
-  };
-
-  const handleAddPartToCheckout = (inv: InventoryItem) => {
-    handleInitiatePartAdd(inv);
   };
 
   const handleRemoveCheckoutPart = (partNo: string) => {
@@ -839,218 +740,46 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
               {/* Part searching bar */}
               <div className="relative font-semibold text-slate-700 text-xs">
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-slate-500">Search active parts by part no or part name</label>
-                  <span className="text-[10px] text-slate-400 font-normal">
-                    Press <kbd className="px-1 py-0.5 bg-slate-100 border border-slate-200 rounded font-mono text-[9px]">/</kbd> to focus, <kbd className="px-1 py-0.5 bg-slate-100 border border-slate-200 rounded font-mono text-[9px]">Enter</kbd> to set qty
-                  </span>
-                </div>
+                <label className="block text-slate-500 mb-1">Search active parts by part no or part name</label>
                 <div className="relative">
-                  <Search className="absolute left-3 top-2.5 w-4.5 h-4.5 text-slate-400 pointer-events-none" />
+                  <Search className="absolute left-3 top-2.5 w-4.5 h-4.5 text-slate-400" />
                   <input
-                    ref={partSearchInputRef}
                     type="text"
-                    className="w-full pl-9 pr-16 py-2 border border-slate-200 rounded-xl font-medium focus:outline-none focus:ring-2 focus:ring-indigo-600/30"
-                    placeholder="Search part no, name, or scan barcode... (Press '/' to focus)"
+                    className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-xl font-medium focus:outline-none focus:ring-1 focus:ring-indigo-600/30"
+                    placeholder="Search e.g. brake pads, Air Filters, part no..."
                     value={partSearchInput}
                     onChange={(e) => {
                       setPartSearchInput(e.target.value);
                       setPartSearch(e.target.value);
-                      setHighlightedSearchIndex(0);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === 'ArrowDown') {
-                        e.preventDefault();
-                        if (matchedSearchParts.length > 0) {
-                          setHighlightedSearchIndex(prev => (prev < matchedSearchParts.length - 1 ? prev + 1 : prev));
-                        }
-                      } else if (e.key === 'ArrowUp') {
-                        e.preventDefault();
-                        if (matchedSearchParts.length > 0) {
-                          setHighlightedSearchIndex(prev => (prev > 0 ? prev - 1 : 0));
-                        }
-                      } else if (e.key === 'Enter') {
-                        e.preventDefault();
-                        const query = partSearchInput.trim().toLowerCase();
-                        if (!query) return;
-
-                        // 1. If highlighted suggestion is selected
-                        if (highlightedSearchIndex >= 0 && matchedSearchParts[highlightedSearchIndex]) {
-                          handleInitiatePartAdd(matchedSearchParts[highlightedSearchIndex]);
-                          return;
-                        }
-
-                        // 2. Exact match in active inventory
-                        const exact = inventoryList.find(i => i.is_active && i.part_no.toLowerCase() === query);
-                        if (exact) {
-                          handleInitiatePartAdd(exact);
-                          return;
-                        }
-
-                        // 3. First matched suggestion
-                        if (matchedSearchParts.length > 0) {
-                          handleInitiatePartAdd(matchedSearchParts[0]);
-                          return;
-                        }
-
-                        triggerToast(`Part "${partSearchInput.trim()}" not found in active inventory.`);
-                      } else if (e.key === 'Escape') {
-                        setPartSearchInput('');
-                        setPartSearch('');
-                        setHighlightedSearchIndex(0);
-                      }
                     }}
                   />
-                  <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1 pointer-events-none">
-                    <kbd className="px-1.5 py-0.5 text-[9px] font-mono text-slate-400 bg-slate-100 border border-slate-200 rounded">
-                      ↵ Enter
-                    </kbd>
-                  </div>
                 </div>
 
                 {/* Autocomplete drawer */}
                 {matchedSearchParts.length > 0 && (
-                  <div className="absolute left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-xl z-30 overflow-hidden divide-y divide-slate-100 max-h-72 overflow-y-auto">
-                    <div className="bg-slate-50 px-3 py-1.5 text-[10px] text-slate-500 font-semibold flex items-center justify-between border-b border-slate-100 select-none">
-                      <span>Matches ({matchedSearchParts.length}) &mdash; Use ↑/↓ to navigate, Enter to choose & set quantity</span>
-                      <kbd className="px-1.5 py-0.5 bg-white border border-slate-200 rounded text-[9px] font-mono">↵ Enter</kbd>
-                    </div>
-                    {matchedSearchParts.map((item, idx) => {
-                      const isHighlighted = idx === highlightedSearchIndex;
-                      const alreadyInBill = checkoutParts.find(p => p.part_no.toLowerCase() === item.part_no.toLowerCase());
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onMouseEnter={() => setHighlightedSearchIndex(idx)}
-                          onClick={() => handleInitiatePartAdd(item)}
-                          className={`w-full p-2.5 text-left text-xs font-semibold flex items-center justify-between transition cursor-pointer ${
-                            isHighlighted ? 'bg-indigo-50/90 ring-1 ring-indigo-500 ring-inset' : 'hover:bg-slate-50'
-                          }`}
-                        >
-                          <div>
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <span className="text-slate-900 font-mono font-bold">{item.part_no}</span>
-                              {alreadyInBill && (
-                                <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded text-[9px] font-bold">
-                                  In Bill: {alreadyInBill.qty_to_sell} units
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-slate-500 text-[10px] font-normal">{item.part_name}</p>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-indigo-600 font-bold">₹{item.mrp}</p>
-                            <p className={`text-[9px] ${item.quantity <= 3 ? 'text-red-500 font-bold' : 'text-slate-400'}`}>
-                              Stock: {item.quantity} units
-                            </p>
-                          </div>
-                        </button>
-                      );
-                    })}
+                  <div className="absolute left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-20 overflow-hidden divide-y divide-slate-100">
+                    {matchedSearchParts.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => handleAddPartToCheckout(item)}
+                        className="w-full p-2.5 text-left text-xs font-semibold flex items-center justify-between hover:bg-slate-50 cursor-pointer"
+                      >
+                        <div>
+                          <p className="text-slate-900 font-mono font-bold">{item.part_no}</p>
+                          <p className="text-slate-500 text-[10px] font-normal">{item.part_name}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="text-indigo-600 font-bold">₹{item.mrp}</p>
+                          <p className={`text-[9px] ${item.quantity <= 3 ? 'text-red-500' : 'text-slate-400'}`}>
+                            Stock Left: {item.quantity} units
+                          </p>
+                        </div>
+                      </button>
+                    ))}
                   </div>
                 )}
               </div>
-
-              {/* Quantity Asking Banner for staged part */}
-              {stagedPart && (() => {
-                const existingInBill = checkoutParts.find(
-                  p => p.part_no.toLowerCase() === stagedPart.part_no.toLowerCase()
-                );
-                const askingNum = Math.max(1, parseInt(String(stagedQty), 10) || 1);
-                const calculatedNextTotal = existingInBill ? existingInBill.qty_to_sell + askingNum : askingNum;
-
-                return (
-                  <div className="bg-gradient-to-r from-indigo-50 via-indigo-50/80 to-blue-50 border-2 border-indigo-500 rounded-2xl p-4 shadow-md animate-in fade-in zoom-in-95 space-y-2">
-                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                      <div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="px-2 py-0.5 bg-indigo-600 text-white rounded font-mono font-bold text-xs shadow-2xs">
-                            {stagedPart.part_no}
-                          </span>
-                          <span className="text-xs font-bold text-slate-900">
-                            {stagedPart.part_name}
-                          </span>
-                          <span className="text-[11px] font-semibold text-slate-600 bg-white px-2 py-0.5 rounded border border-slate-200">
-                            MRP: ₹{stagedPart.mrp}
-                          </span>
-                          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded border ${
-                            stagedPart.quantity <= 3 
-                              ? 'bg-red-50 text-red-700 border-red-200 font-bold' 
-                              : 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                          }`}>
-                            Available Stock: {stagedPart.quantity} units
-                          </span>
-                        </div>
-
-                        {existingInBill ? (
-                          <p className="text-[11px] text-amber-800 font-semibold flex items-center gap-1.5 mt-1.5">
-                            <span className="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                            <span>Already in bill with <strong>{existingInBill.qty_to_sell} units</strong>.</span>
-                            <span className="text-slate-600">
-                              Adding <strong>+{askingNum}</strong> will increase total to <strong>{calculatedNextTotal} units</strong>.
-                            </span>
-                          </p>
-                        ) : (
-                          <p className="text-[11px] text-slate-600 font-medium mt-1">
-                            Set quantity to add to bill (default is 1, press <kbd className="px-1 py-0.5 bg-white border border-slate-200 rounded font-mono text-[9px] font-bold">Enter</kbd> to confirm):
-                          </p>
-                        )}
-                      </div>
-
-                      {/* Quantity Form */}
-                      <form
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          handleConfirmStagedPart();
-                        }}
-                        className="flex items-center gap-2 self-start md:self-center"
-                      >
-                        <div className="flex items-center gap-1.5 bg-white px-3 py-1.5 rounded-xl border-2 border-indigo-400 shadow-inner">
-                          <label htmlFor="staged-qty-input" className="text-xs font-bold text-indigo-950 uppercase tracking-wide">
-                            Qty:
-                          </label>
-                          <input
-                            id="staged-qty-input"
-                            ref={stagedQtyInputRef}
-                            type="number"
-                            min="1"
-                            step="1"
-                            value={stagedQty}
-                            onChange={(e) => setStagedQty(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Escape') {
-                                e.preventDefault();
-                                handleCancelStagedPart();
-                              }
-                            }}
-                            className="w-16 font-mono font-black text-center text-base text-slate-900 focus:outline-none"
-                          />
-                        </div>
-
-                        <button
-                          type="submit"
-                          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 cursor-pointer transition active:scale-95"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                          <span>{existingInBill ? 'Increase Qty' : 'Add to Bill'}</span>
-                          <kbd className="px-1.5 py-0.5 text-[9px] bg-indigo-800 text-indigo-100 rounded font-mono shadow-2xs">
-                            ↵ Enter
-                          </kbd>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={handleCancelStagedPart}
-                          className="px-3 py-2 bg-white hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-xl text-xs font-semibold cursor-pointer transition"
-                        >
-                          Cancel
-                        </button>
-                      </form>
-                    </div>
-                  </div>
-                );
-              })()}
 
               {/* Added items list */}
               <div className="pt-2">

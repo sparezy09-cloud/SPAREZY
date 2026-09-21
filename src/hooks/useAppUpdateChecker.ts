@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { supabase } from "../lib/supabaseClient";
+import { supabase } from "src/lib/supabaseClient.ts";
 
 const CURRENT_VERSION = "initial";
 
