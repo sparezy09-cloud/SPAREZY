@@ -1732,6 +1732,51 @@ export const db = {
     db.notify();
   },
 
+  updateBatchOrderRequestStatus: async (
+    ids: string[],
+    status: OrderRequest['status'],
+    user: User,
+    actionNotes?: string
+  ): Promise<number> => {
+    if (!ids || ids.length === 0) return 0;
+    const now = new Date().toISOString();
+    const updatedReqs: OrderRequest[] = [];
+
+    cache.order_requests.forEach(req => {
+      if (ids.includes(req.id)) {
+        req.status = status;
+        req.accepted_by = user.name;
+        req.action_notes = actionNotes || (status === 'Accepted' ? 'Approved in Bulk by Owner' : `Bulk status updated to ${status}`);
+        req.updated_at = now;
+        updatedReqs.push(req);
+      }
+    });
+
+    if (isSupabaseConfigured && supabase) {
+      const defaultNote = actionNotes || (status === 'Accepted' ? 'Approved in Bulk by Owner' : `Bulk status updated to ${status}`);
+      await supabase.from('order_requests').update({
+        status,
+        accepted_by: user.name,
+        action_notes: defaultNote,
+        updated_at: now
+      }).in('id', ids);
+    } else {
+      localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(cache.order_requests));
+    }
+
+    db.logTransaction(
+      user.id, 
+      user.name, 
+      'Batch Update Order Status', 
+      'Orders', 
+      `Bulk updated ${updatedReqs.length} order requests to status: ${status}`, 
+      null, 
+      { count: updatedReqs.length, status, ids }
+    );
+    db.notify();
+    return updatedReqs.length;
+  },
+
   // Staff Attendance & Monthly Salary System
   getAttendance: (month?: string, userId?: string): StaffAttendance[] => {
     let list = cache.staff_attendance;

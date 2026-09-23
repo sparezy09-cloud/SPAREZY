@@ -10,7 +10,7 @@ import {
   ClipboardPlus
 } from 'lucide-react';
 
-export type SortColumn = 'part_no' | 'part_name' | 'quantity' | 'mrp' | null;
+export type SortColumn = 'part_no' | 'part_name' | 'quantity' | 'mrp' | 'hsn' | null;
 export type SortDirection = 'asc' | 'desc' | 'default';
 
 interface InventoryModuleProps {
@@ -68,7 +68,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
   const [inventoryList, setInventoryList] = useState<InventoryItem[]>(() => db.getInventory(brand, false));
 
   // Column Filters State & Dropdown Management
-  const [activeFilterDropdown, setActiveFilterDropdown] = useState<null | 'partNo' | 'partName' | 'quantity' | 'mrp'>(null);
+  const [activeFilterDropdown, setActiveFilterDropdown] = useState<null | 'partNo' | 'partName' | 'quantity' | 'mrp' | 'hsn'>(null);
   
   // Multi-state Column Sorting: asc -> desc -> default (coordinated with filtering)
   const [sortColumn, setSortColumn] = useState<SortColumn>(null);
