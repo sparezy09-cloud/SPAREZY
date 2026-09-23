@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { User, Brand, UserRole } from '../types';
 import { db } from '../dbStore';
 import { supabase, isSupabaseConfigured } from '../lib/supabaseClient';
-import { Shield, Key, CarFront, Mail, Lock, User as UserIcon, LogOut, ArrowRight, UserPlus, Info, CheckCircle, AlertTriangle } from 'lucide-react';
+import { Shield, Key, CarFront, Mail, Lock, User as UserIcon, LogOut, ArrowRight, UserPlus, Info, CheckCircle, AlertTriangle, Eye, EyeOff, KeyRound, CheckSquare } from 'lucide-react';
 
 interface BrandSelectorProps {
   activeUser: User | null;
@@ -13,8 +13,48 @@ interface BrandSelectorProps {
 export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandSelectorProps) {
   // Local auth states
   const [isSignUpMode, setIsSignUpMode] = useState(false);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+
+  // Remember Me & Saved Credentials logic
+  const [rememberUserId, setRememberUserId] = useState<boolean>(() => {
+    try {
+      const stored = localStorage.getItem('sparezy_remember_userid');
+      // Default to true so user ID automatically fills on next open
+      return stored !== null ? stored === 'true' : true;
+    } catch {
+      return true;
+    }
+  });
+
+  const [savePassword, setSavePassword] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('sparezy_save_password') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  const [email, setEmail] = useState<string>(() => {
+    try {
+      const savedId = localStorage.getItem('sparezy_saved_userid');
+      return savedId || '';
+    } catch {
+      return '';
+    }
+  });
+
+  const [password, setPassword] = useState<string>(() => {
+    try {
+      const shouldSave = localStorage.getItem('sparezy_save_password') === 'true';
+      if (shouldSave) {
+        return localStorage.getItem('sparezy_saved_password') || '';
+      }
+      return '';
+    } catch {
+      return '';
+    }
+  });
+
+  const [showPassword, setShowPassword] = useState(false);
   const [fullName, setFullName] = useState('');
   const [signUpRole, setSignUpRole] = useState<UserRole>('Owner');
   
@@ -32,7 +72,22 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
     return db.subscribe(handleUpdate);
   }, []);
 
-
+  const handleClearSavedCredentials = () => {
+    try {
+      localStorage.removeItem('sparezy_saved_userid');
+      localStorage.removeItem('sparezy_saved_password');
+      localStorage.setItem('sparezy_remember_userid', 'false');
+      localStorage.setItem('sparezy_save_password', 'false');
+      setEmail('');
+      setPassword('');
+      setRememberUserId(false);
+      setSavePassword(false);
+      setSuccessLocal("Saved credentials cleared from this browser.");
+      setTimeout(() => setSuccessLocal(null), 3000);
+    } catch (err) {
+      console.warn("Failed to clear saved credentials", err);
+    }
+  };
 
   // Handle Supabase Auth Log-In
   const handleSupabaseLogin = async (e: React.FormEvent) => {
@@ -103,6 +158,27 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
         if (sessionUser.status === 'Disabled') {
           await supabase.auth.signOut();
           throw new Error("This Sparezy operator identity has been disabled.");
+        }
+
+        // Persist or clear User ID & Password per user preference
+        try {
+          if (rememberUserId && email.trim()) {
+            localStorage.setItem('sparezy_remember_userid', 'true');
+            localStorage.setItem('sparezy_saved_userid', email.trim());
+          } else {
+            localStorage.setItem('sparezy_remember_userid', 'false');
+            localStorage.removeItem('sparezy_saved_userid');
+          }
+
+          if (savePassword && password.trim()) {
+            localStorage.setItem('sparezy_save_password', 'true');
+            localStorage.setItem('sparezy_saved_password', password.trim());
+          } else {
+            localStorage.setItem('sparezy_save_password', 'false');
+            localStorage.removeItem('sparezy_saved_password');
+          }
+        } catch (storageErr) {
+          console.warn("Could not save credentials to localStorage:", storageErr);
         }
 
         // Clear active brand so they must choose the brand to establish link with data
@@ -181,6 +257,20 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
           status: 'Active',
           created_at: new Date().toISOString()
         };
+
+        // Persist or clear User ID & Password per user preference
+        try {
+          if (rememberUserId && email.trim()) {
+            localStorage.setItem('sparezy_remember_userid', 'true');
+            localStorage.setItem('sparezy_saved_userid', email.trim());
+          }
+          if (savePassword && password.trim()) {
+            localStorage.setItem('sparezy_save_password', 'true');
+            localStorage.setItem('sparezy_saved_password', password.trim());
+          }
+        } catch (storageErr) {
+          console.warn("Could not save credentials to localStorage:", storageErr);
+        }
 
         // Clear active brand so they must choose the brand to establish link with data
         db.setActiveBrand(null);
@@ -286,13 +376,24 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
         <div className="mt-8 sm:mx-auto sm:w-full sm:max-w-md">
           <div className="bg-slate-900 border border-slate-800/80 rounded-3xl p-6 sm:p-10 shadow-2xl space-y-6">
             
-            <div className="text-center pb-2 border-b border-slate-800/60">
-              <h3 className="text-sm font-bold uppercase tracking-wider text-slate-350">
-                Sign In to Operator Portal
+            <div className="flex items-center justify-between pb-2 border-b border-slate-800/60">
+              <h3 className="text-sm font-bold uppercase tracking-wider text-slate-300">
+                {isSignUpMode ? 'Register Operator Account' : 'Sign In to Operator Portal'}
               </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsSignUpMode(prev => !prev);
+                  setErrorLocal(null);
+                  setSuccessLocal(null);
+                }}
+                className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold cursor-pointer transition"
+              >
+                {isSignUpMode ? 'Back to Sign In' : 'Create Account'}
+              </button>
             </div>
 
-            <form onSubmit={handleSupabaseLogin} className="space-y-4">
+            <form onSubmit={isSignUpMode ? handleSupabaseSignUp : handleSupabaseLogin} className="space-y-4">
               {isSignUpMode && (
                 <div>
                   <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
@@ -313,37 +414,164 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
               )}
 
               <div>
-                <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                  Email Address
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label htmlFor="email" className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    User ID / Email Address
+                  </label>
+                  {rememberUserId && email && (
+                    <span className="text-[9px] font-mono font-bold text-emerald-400 bg-emerald-950/70 border border-emerald-500/30 px-1.5 py-0.5 rounded">
+                      Auto-filled
+                    </span>
+                  )}
+                </div>
                 <div className="relative">
                   <Mail className="absolute left-3.5 top-3 w-4 h-4 text-slate-500" />
                   <input
+                    id="email"
+                    name="email"
                     type="email"
                     required
+                    autoComplete="username"
                     placeholder="name@sparezy.com"
                     value={email}
-                    onChange={(e) => setEmail(e.target.value)}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setEmail(val);
+                      if (rememberUserId && val.trim()) {
+                        try {
+                          localStorage.setItem('sparezy_saved_userid', val.trim());
+                        } catch (_) {}
+                      }
+                    }}
                     className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white text-xs py-2.5 pl-10 pr-4 rounded-xl outline-none transition"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-1.5">
-                  Secure Password
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label htmlFor="password" className="block text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                    Secure Password
+                  </label>
+                  {savePassword && password && (
+                    <span className="text-[9px] font-mono font-bold text-emerald-400 bg-emerald-950/70 border border-emerald-500/30 px-1.5 py-0.5 rounded">
+                      Saved
+                    </span>
+                  )}
+                </div>
                 <div className="relative">
                   <Lock className="absolute left-3.5 top-3 w-4 h-4 text-slate-500" />
                   <input
-                    type="password"
+                    id="password"
+                    name="password"
+                    type={showPassword ? 'text' : 'password'}
                     required
+                    autoComplete="current-password"
                     placeholder="••••••••"
                     value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white text-xs py-2.5 pl-10 pr-4 rounded-xl outline-none transition"
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setPassword(val);
+                      if (savePassword && val.trim()) {
+                        try {
+                          localStorage.setItem('sparezy_save_password', val.trim());
+                        } catch (_) {}
+                      }
+                    }}
+                    className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 text-white text-xs py-2.5 pl-10 pr-10 rounded-xl outline-none transition"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(p => !p)}
+                    tabIndex={-1}
+                    className="absolute right-3 top-2.5 text-slate-400 hover:text-white transition cursor-pointer p-0.5"
+                    title={showPassword ? "Hide password" : "Show password"}
+                  >
+                    {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
                 </div>
+              </div>
+
+              {/* Remember Me & Save Password Preferences */}
+              <div className="bg-slate-950/80 border border-slate-800/80 rounded-2xl p-3.5 space-y-3">
+                <div className="flex items-start gap-2.5">
+                  <input
+                    id="rememberUserId"
+                    type="checkbox"
+                    checked={rememberUserId}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setRememberUserId(checked);
+                      try {
+                        if (!checked) {
+                          localStorage.setItem('sparezy_remember_userid', 'false');
+                          localStorage.removeItem('sparezy_saved_userid');
+                        } else if (email.trim()) {
+                          localStorage.setItem('sparezy_remember_userid', 'true');
+                          localStorage.setItem('sparezy_saved_userid', email.trim());
+                        } else {
+                          localStorage.setItem('sparezy_remember_userid', 'true');
+                        }
+                      } catch (_) {}
+                    }}
+                    className="w-4 h-4 rounded bg-slate-900 border-slate-700 text-indigo-600 focus:ring-indigo-500 mt-0.5 cursor-pointer"
+                  />
+                  <label htmlFor="rememberUserId" className="cursor-pointer select-none text-left">
+                    <span className="text-xs font-semibold text-slate-200 block">
+                      Remember User ID
+                    </span>
+                    <span className="text-[10px] text-slate-400 block leading-tight mt-0.5">
+                      Fills your email/ID automatically every time you open Sparezy
+                    </span>
+                  </label>
+                </div>
+
+                <div className="h-px bg-slate-800/60" />
+
+                <div className="flex items-start gap-2.5">
+                  <input
+                    id="savePassword"
+                    type="checkbox"
+                    checked={savePassword}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setSavePassword(checked);
+                      try {
+                        if (!checked) {
+                          localStorage.setItem('sparezy_save_password', 'false');
+                          localStorage.removeItem('sparezy_saved_password');
+                        } else if (password.trim()) {
+                          localStorage.setItem('sparezy_save_password', 'true');
+                          localStorage.setItem('sparezy_saved_password', password.trim());
+                        } else {
+                          localStorage.setItem('sparezy_save_password', 'true');
+                        }
+                      } catch (_) {}
+                    }}
+                    className="w-4 h-4 rounded bg-slate-900 border-slate-700 text-indigo-600 focus:ring-indigo-500 mt-0.5 cursor-pointer"
+                  />
+                  <label htmlFor="savePassword" className="cursor-pointer select-none text-left">
+                    <span className="text-xs font-semibold text-slate-200 block">
+                      Save Password on this device
+                    </span>
+                    <span className="text-[10px] text-slate-400 block leading-tight mt-0.5">
+                      Save entered password locally so you don't need to retype it
+                    </span>
+                  </label>
+                </div>
+
+                {(localStorage.getItem('sparezy_saved_userid') || localStorage.getItem('sparezy_saved_password')) && (
+                  <div className="pt-1.5 flex items-center justify-between text-[11px] border-t border-slate-800/70">
+                    <span className="text-slate-400 text-[10px]">Credentials saved locally</span>
+                    <button
+                      type="button"
+                      onClick={handleClearSavedCredentials}
+                      className="text-[10px] text-rose-400 hover:text-rose-300 font-semibold underline underline-offset-2 cursor-pointer transition"
+                    >
+                      Clear saved login
+                    </button>
+                  </div>
+                )}
               </div>
 
               {isSignUpMode && (
@@ -409,13 +637,13 @@ export default function BrandSelector({ activeUser, onSelect, onLogout }: BrandS
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white font-bold py-3 px-4 rounded-xl transition active:scale-[0.98] text-xs flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 text-white font-bold py-3 px-4 rounded-xl transition active:scale-[0.98] text-xs flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-indigo-600/20"
               >
                 {loading ? (
                   <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
                 ) : (
                   <>
-                    <span>Secure Supabase Auth Login</span>
+                    <span>{isSignUpMode ? 'Register Operator Profile' : 'Secure Supabase Auth Login'}</span>
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}
