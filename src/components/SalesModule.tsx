@@ -278,12 +278,10 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
   // Start the stage & ask quantity process
   const handleInitiatePartAdd = (inv: InventoryItem) => {
-    if (inv.quantity <= 0) {
-      alert(`Warning: Part ${inv.part_no} has 0 items remaining in stock!`);
-      return;
-    }
     setStagedPart(inv);
     setStagedQty(1);
+    setPartSearchInput('');
+    setPartSearch('');
     setHighlightedSearchIndex(0);
   };
 
@@ -952,101 +950,222 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                 )}
               </div>
 
-              {/* Quantity Asking Banner for staged part */}
+              {/* Sold Quantity Prompt Modal */}
               {stagedPart && (() => {
                 const existingInBill = checkoutParts.find(
                   p => p.part_no.toLowerCase() === stagedPart.part_no.toLowerCase()
                 );
                 const askingNum = Math.max(1, parseInt(String(stagedQty), 10) || 1);
                 const calculatedNextTotal = existingInBill ? existingInBill.qty_to_sell + askingNum : askingNum;
+                const lineTotal = stagedPart.mrp * askingNum;
+                const isOutOfStock = stagedPart.quantity <= 0;
+                const isOverStock = askingNum > stagedPart.quantity;
 
                 return (
-                  <div className="bg-gradient-to-r from-indigo-50 via-indigo-50/80 to-blue-50 border-2 border-indigo-500 rounded-2xl p-4 shadow-md animate-in fade-in zoom-in-95 space-y-2">
-                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                      <div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="px-2 py-0.5 bg-indigo-600 text-white rounded font-mono font-bold text-xs shadow-2xs">
+                  <div 
+                    className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in"
+                    onClick={(e) => {
+                      if (e.target === e.currentTarget) handleCancelStagedPart();
+                    }}
+                  >
+                    <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-lg w-full p-6 space-y-4 animate-in zoom-in-95">
+                      
+                      {/* Modal Header */}
+                      <div className="flex items-start justify-between pb-3 border-b border-slate-100">
+                        <div className="flex items-center gap-3">
+                          <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl border border-indigo-100">
+                            <ShoppingBag className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <h3 className="text-base font-black text-slate-900">
+                              Enter Sold Quantity
+                            </h3>
+                            <p className="text-xs text-slate-500">
+                              Specify quantity (default is 1) then add part to sales bill.
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleCancelStagedPart}
+                          className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition text-lg font-bold leading-none cursor-pointer"
+                          title="Cancel (Esc)"
+                        >
+                          &times;
+                        </button>
+                      </div>
+
+                      {/* Part Details Box */}
+                      <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-2.5">
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <span className="px-2.5 py-1 bg-indigo-600 text-white rounded-lg font-mono font-bold text-xs tracking-wide shadow-2xs">
                             {stagedPart.part_no}
                           </span>
-                          <span className="text-xs font-bold text-slate-900">
-                            {stagedPart.part_name}
-                          </span>
-                          <span className="text-[11px] font-semibold text-slate-600 bg-white px-2 py-0.5 rounded border border-slate-200">
+                          <span className="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2.5 py-0.5 rounded-full">
                             MRP: ₹{stagedPart.mrp}
                           </span>
-                          <span className={`text-[11px] font-semibold px-2 py-0.5 rounded border ${
-                            stagedPart.quantity <= 3 
-                              ? 'bg-red-50 text-red-700 border-red-200 font-bold' 
-                              : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        </div>
+                        
+                        <div>
+                          <h4 className="font-bold text-sm text-slate-800 leading-snug">{stagedPart.part_name}</h4>
+                          {stagedPart.hsn && (
+                            <p className="text-[11px] text-slate-400 font-medium mt-0.5">HSN: {stagedPart.hsn}</p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-between pt-1.5 text-xs border-t border-slate-200/60">
+                          <span className="text-slate-500 font-medium">Available in Stock:</span>
+                          <span className={`font-bold font-mono px-2 py-0.5 rounded ${
+                            isOutOfStock 
+                              ? 'bg-rose-100 text-rose-700 border border-rose-200' 
+                              : stagedPart.quantity <= 3 
+                              ? 'bg-amber-100 text-amber-800 border border-amber-200' 
+                              : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
                           }`}>
-                            Available Stock: {stagedPart.quantity} units
+                            {stagedPart.quantity} units
                           </span>
                         </div>
 
-                        {existingInBill ? (
-                          <p className="text-[11px] text-amber-800 font-semibold flex items-center gap-1.5 mt-1.5">
-                            <span className="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-                            <span>Already in bill with <strong>{existingInBill.qty_to_sell} units</strong>.</span>
-                            <span className="text-slate-600">
-                              Adding <strong>+{askingNum}</strong> will increase total to <strong>{calculatedNextTotal} units</strong>.
+                        {existingInBill && (
+                          <div className="bg-amber-50 border border-amber-200 p-2.5 rounded-lg text-xs text-amber-900 flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
+                            <span>
+                              Already in bill: <strong>{existingInBill.qty_to_sell} units</strong>. Adding <strong>+{askingNum}</strong> will make it <strong>{calculatedNextTotal} units</strong>.
                             </span>
-                          </p>
-                        ) : (
-                          <p className="text-[11px] text-slate-600 font-medium mt-1">
-                            Set quantity to add to bill (default is 1, press <kbd className="px-1 py-0.5 bg-white border border-slate-200 rounded font-mono text-[9px] font-bold">Enter</kbd> to confirm):
-                          </p>
+                          </div>
+                        )}
+
+                        {isOverStock && !isOutOfStock && (
+                          <div className="bg-amber-50 border border-amber-200 p-2 rounded-lg text-[11px] text-amber-800 font-semibold">
+                            ⚠️ Notice: Quantity entered ({askingNum}) exceeds in-stock quantity ({stagedPart.quantity}).
+                          </div>
+                        )}
+                        {isOutOfStock && (
+                          <div className="bg-rose-50 border border-rose-200 p-2 rounded-lg text-[11px] text-rose-800 font-semibold">
+                            ⚠️ Warning: This part is currently out of stock (0 units).
+                          </div>
                         )}
                       </div>
 
-                      {/* Quantity Form */}
+                      {/* Quantity Input Form */}
                       <form
                         onSubmit={(e) => {
                           e.preventDefault();
                           handleConfirmStagedPart();
                         }}
-                        className="flex items-center gap-2 self-start md:self-center"
+                        className="space-y-4"
                       >
-                        <div className="flex items-center gap-1.5 bg-white px-3 py-1.5 rounded-xl border-2 border-indigo-400 shadow-inner">
-                          <label htmlFor="staged-qty-input" className="text-xs font-bold text-indigo-950 uppercase tracking-wide">
-                            Qty:
-                          </label>
-                          <input
-                            id="staged-qty-input"
-                            ref={stagedQtyInputRef}
-                            type="number"
-                            min="1"
-                            step="1"
-                            value={stagedQty}
-                            onChange={(e) => setStagedQty(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Escape') {
-                                e.preventDefault();
-                                handleCancelStagedPart();
-                              }
-                            }}
-                            className="w-16 font-mono font-black text-center text-base text-slate-900 focus:outline-none"
-                          />
+                        <div>
+                          <div className="flex items-center justify-between mb-1.5">
+                            <label htmlFor="staged-modal-qty-input" className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
+                              Sold Quantity (Default: 1)
+                            </label>
+                            <span className="text-[10px] text-slate-400">Press Enter to add to bill</span>
+                          </div>
+                          
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setStagedQty(prev => Math.max(1, (parseInt(String(prev), 10) || 1) - 1))}
+                              className="w-12 h-12 flex items-center justify-center rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xl transition active:scale-95 cursor-pointer"
+                              title="Decrease quantity by 1"
+                            >
+                              -
+                            </button>
+
+                            <div className="relative flex-1">
+                              <input
+                                id="staged-modal-qty-input"
+                                ref={stagedQtyInputRef}
+                                type="number"
+                                min="1"
+                                step="1"
+                                value={stagedQty}
+                                onChange={(e) => setStagedQty(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Escape') {
+                                    e.preventDefault();
+                                    handleCancelStagedPart();
+                                  }
+                                }}
+                                className="w-full h-12 border-2 border-indigo-500 rounded-xl text-center text-2xl font-black font-mono text-slate-900 focus:outline-none focus:ring-4 focus:ring-indigo-500/20 bg-indigo-50/20"
+                                placeholder="1"
+                                autoFocus
+                              />
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => setStagedQty(prev => (parseInt(String(prev), 10) || 0) + 1)}
+                              className="w-12 h-12 flex items-center justify-center rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xl transition active:scale-95 cursor-pointer"
+                              title="Increase quantity by 1"
+                            >
+                              +
+                            </button>
+                          </div>
+
+                          {/* Quick Preset Buttons */}
+                          <div className="flex items-center gap-1.5 mt-2.5 flex-wrap">
+                            <span className="text-[10px] uppercase font-bold text-slate-400 mr-1">Presets:</span>
+                            {[1, 2, 3, 5, 10].map(n => (
+                              <button
+                                key={n}
+                                type="button"
+                                onClick={() => setStagedQty(n)}
+                                className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition border cursor-pointer ${
+                                  parseInt(String(stagedQty), 10) === n
+                                    ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                                    : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                                }`}
+                              >
+                                {n}
+                              </button>
+                            ))}
+                            {stagedPart.quantity > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setStagedQty(stagedPart.quantity)}
+                                className="px-2.5 py-1 rounded-lg text-[11px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 transition cursor-pointer ml-auto"
+                                title="Set to all available stock"
+                              >
+                                All Stock ({stagedPart.quantity})
+                              </button>
+                            )}
+                          </div>
                         </div>
 
-                        <button
-                          type="submit"
-                          className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-sm flex items-center gap-1.5 cursor-pointer transition active:scale-95"
-                        >
-                          <Plus className="w-3.5 h-3.5" />
-                          <span>{existingInBill ? 'Increase Qty' : 'Add to Bill'}</span>
-                          <kbd className="px-1.5 py-0.5 text-[9px] bg-indigo-800 text-indigo-100 rounded font-mono shadow-2xs">
-                            ↵ Enter
-                          </kbd>
-                        </button>
+                        {/* Estimated Line Total Preview */}
+                        <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 flex items-center justify-between text-xs">
+                          <span className="text-slate-500 font-medium">Estimated Line Total:</span>
+                          <span className="font-mono font-black text-sm text-slate-900">
+                            {askingNum} × ₹{stagedPart.mrp} = <span className="text-indigo-600">₹{lineTotal.toLocaleString('en-IN')}</span>
+                          </span>
+                        </div>
 
-                        <button
-                          type="button"
-                          onClick={handleCancelStagedPart}
-                          className="px-3 py-2 bg-white hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-xl text-xs font-semibold cursor-pointer transition"
-                        >
-                          Cancel
-                        </button>
+                        {/* Footer Action Buttons */}
+                        <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-150">
+                          <button
+                            type="button"
+                            onClick={handleCancelStagedPart}
+                            className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50 transition cursor-pointer flex items-center gap-1.5"
+                          >
+                            <span>Cancel</span>
+                            <kbd className="text-[9px] font-mono px-1 py-0.5 rounded bg-slate-100 text-slate-400 border border-slate-200">Esc</kbd>
+                          </button>
+
+                          <button
+                            type="submit"
+                            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md hover:shadow-indigo-500/25 transition cursor-pointer flex items-center gap-2 active:scale-95"
+                          >
+                            <Plus className="w-4 h-4" />
+                            <span>{existingInBill ? 'Update & Add to Bill' : 'Add to Bill'}</span>
+                            <kbd className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-indigo-800 text-indigo-100 border border-indigo-500/60 font-bold">
+                              ↵ Enter
+                            </kbd>
+                          </button>
+                        </div>
                       </form>
+
                     </div>
                   </div>
                 );

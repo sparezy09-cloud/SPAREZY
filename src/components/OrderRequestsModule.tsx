@@ -543,6 +543,84 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
     'Rejected': 'bg-rose-50 text-rose-800 border-rose-200'
   };
 
+  // Keyboard navigation & shortcuts for Order Requests
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const isInput = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+
+      // In Accept All Modal: Ctrl+Enter or Cmd+Enter to confirm batch approval
+      if (isAcceptAllModalOpen && (e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+        e.preventDefault();
+        handleAcceptAllPending(autoExportOnAccept);
+        return;
+      }
+
+      // Ctrl + A or Cmd + A: Select / Deselect all filtered requests
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && !isInput) {
+        e.preventDefault();
+        handleToggleSelectAll(filteredRequests);
+        return;
+      }
+
+      // Ctrl + E or Cmd + E: Export to Excel
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'e' && !isInput) {
+        e.preventDefault();
+        if (selectedIds.length > 0) {
+          handleExportSelected();
+        } else if (acceptedRequests.length > 0) {
+          handleExportAccepted();
+        } else {
+          handleExportAll();
+        }
+        return;
+      }
+
+      // Escape: Close modals, dropdowns, or clear selection
+      if (e.key === 'Escape') {
+        if (showExportMenu) {
+          setShowExportMenu(false);
+          return;
+        }
+        if (isAcceptAllModalOpen) {
+          setIsAcceptAllModalOpen(false);
+          return;
+        }
+        if (isNewModalOpen) {
+          setIsNewModalOpen(false);
+          return;
+        }
+        if (rejectingRequest) {
+          setRejectingRequest(null);
+          return;
+        }
+        if (isFastSearchFocused) {
+          setIsFastSearchFocused(false);
+          fastSearchInputRef.current?.blur();
+          return;
+        }
+        if (selectedIds.length > 0) {
+          setSelectedIds([]);
+          return;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    selectedIds,
+    filteredRequests,
+    showExportMenu,
+    isAcceptAllModalOpen,
+    isNewModalOpen,
+    rejectingRequest,
+    isFastSearchFocused,
+    autoExportOnAccept,
+    pendingRequests,
+    acceptedRequests
+  ]);
+
   return (
     <div className="space-y-6">
       {/* Toast Notification */}
@@ -592,11 +670,14 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
             <button
               type="button"
               onClick={() => setShowExportMenu(prev => !prev)}
-              className="inline-flex items-center justify-center gap-2 px-3.5 py-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-bold shadow-sm transition cursor-pointer shrink-0"
-              title="Export requested order parts to Excel (.xlsx)"
+              className="inline-flex items-center justify-center gap-2 px-3.5 py-2.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-bold shadow-sm transition cursor-pointer shrink-0 focus-visible:ring-2 focus-visible:ring-emerald-500 focus:outline-none"
+              title="Export requested order parts to Excel (.xlsx) [Ctrl+E]"
             >
               <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
               <span>Export Excel</span>
+              <kbd className="hidden md:inline-block text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-200/70 text-emerald-900 border border-emerald-300 font-bold">
+                Ctrl+E
+              </kbd>
               <ChevronDown className={`w-3.5 h-3.5 text-emerald-600 transition-transform ${showExportMenu ? 'rotate-180' : ''}`} />
             </button>
 
@@ -1041,8 +1122,11 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
               placeholder="Search by part number, part name, customer, or requester..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+              className="w-full pl-9 pr-10 py-2 border border-slate-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
             />
+            <kbd className="absolute right-3 top-1/2 -translate-y-1/2 hidden sm:inline-block text-[9px] font-mono text-slate-400 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded pointer-events-none">
+              /
+            </kbd>
           </div>
 
           <div className="flex gap-2">
@@ -1080,14 +1164,16 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
           <table className="min-w-full divide-y divide-slate-200 text-left text-xs">
             <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-[10px] tracking-wider">
               <tr>
-                <th className="p-3.5 pl-4 w-10 text-center">
-                  <input
-                    type="checkbox"
-                    checked={filteredRequests.length > 0 && filteredRequests.every(r => selectedIds.includes(r.id))}
-                    onChange={() => handleToggleSelectAll(filteredRequests)}
-                    className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
-                    title={filteredRequests.length > 0 && filteredRequests.every(r => selectedIds.includes(r.id)) ? "Deselect all" : "Select all filtered orders"}
-                  />
+                <th className="p-3.5 pl-4 w-12 text-center">
+                  <div className="flex items-center justify-center gap-1">
+                    <input
+                      type="checkbox"
+                      checked={filteredRequests.length > 0 && filteredRequests.every(r => selectedIds.includes(r.id))}
+                      onChange={() => handleToggleSelectAll(filteredRequests)}
+                      className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                      title={filteredRequests.length > 0 && filteredRequests.every(r => selectedIds.includes(r.id)) ? "Deselect all (Ctrl+A)" : "Select all filtered orders (Ctrl+A)"}
+                    />
+                  </div>
                 </th>
                 <th className="p-3.5 px-4">Date & Urgency</th>
                 <th className="p-3.5">Part Details</th>
@@ -1283,17 +1369,23 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
             <button
               type="button"
               onClick={handleExportSelected}
-              className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+              className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm focus-visible:ring-2 focus-visible:ring-indigo-400"
+              title="Export selected items to Excel (Ctrl+E)"
             >
               <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-300" />
-              <span>Export Selected to Excel</span>
+              <span>Export Selected</span>
+              <kbd className="hidden sm:inline-block text-[9px] font-mono px-1 py-0.5 rounded bg-indigo-700/80 text-indigo-100 border border-indigo-500/50">
+                Ctrl+E
+              </kbd>
             </button>
             <button
               type="button"
               onClick={() => setSelectedIds([])}
-              className="px-2.5 py-1 text-xs text-slate-400 hover:text-white transition cursor-pointer"
+              className="px-2.5 py-1 text-xs text-slate-400 hover:text-white transition cursor-pointer flex items-center gap-1"
+              title="Clear selection (Esc)"
             >
-              Clear
+              <span>Clear</span>
+              <kbd className="text-[9px] font-mono px-1 rounded bg-slate-800 text-slate-400 border border-slate-700">Esc</kbd>
             </button>
           </div>
         </div>
@@ -1622,9 +1714,10 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                 type="button"
                 onClick={() => setIsAcceptAllModalOpen(false)}
                 disabled={isBatchProcessing}
-                className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+                className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 transition cursor-pointer flex items-center gap-1.5"
               >
-                Cancel
+                <span>Cancel</span>
+                <kbd className="text-[9px] font-mono px-1 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-500">Esc</kbd>
               </button>
               <button
                 type="button"
@@ -1643,6 +1736,9 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                 <CheckCheck className="w-4 h-4" />
                 <FileSpreadsheet className="w-4 h-4" />
                 <span>Accept All & Export Excel</span>
+                <kbd className="hidden sm:inline-block text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-700/80 text-emerald-100 border border-emerald-500/50">
+                  Ctrl+Enter
+                </kbd>
               </button>
             </div>
           </div>

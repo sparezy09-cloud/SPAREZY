@@ -25,9 +25,10 @@ import {
   CarFront, LayoutDashboard, Layers, ShoppingBag, RotateCcw, 
   FileText, FileSpreadsheet, Users, Terminal, Shield, LogOut, Menu, X, CheckCircle,
   AlertTriangle, RefreshCw, Download, Receipt, ClipboardList, CalendarCheck, History,
-  Wrench
+  Wrench, Keyboard
 } from 'lucide-react';
 import { SupabasePermissionsFixModal } from './components/SupabasePermissionsFixModal';
+import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
 
 export default function App() {
   const [connectionStatus, setConnectionStatus] = useState<'checking' | 'connected' | 'failed'>('checking');
@@ -50,6 +51,7 @@ export default function App() {
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
   const [showInstallBtn, setShowInstallBtn] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isKeyboardModalOpen, setIsKeyboardModalOpen] = useState(false);
 
   useEffect(() => {
     const handleBeforeInstall = (e: Event) => {
@@ -396,6 +398,83 @@ export default function App() {
     });
   }, [activeUser?.role]);
 
+  // Global Keyboard Optimization & Shortcuts
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      const isInput = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+
+      // Open / Close Shortcuts modal via ? (Shift+/) or Ctrl+/
+      if ((e.key === '?' && !isInput) || (e.ctrlKey && e.key === '/')) {
+        e.preventDefault();
+        setIsKeyboardModalOpen(prev => !prev);
+        return;
+      }
+
+      // Close open modals or menus on Escape
+      if (e.key === 'Escape') {
+        if (isKeyboardModalOpen) {
+          setIsKeyboardModalOpen(false);
+          return;
+        }
+        if (isPermissionsFixModalOpen) {
+          setIsPermissionsFixModalOpen(false);
+          return;
+        }
+        if (isMobileMenuOpen) {
+          setIsMobileMenuOpen(false);
+          return;
+        }
+      }
+
+      // Quick Search Focus: '/' or Ctrl+K when not typing
+      if ((e.key === '/' && !isInput) || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k')) {
+        const searchInput = document.querySelector<HTMLInputElement>(
+          'input[type="text"][placeholder*="Search" i], input[type="search"], input[placeholder*="Filter" i], input[placeholder*="part" i]'
+        );
+        if (searchInput) {
+          e.preventDefault();
+          searchInput.focus();
+          searchInput.select();
+        }
+        return;
+      }
+
+      // Alt + B: Toggle Brand
+      if (e.altKey && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        if (activeUser && activeBrand) {
+          const nextBrand: Brand = activeBrand === 'Hyundai' ? 'Mahindra' : 'Hyundai';
+          handleBrandSelect(nextBrand, activeUser);
+        }
+        return;
+      }
+
+      // Shift + R or Alt + R: Silent Sync & Refresh
+      if ((e.shiftKey && e.key.toLowerCase() === 'r' && !isInput) || (e.altKey && e.key.toLowerCase() === 'r')) {
+        e.preventDefault();
+        handleGlobalRefresh();
+        return;
+      }
+
+      // Alt + Number (1...9): Switch active module
+      if (e.altKey && !e.ctrlKey && !e.metaKey) {
+        const num = parseInt(e.key, 10);
+        if (!isNaN(num) && num >= 1 && num <= visibleSidebarItems.length) {
+          e.preventDefault();
+          const targetModule = visibleSidebarItems[num - 1]?.name;
+          if (targetModule) {
+            setActiveModule(targetModule);
+          }
+          return;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [activeBrand, activeUser, isKeyboardModalOpen, isPermissionsFixModalOpen, isMobileMenuOpen, visibleSidebarItems]);
+
   const renderModuleContent = () => {
     if (!activeBrand || !activeUser) return null;
 
@@ -585,9 +664,10 @@ export default function App() {
 
         {/* Navigation list in slate-900 sidebar */}
         <nav className="flex-1 px-4 space-y-1 text-sm overflow-y-auto">
-          {visibleSidebarItems.map((item) => {
+          {visibleSidebarItems.map((item, index) => {
             const Icon = item.icon;
             const isSelected = activeModule === item.name;
+            const shortcutNum = index < 9 ? index + 1 : null;
 
             return (
               <button
@@ -595,14 +675,22 @@ export default function App() {
                 onClick={() => {
                   setActiveModule(item.name);
                 }}
-                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg border text-left transition-all cursor-pointer font-medium ${
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-lg border text-left transition-all cursor-pointer font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
                   isSelected 
-                    ? 'bg-indigo-600/20 text-indigo-450 text-indigo-400 border-indigo-600/30' 
+                    ? 'bg-indigo-600/20 text-indigo-400 border-indigo-600/30' 
                     : 'text-slate-400 border-transparent hover:bg-slate-800 hover:text-white'
                 }`}
+                title={shortcutNum ? `${item.name} (Alt+${shortcutNum})` : item.name}
               >
-                <Icon className={`w-4.5 h-4.5 ${isSelected ? 'text-indigo-400' : 'text-slate-400'}`} />
-                <span>{item.name}</span>
+                <div className="flex items-center gap-3 min-w-0">
+                  <Icon className={`w-4.5 h-4.5 shrink-0 ${isSelected ? 'text-indigo-400' : 'text-slate-400'}`} />
+                  <span className="truncate text-xs">{item.name}</span>
+                </div>
+                {shortcutNum && (
+                  <kbd className="hidden sm:inline-block text-[9px] font-mono px-1 py-0.5 rounded bg-slate-800/80 text-slate-500 border border-slate-700/50 shrink-0">
+                    Alt+{shortcutNum}
+                  </kbd>
+                )}
               </button>
             );
           })}
@@ -662,6 +750,7 @@ export default function App() {
                     handleBrandSelect('Hyundai', activeUser);
                   }
                 }}
+                title="Hyundai Business Unit (Alt+B)"
                 className={`px-4 sm:px-6 py-2 rounded-md font-semibold text-xs transition duration-150 ${
                   activeBrand === 'Hyundai'
                     ? 'bg-white text-slate-900 shadow-sm border border-slate-200/60'
@@ -676,6 +765,7 @@ export default function App() {
                     handleBrandSelect('Mahindra', activeUser);
                   }
                 }}
+                title="Mahindra Business Unit (Alt+B)"
                 className={`px-4 sm:px-6 py-2 rounded-md font-semibold text-xs transition duration-150 ${
                   activeBrand === 'Mahindra'
                     ? 'bg-white text-slate-900 shadow-sm border border-slate-200/60'
@@ -694,17 +784,28 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2.5 sm:gap-4">
             <div className="md:hidden">
               {renderRealtimeBadge()}
             </div>
             
+            {/* Keyboard Shortcuts Trigger Button */}
+            <button
+              onClick={() => setIsKeyboardModalOpen(true)}
+              title="Keyboard shortcuts (? or Ctrl+/)"
+              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs shadow-xs hover:border-slate-300 transition duration-150 cursor-pointer focus-visible:ring-2 focus-visible:ring-indigo-500 focus-visible:outline-none"
+            >
+              <Keyboard className="w-3.5 h-3.5 text-indigo-600" />
+              <span className="hidden xl:inline text-slate-600">Hotkeys</span>
+              <kbd className="hidden sm:inline-block text-[9px] font-mono px-1.5 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-500 font-bold">?</kbd>
+            </button>
+
             {/* Global Refresh Sync Button */}
             <button
               id="global-refresh-button"
               onClick={handleGlobalRefresh}
               disabled={isRefreshing}
-              title="Sync & refresh all databases"
+              title="Sync & refresh all databases (Shift+R)"
               className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-xs shadow-xs hover:border-slate-300 transition duration-150 cursor-pointer disabled:opacity-60 active:scale-95`}
             >
               <RefreshCw className={`w-3.5 h-3.5 text-indigo-600 ${isRefreshing ? 'animate-spin' : ''}`} />
@@ -820,6 +921,12 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Keyboard Shortcuts Modal */}
+      <KeyboardShortcutsModal 
+        isOpen={isKeyboardModalOpen} 
+        onClose={() => setIsKeyboardModalOpen(false)} 
+      />
 
     </div>
   );
