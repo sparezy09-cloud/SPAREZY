@@ -2208,7 +2208,7 @@ export const db = {
     const itemsToSave: SaleItem[] = [];
     
     for (const shopItem of items) {
-      const invIdx = inventory.findIndex(inv => inv.part_no === shopItem.part_no);
+      const invIdx = inventory.findIndex(inv => inv.part_no.trim().toLowerCase() === shopItem.part_no.trim().toLowerCase());
       if (invIdx === -1) {
         throw new Error(`Part number ${shopItem.part_no} not found in inventory.`);
       }

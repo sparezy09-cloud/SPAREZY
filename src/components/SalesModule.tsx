@@ -48,6 +48,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const [checkoutParts, setCheckoutParts] = useState<SelectedCheckoutPart[]>([]);
   const [partSearchInput, setPartSearchInput] = useState('');
   const [partSearch, setPartSearch] = useState('');
+  const [partSearchError, setPartSearchError] = useState<string | null>(null);
   const [globalDiscount, setGlobalDiscount] = useState<number>(0);
 
   // Staged part for quantity confirmation
@@ -278,7 +279,35 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
   // Start the stage & ask quantity process
   const handleInitiatePartAdd = (inv: InventoryItem) => {
-    setStagedPart(inv);
+    // 1. Get the latest inventory data for this item
+    const freshInv = inventoryList.find(i => i.id === inv.id || i.part_no.toLowerCase() === inv.part_no.toLowerCase()) || inv;
+    const totalStock = freshInv.quantity;
+
+    // 2. Check if part is out of stock (zero stock)
+    if (totalStock <= 0) {
+      const msg = `Part ${freshInv.part_no} (${freshInv.part_name}) is not in stock ( zero Stock ). Cannot add to bill.`;
+      setPartSearchError(msg);
+      triggerToast(`⚠️ Cannot add ${freshInv.part_no} ( zero Stock )!`);
+      return;
+    }
+
+    // 3. Check if all in-stock units are already in the current bill
+    const existingInBill = checkoutParts.find(
+      p => p.part_no.toLowerCase() === freshInv.part_no.toLowerCase()
+    );
+    const inBillQty = existingInBill ? existingInBill.qty_to_sell : 0;
+    const remainingStock = totalStock - inBillQty;
+
+    if (remainingStock <= 0) {
+      const msg = `Part ${freshInv.part_no} has zero Stock remaining. All ${totalStock} unit(s) are already added to this bill.`;
+      setPartSearchError(msg);
+      triggerToast(`⚠️ ${freshInv.part_no}: ( zero Stock ) remaining! All ${totalStock} units already in bill.`);
+      return;
+    }
+
+    // Stock available: clear error and open quantity prompt modal
+    setPartSearchError(null);
+    setStagedPart(freshInv);
     setStagedQty(1);
     setPartSearchInput('');
     setPartSearch('');
@@ -297,42 +326,74 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const handleConfirmStagedPart = () => {
     if (!stagedPart) return;
 
+    // Get fresh stock from inventory
+    const freshInv = inventoryList.find(i => i.id === stagedPart.id || i.part_no.toLowerCase() === stagedPart.part_no.toLowerCase()) || stagedPart;
+    const totalStock = freshInv.quantity;
+
+    if (totalStock <= 0) {
+      setPartSearchError(`Part ${freshInv.part_no} is out of stock ( zero Stock ).`);
+      triggerToast(`⚠️ Cannot add ${freshInv.part_no} ( zero Stock )!`);
+      handleCancelStagedPart();
+      return;
+    }
+
     const askingVal = Math.max(1, parseInt(String(stagedQty), 10) || 1);
 
     // Check if the part already exists in checkoutParts
     const existingIndex = checkoutParts.findIndex(
-      p => p.part_no.toLowerCase() === stagedPart.part_no.toLowerCase()
+      p => p.part_no.toLowerCase() === freshInv.part_no.toLowerCase()
     );
 
     if (existingIndex !== -1) {
       // If same part no. comes again, increase the quantity of that part no. with the asking value
       const existing = checkoutParts[existingIndex];
-      const newQty = existing.qty_to_sell + askingVal;
+      const remainingStock = Math.max(0, totalStock - existing.qty_to_sell);
+
+      if (remainingStock <= 0) {
+        setPartSearchError(`Part ${freshInv.part_no} has zero Stock remaining (all ${totalStock} units already in bill).`);
+        triggerToast(`⚠️ Cannot add ${freshInv.part_no} ( zero Stock ) remaining!`);
+        handleCancelStagedPart();
+        return;
+      }
+
+      // Add the requested quantity up to available remaining stock
+      const actualAdd = Math.min(askingVal, remainingStock);
+      const newQty = existing.qty_to_sell + actualAdd;
 
       setCheckoutParts(prev => prev.map((p, idx) => {
         if (idx === existingIndex) {
           return {
             ...p,
-            qty_to_sell: newQty
+            qty_to_sell: newQty,
+            available_qty: totalStock
           };
         }
         return p;
       }));
 
-      triggerToast(`✓ Increased ${stagedPart.part_no} quantity to ${newQty} (+${askingVal}) in bill`);
+      if (askingVal > remainingStock) {
+        triggerToast(`⚠️ Capped at available stock (+${actualAdd}). Total in bill: ${newQty} units.`);
+      } else {
+        triggerToast(`✓ Added +${actualAdd} to ${freshInv.part_no} in bill (Total in bill: ${newQty} units)`);
+      }
     } else {
-      // Add new part with the asking quantity
+      // Add new part with the asking quantity up to total stock
+      const actualQty = Math.min(askingVal, totalStock);
       const newItem: SelectedCheckoutPart = {
-        part_no: stagedPart.part_no,
-        part_name: stagedPart.part_name,
-        mrp: stagedPart.mrp,
-        available_qty: stagedPart.quantity,
-        qty_to_sell: askingVal,
+        part_no: freshInv.part_no,
+        part_name: freshInv.part_name,
+        mrp: freshInv.mrp,
+        available_qty: totalStock,
+        qty_to_sell: actualQty,
         discount_percentage: 0
       };
 
       setCheckoutParts(prev => [...prev, newItem]);
-      triggerToast(`✓ Added ${askingVal}x ${stagedPart.part_no} to bill`);
+      if (askingVal > totalStock) {
+        triggerToast(`⚠️ Capped at available stock (${actualQty}). Added to bill.`);
+      } else {
+        triggerToast(`✓ Added ${actualQty}x ${freshInv.part_no} to bill`);
+      }
     }
 
     setStagedPart(null);
@@ -340,6 +401,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     setPartSearchInput('');
     setPartSearch('');
     setHighlightedSearchIndex(0);
+    setPartSearchError(null);
 
     setTimeout(() => {
       partSearchInputRef.current?.focus();
@@ -351,14 +413,20 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   };
 
   const handleRemoveCheckoutPart = (partNo: string) => {
-    setCheckoutParts(checkoutParts.filter(p => p.part_no !== partNo));
+    setCheckoutParts(checkoutParts.filter(p => p.part_no.toLowerCase() !== partNo.toLowerCase()));
   };
 
   const handleUpdateCheckoutQty = (partNo: string, val: number) => {
+    const fresh = inventoryList.find(i => i.part_no.toLowerCase() === partNo.toLowerCase());
+    const realStock = fresh ? fresh.quantity : 1;
+
     setCheckoutParts(checkoutParts.map(p => {
-      if (p.part_no === partNo) {
-        const capped = Math.min(p.available_qty, Math.max(1, val));
-        return { ...p, qty_to_sell: capped };
+      if (p.part_no.toLowerCase() === partNo.toLowerCase()) {
+        const capped = Math.min(realStock, Math.max(1, val));
+        if (val > realStock) {
+          triggerToast(`⚠️ Max available stock for ${p.part_no} is ${realStock} units.`);
+        }
+        return { ...p, qty_to_sell: capped, available_qty: realStock };
       }
       return p;
     }));
@@ -855,6 +923,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                       setPartSearchInput(e.target.value);
                       setPartSearch(e.target.value);
                       setHighlightedSearchIndex(0);
+                      if (partSearchError) setPartSearchError(null);
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'ArrowDown') {
@@ -896,6 +965,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                         setPartSearchInput('');
                         setPartSearch('');
                         setHighlightedSearchIndex(0);
+                        setPartSearchError(null);
                       }
                     }}
                   />
@@ -905,6 +975,27 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                     </kbd>
                   </div>
                 </div>
+
+                {/* Explicit Out-Of-Stock (zero Stock) Error Notification Banner */}
+                {partSearchError && (
+                  <div className="mt-2 p-3 bg-rose-50 border-2 border-rose-300 text-rose-800 rounded-xl text-xs flex items-center justify-between shadow-xs animate-in fade-in slide-in-from-top-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-base leading-none">🚫</span>
+                      <div>
+                        <span className="font-extrabold uppercase tracking-wide text-rose-900 mr-1.5">[zero Stock Error]</span>
+                        <span className="font-semibold">{partSearchError}</span>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setPartSearchError(null)}
+                      className="text-rose-500 hover:text-rose-800 font-black text-base px-2 py-0.5 rounded hover:bg-rose-100 transition cursor-pointer"
+                      title="Dismiss error"
+                    >
+                      &times;
+                    </button>
+                  </div>
+                )}
 
                 {/* Autocomplete drawer */}
                 {matchedSearchParts.length > 0 && (
@@ -916,6 +1007,11 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                     {matchedSearchParts.map((item, idx) => {
                       const isHighlighted = idx === highlightedSearchIndex;
                       const alreadyInBill = checkoutParts.find(p => p.part_no.toLowerCase() === item.part_no.toLowerCase());
+                      const inBillQty = alreadyInBill ? alreadyInBill.qty_to_sell : 0;
+                      const remainingStock = Math.max(0, item.quantity - inBillQty);
+                      const isZeroStock = item.quantity <= 0;
+                      const isZeroRemaining = !isZeroStock && remainingStock <= 0;
+
                       return (
                         <button
                           key={item.id}
@@ -923,15 +1019,31 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                           onMouseEnter={() => setHighlightedSearchIndex(idx)}
                           onClick={() => handleInitiatePartAdd(item)}
                           className={`w-full p-2.5 text-left text-xs font-semibold flex items-center justify-between transition cursor-pointer ${
-                            isHighlighted ? 'bg-indigo-50/90 ring-1 ring-indigo-500 ring-inset' : 'hover:bg-slate-50'
+                            isZeroStock
+                              ? 'bg-rose-50/50 hover:bg-rose-100/60 border-l-4 border-l-rose-500'
+                              : isZeroRemaining
+                              ? 'bg-amber-50/50 hover:bg-amber-100/60 border-l-4 border-l-amber-500'
+                              : isHighlighted 
+                              ? 'bg-indigo-50/90 ring-1 ring-indigo-500 ring-inset' 
+                              : 'hover:bg-slate-50'
                           }`}
                         >
                           <div>
                             <div className="flex items-center gap-1.5 flex-wrap">
                               <span className="text-slate-900 font-mono font-bold">{item.part_no}</span>
-                              {alreadyInBill && (
+                              {isZeroStock && (
+                                <span className="px-2 py-0.5 bg-rose-600 text-white rounded text-[10px] font-black uppercase tracking-wider animate-pulse shadow-2xs">
+                                  ( zero Stock )
+                                </span>
+                              )}
+                              {isZeroRemaining && (
+                                <span className="px-2 py-0.5 bg-rose-500 text-white rounded text-[10px] font-bold shadow-2xs">
+                                  ( zero Stock remaining )
+                                </span>
+                              )}
+                              {alreadyInBill && !isZeroRemaining && (
                                 <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 rounded text-[9px] font-bold">
-                                  In Bill: {alreadyInBill.qty_to_sell} units
+                                  In Bill: {alreadyInBill.qty_to_sell} ({remainingStock} left)
                                 </span>
                               )}
                             </div>
@@ -939,8 +1051,14 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                           </div>
                           <div className="text-right">
                             <p className="text-indigo-600 font-bold">₹{item.mrp}</p>
-                            <p className={`text-[9px] ${item.quantity <= 3 ? 'text-red-500 font-bold' : 'text-slate-400'}`}>
-                              Stock: {item.quantity} units
+                            <p className={`text-[10px] font-bold ${
+                              isZeroStock || isZeroRemaining
+                                ? 'text-rose-600 font-black' 
+                                : item.quantity <= 3 
+                                ? 'text-amber-600' 
+                                : 'text-slate-400 font-normal'
+                            }`}>
+                              {isZeroStock ? '0 in stock' : isZeroRemaining ? '0 available' : `Stock: ${item.quantity}`}
                             </p>
                           </div>
                         </button>
@@ -952,14 +1070,19 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
               {/* Sold Quantity Prompt Modal */}
               {stagedPart && (() => {
+                const freshInv = inventoryList.find(i => i.id === stagedPart.id || i.part_no.toLowerCase() === stagedPart.part_no.toLowerCase()) || stagedPart;
+                const totalStock = freshInv.quantity;
                 const existingInBill = checkoutParts.find(
-                  p => p.part_no.toLowerCase() === stagedPart.part_no.toLowerCase()
+                  p => p.part_no.toLowerCase() === freshInv.part_no.toLowerCase()
                 );
+                const inBillQty = existingInBill ? existingInBill.qty_to_sell : 0;
+                const remainingStock = Math.max(0, totalStock - inBillQty);
                 const askingNum = Math.max(1, parseInt(String(stagedQty), 10) || 1);
-                const calculatedNextTotal = existingInBill ? existingInBill.qty_to_sell + askingNum : askingNum;
-                const lineTotal = stagedPart.mrp * askingNum;
-                const isOutOfStock = stagedPart.quantity <= 0;
-                const isOverStock = askingNum > stagedPart.quantity;
+                const calculatedNextTotal = inBillQty + askingNum;
+                const lineTotal = freshInv.mrp * askingNum;
+                const isOutOfStock = totalStock <= 0;
+                const isZeroRemaining = !isOutOfStock && remainingStock <= 0;
+                const isOverRemaining = askingNum > remainingStock;
 
                 return (
                   <div 
@@ -973,7 +1096,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                       {/* Modal Header */}
                       <div className="flex items-start justify-between pb-3 border-b border-slate-100">
                         <div className="flex items-center gap-3">
-                          <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-xl border border-indigo-100">
+                          <div className={`p-2.5 rounded-xl border ${isOutOfStock || isZeroRemaining ? 'bg-rose-50 text-rose-600 border-rose-100' : 'bg-indigo-50 text-indigo-600 border-indigo-100'}`}>
                             <ShoppingBag className="w-5 h-5" />
                           </div>
                           <div>
@@ -999,50 +1122,66 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                       <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-2.5">
                         <div className="flex items-center justify-between flex-wrap gap-2">
                           <span className="px-2.5 py-1 bg-indigo-600 text-white rounded-lg font-mono font-bold text-xs tracking-wide shadow-2xs">
-                            {stagedPart.part_no}
+                            {freshInv.part_no}
                           </span>
                           <span className="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2.5 py-0.5 rounded-full">
-                            MRP: ₹{stagedPart.mrp}
+                            MRP: ₹{freshInv.mrp}
                           </span>
                         </div>
                         
                         <div>
-                          <h4 className="font-bold text-sm text-slate-800 leading-snug">{stagedPart.part_name}</h4>
-                          {stagedPart.hsn && (
-                            <p className="text-[11px] text-slate-400 font-medium mt-0.5">HSN: {stagedPart.hsn}</p>
+                          <h4 className="font-bold text-sm text-slate-800 leading-snug">{freshInv.part_name}</h4>
+                          {freshInv.hsn && (
+                            <p className="text-[11px] text-slate-400 font-medium mt-0.5">HSN: {freshInv.hsn}</p>
                           )}
                         </div>
 
                         <div className="flex items-center justify-between pt-1.5 text-xs border-t border-slate-200/60">
-                          <span className="text-slate-500 font-medium">Available in Stock:</span>
+                          <span className="text-slate-500 font-medium">Total Inventory Stock:</span>
                           <span className={`font-bold font-mono px-2 py-0.5 rounded ${
                             isOutOfStock 
                               ? 'bg-rose-100 text-rose-700 border border-rose-200' 
-                              : stagedPart.quantity <= 3 
+                              : totalStock <= 3 
                               ? 'bg-amber-100 text-amber-800 border border-amber-200' 
                               : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
                           }`}>
-                            {stagedPart.quantity} units
+                            {totalStock} units
                           </span>
                         </div>
 
                         {existingInBill && (
-                          <div className="bg-amber-50 border border-amber-200 p-2.5 rounded-lg text-xs text-amber-900 flex items-center gap-2">
-                            <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
-                            <span>
-                              Already in bill: <strong>{existingInBill.qty_to_sell} units</strong>. Adding <strong>+{askingNum}</strong> will make it <strong>{calculatedNextTotal} units</strong>.
-                            </span>
+                          <div className="bg-amber-50 border border-amber-200 p-2.5 rounded-lg text-xs text-amber-900 space-y-1">
+                            <div className="flex items-center justify-between">
+                              <span className="font-semibold">Already in current bill:</span>
+                              <span className="font-mono font-bold">{existingInBill.qty_to_sell} units</span>
+                            </div>
+                            <div className="flex items-center justify-between text-indigo-900">
+                              <span className="font-semibold">Remaining available to add:</span>
+                              <span className="font-mono font-black text-indigo-700">{remainingStock} units</span>
+                            </div>
+                            <div className="text-[11px] text-slate-600 pt-1 border-t border-amber-200/60">
+                              Adding <strong>+{askingNum}</strong> will make total in bill: <strong>{calculatedNextTotal} units</strong>.
+                            </div>
                           </div>
                         )}
 
-                        {isOverStock && !isOutOfStock && (
-                          <div className="bg-amber-50 border border-amber-200 p-2 rounded-lg text-[11px] text-amber-800 font-semibold">
-                            ⚠️ Notice: Quantity entered ({askingNum}) exceeds in-stock quantity ({stagedPart.quantity}).
+                        {isOutOfStock && (
+                          <div className="bg-rose-50 border-2 border-rose-300 p-2.5 rounded-lg text-xs text-rose-800 font-bold flex items-center gap-2">
+                            <span>🚫</span>
+                            <span>Error: Part is not in stock ( zero Stock ). Cannot add to bill.</span>
                           </div>
                         )}
-                        {isOutOfStock && (
-                          <div className="bg-rose-50 border border-rose-200 p-2 rounded-lg text-[11px] text-rose-800 font-semibold">
-                            ⚠️ Warning: This part is currently out of stock (0 units).
+
+                        {isZeroRemaining && (
+                          <div className="bg-rose-50 border-2 border-rose-300 p-2.5 rounded-lg text-xs text-rose-800 font-bold flex items-center gap-2">
+                            <span>⚠️</span>
+                            <span>Error: ( zero Stock ) remaining! All {totalStock} unit(s) are already in the bill.</span>
+                          </div>
+                        )}
+
+                        {isOverRemaining && !isOutOfStock && !isZeroRemaining && (
+                          <div className="bg-rose-50 border border-rose-300 p-2 rounded-lg text-[11px] text-rose-800 font-semibold">
+                            ⚠️ Quantity ({askingNum}) exceeds remaining stock ({remainingStock} units). Maximum you can add is {remainingStock}.
                           </div>
                         )}
                       </div>
@@ -1060,14 +1199,17 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                             <label htmlFor="staged-modal-qty-input" className="block text-xs font-bold text-slate-700 uppercase tracking-wider">
                               Sold Quantity (Default: 1)
                             </label>
-                            <span className="text-[10px] text-slate-400">Press Enter to add to bill</span>
+                            <span className="text-[10px] text-slate-400">
+                              {remainingStock > 0 ? `Max available: ${remainingStock}` : 'No stock available'}
+                            </span>
                           </div>
                           
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
+                              disabled={isOutOfStock || isZeroRemaining}
                               onClick={() => setStagedQty(prev => Math.max(1, (parseInt(String(prev), 10) || 1) - 1))}
-                              className="w-12 h-12 flex items-center justify-center rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xl transition active:scale-95 cursor-pointer"
+                              className="w-12 h-12 flex items-center justify-center rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xl transition active:scale-95 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                               title="Decrease quantity by 1"
                             >
                               -
@@ -1079,7 +1221,9 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                                 ref={stagedQtyInputRef}
                                 type="number"
                                 min="1"
+                                max={remainingStock > 0 ? remainingStock : 1}
                                 step="1"
+                                disabled={isOutOfStock || isZeroRemaining}
                                 value={stagedQty}
                                 onChange={(e) => setStagedQty(e.target.value)}
                                 onKeyDown={(e) => {
@@ -1088,7 +1232,13 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                                     handleCancelStagedPart();
                                   }
                                 }}
-                                className="w-full h-12 border-2 border-indigo-500 rounded-xl text-center text-2xl font-black font-mono text-slate-900 focus:outline-none focus:ring-4 focus:ring-indigo-500/20 bg-indigo-50/20"
+                                className={`w-full h-12 border-2 rounded-xl text-center text-2xl font-black font-mono focus:outline-none focus:ring-4 ${
+                                  isOutOfStock || isZeroRemaining
+                                    ? 'border-rose-300 bg-rose-50 text-rose-700 cursor-not-allowed'
+                                    : isOverRemaining
+                                    ? 'border-rose-500 bg-rose-50/50 text-rose-900 focus:ring-rose-500/20'
+                                    : 'border-indigo-500 bg-indigo-50/20 text-slate-900 focus:ring-indigo-500/20'
+                                }`}
                                 placeholder="1"
                                 autoFocus
                               />
@@ -1096,8 +1246,9 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
                             <button
                               type="button"
-                              onClick={() => setStagedQty(prev => (parseInt(String(prev), 10) || 0) + 1)}
-                              className="w-12 h-12 flex items-center justify-center rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xl transition active:scale-95 cursor-pointer"
+                              disabled={isOutOfStock || isZeroRemaining || askingNum >= remainingStock}
+                              onClick={() => setStagedQty(prev => Math.min(remainingStock, (parseInt(String(prev), 10) || 0) + 1))}
+                              className="w-12 h-12 flex items-center justify-center rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-bold text-xl transition active:scale-95 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                               title="Increase quantity by 1"
                             >
                               +
@@ -1107,7 +1258,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                           {/* Quick Preset Buttons */}
                           <div className="flex items-center gap-1.5 mt-2.5 flex-wrap">
                             <span className="text-[10px] uppercase font-bold text-slate-400 mr-1">Presets:</span>
-                            {[1, 2, 3, 5, 10].map(n => (
+                            {[1, 2, 3, 5, 10].filter(n => n <= remainingStock).map(n => (
                               <button
                                 key={n}
                                 type="button"
@@ -1121,14 +1272,14 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                                 {n}
                               </button>
                             ))}
-                            {stagedPart.quantity > 0 && (
+                            {remainingStock > 0 && (
                               <button
                                 type="button"
-                                onClick={() => setStagedQty(stagedPart.quantity)}
+                                onClick={() => setStagedQty(remainingStock)}
                                 className="px-2.5 py-1 rounded-lg text-[11px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 hover:bg-indigo-100 transition cursor-pointer ml-auto"
-                                title="Set to all available stock"
+                                title="Set to all remaining available stock"
                               >
-                                All Stock ({stagedPart.quantity})
+                                All Stock ({remainingStock})
                               </button>
                             )}
                           </div>
@@ -1136,9 +1287,9 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
                         {/* Estimated Line Total Preview */}
                         <div className="bg-slate-50 p-3 rounded-xl border border-slate-200 flex items-center justify-between text-xs">
-                          <span className="text-slate-500 font-medium">Estimated Line Total:</span>
+                          <span className="text-slate-500 font-medium">Estimated Added Amount:</span>
                           <span className="font-mono font-black text-sm text-slate-900">
-                            {askingNum} × ₹{stagedPart.mrp} = <span className="text-indigo-600">₹{lineTotal.toLocaleString('en-IN')}</span>
+                            {askingNum} × ₹{freshInv.mrp} = <span className="text-indigo-600">₹{lineTotal.toLocaleString('en-IN')}</span>
                           </span>
                         </div>
 
@@ -1155,13 +1306,22 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
                           <button
                             type="submit"
-                            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold shadow-md hover:shadow-indigo-500/25 transition cursor-pointer flex items-center gap-2 active:scale-95"
+                            disabled={isOutOfStock || isZeroRemaining || remainingStock <= 0}
+                            className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white rounded-xl text-xs font-bold shadow-md hover:shadow-indigo-500/25 transition cursor-pointer flex items-center gap-2 active:scale-95"
                           >
                             <Plus className="w-4 h-4" />
-                            <span>{existingInBill ? 'Update & Add to Bill' : 'Add to Bill'}</span>
-                            <kbd className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-indigo-800 text-indigo-100 border border-indigo-500/60 font-bold">
-                              ↵ Enter
-                            </kbd>
+                            <span>
+                              {isOutOfStock || isZeroRemaining 
+                                ? '( zero Stock )' 
+                                : existingInBill 
+                                ? `Add to Bill (+${askingNum})` 
+                                : `Add to Bill (${askingNum})`}
+                            </span>
+                            {!isOutOfStock && !isZeroRemaining && (
+                              <kbd className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-indigo-800 text-indigo-100 border border-indigo-500/60 font-bold">
+                                ↵ Enter
+                              </kbd>
+                            )}
                           </button>
                         </div>
                       </form>
