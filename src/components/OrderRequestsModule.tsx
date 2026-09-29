@@ -10,6 +10,35 @@ import {
 } from 'lucide-react';
 import { exportOrderRequestsToExcel } from '../lib/exportOrderRequestsExcel';
 
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+function getAcceptedTimeInfo(req: OrderRequest) {
+  const isAcceptedStage = req.status === 'Accepted' || req.status === 'Ordered with Dealer' || req.status === 'Ordered' || req.status === 'Received';
+  if (!isAcceptedStage) return null;
+
+  const acceptedTimestamp = req.accepted_at 
+    ? new Date(req.accepted_at).getTime() 
+    : new Date(req.updated_at || req.created_at).getTime();
+
+  if (isNaN(acceptedTimestamp)) return null;
+
+  const now = Date.now();
+  const elapsedMs = now - acceptedTimestamp;
+  const remainingMs = ONE_DAY_MS - elapsedMs;
+
+  if (remainingMs <= 0) {
+    return { expired: true, text: 'Auto-clearing soon' };
+  }
+
+  const hours = Math.floor(remainingMs / (60 * 60 * 1000));
+  const mins = Math.floor((remainingMs % (60 * 60 * 1000)) / (60 * 1000));
+
+  if (hours > 0) {
+    return { expired: false, text: `Clears in ${hours}h ${mins}m` };
+  }
+  return { expired: false, text: `Clears in ${mins}m` };
+}
+
 interface OrderRequestsModuleProps {
   brand: Brand;
   user: User;
@@ -73,7 +102,15 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
 
   useEffect(() => {
     refreshData();
-    return db.subscribe(refreshData);
+    db.clearExpiredAcceptedOrderRequests();
+    const timer = setInterval(() => {
+      db.clearExpiredAcceptedOrderRequests();
+    }, 60000);
+    const unsub = db.subscribe(refreshData);
+    return () => {
+      clearInterval(timer);
+      unsub();
+    };
   }, [brand]);
 
   useEffect(() => {
@@ -285,6 +322,27 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
   };
 
   // Export handlers
+  const handleExportPending = (customRequests?: OrderRequest[]) => {
+    try {
+      const target = customRequests || pendingRequests;
+      if (!target || target.length === 0) {
+        alert("No pending order requests found to export.");
+        return;
+      }
+      const result = exportOrderRequestsToExcel({
+        brand,
+        requests: target,
+        inventoryList,
+        title: `${brand} Pending Requested Parts`,
+        filenameSuffix: 'Pending_Requested_Parts'
+      });
+      triggerToast(`✓ Exported ${result.totalParts} pending parts (${result.totalQty} units) to Excel: ${result.fileName}`);
+      setShowExportMenu(false);
+    } catch (err: any) {
+      alert(err.message || "Failed to export Excel file");
+    }
+  };
+
   const handleExportAccepted = (customRequests?: OrderRequest[]) => {
     try {
       const target = customRequests || acceptedRequests;
@@ -568,6 +626,10 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
         e.preventDefault();
         if (selectedIds.length > 0) {
           handleExportSelected();
+        } else if (statusFilter === 'Pending' && pendingRequests.length > 0) {
+          handleExportPending();
+        } else if (pendingRequests.length > 0) {
+          handleExportPending();
         } else if (acceptedRequests.length > 0) {
           handleExportAccepted();
         } else {
@@ -654,6 +716,19 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
         </div>
 
         <div className="flex items-center gap-2.5 flex-wrap">
+          {pendingRequests.length > 0 && (
+            <button
+              type="button"
+              onClick={() => handleExportPending()}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-xl text-xs font-black shadow-sm transition cursor-pointer shrink-0"
+              title="Export all pending requested parts to Excel (.xlsx)"
+            >
+              <FileSpreadsheet className="w-4 h-4 text-slate-950" />
+              <span>Export Pending ({pendingRequests.length})</span>
+              <Download className="w-3.5 h-3.5 text-slate-950" />
+            </button>
+          )}
+
           {isOwner && pendingRequests.length > 0 && (
             <button
               onClick={() => setIsAcceptAllModalOpen(true)}
@@ -686,6 +761,21 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                 <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100">
                   Excel Export Options (.xlsx)
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => handleExportPending()}
+                  disabled={stats.pending === 0}
+                  className="w-full px-3 py-2 text-left hover:bg-amber-50 hover:text-amber-950 transition flex items-center justify-between text-slate-800 disabled:opacity-40 disabled:pointer-events-none cursor-pointer border-b border-slate-100 bg-amber-50/50"
+                >
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-3.5 h-3.5 text-amber-600" />
+                    <span className="font-bold text-amber-950">Pending Requested Parts</span>
+                  </div>
+                  <span className="font-mono text-[11px] bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded-full font-bold">
+                    {stats.pending}
+                  </span>
+                </button>
 
                 <button
                   type="button"
@@ -828,16 +918,29 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
             <p className="text-2xl font-black text-amber-900 mt-1">{stats.pending}</p>
             <span className="text-[10px] text-amber-700">Awaiting owner review</span>
           </div>
-          {isOwner && stats.pending > 0 && (
-            <button
-              type="button"
-              onClick={() => setIsAcceptAllModalOpen(true)}
-              className="mt-3 inline-flex items-center gap-1 text-[11px] font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 px-2.5 py-1 rounded-lg transition cursor-pointer w-fit"
-            >
-              <CheckCheck className="w-3.5 h-3.5" />
-              <span>Accept All ({stats.pending})</span>
-            </button>
-          )}
+          <div className="flex items-center gap-1.5 mt-3 flex-wrap">
+            {isOwner && stats.pending > 0 && (
+              <button
+                type="button"
+                onClick={() => setIsAcceptAllModalOpen(true)}
+                className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 px-2.5 py-1 rounded-lg transition cursor-pointer"
+              >
+                <CheckCheck className="w-3.5 h-3.5" />
+                <span>Accept All ({stats.pending})</span>
+              </button>
+            )}
+            {stats.pending > 0 && (
+              <button
+                type="button"
+                onClick={() => handleExportPending()}
+                className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-900 bg-amber-300 hover:bg-amber-400 px-2.5 py-1 rounded-lg transition cursor-pointer"
+                title="Export pending requested parts to Excel (.xlsx)"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-slate-900" />
+                <span>Export Excel</span>
+              </button>
+            )}
+          </div>
         </div>
         <div className="bg-white p-4 rounded-2xl border border-blue-200 bg-blue-50/20 shadow-sm flex flex-col justify-between">
           <div>
@@ -845,7 +948,10 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
               <PackageCheck className="w-3.5 h-3.5" /> Accepted / Ordered
             </span>
             <p className="text-2xl font-black text-blue-900 mt-1">{stats.accepted}</p>
-            <span className="text-[10px] text-blue-700">In order pipeline</span>
+            <div className="flex items-center gap-1 text-[10px] text-blue-700 font-medium mt-0.5">
+              <Clock className="w-3 h-3 text-blue-500 shrink-0" />
+              <span>Clears after 1 day (24h)</span>
+            </div>
           </div>
           {stats.accepted > 0 && (
             <button
@@ -1129,15 +1235,15 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
             </kbd>
           </div>
 
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap items-center">
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
               className="px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 bg-white outline-none focus:ring-2 focus:ring-indigo-500"
             >
               <option value="All">All Statuses</option>
-              <option value="Pending">Pending Only</option>
-              <option value="Accepted">Accepted</option>
+              <option value="Pending">Pending Only ({stats.pending})</option>
+              <option value="Accepted">Accepted ({stats.accepted})</option>
               <option value="Ordered with Dealer">Ordered with Dealer</option>
               <option value="Received">Received</option>
               <option value="Rejected">Rejected</option>
@@ -1154,6 +1260,24 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
               <option value="Medium">Medium</option>
               <option value="Low">Low</option>
             </select>
+
+            {statusFilter === 'Pending' && pendingRequests.length > 0 && (
+              <button
+                type="button"
+                onClick={() => handleExportPending()}
+                className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer flex items-center gap-1.5 shadow-sm"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-slate-950" />
+                <span>Export Pending to Excel ({pendingRequests.length})</span>
+              </button>
+            )}
+
+            {statusFilter === 'Accepted' && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-xl text-[11px] text-blue-800 font-medium">
+                <Clock className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                <span>Accepted parts history is automatically cleared after 1 day (24 hours).</span>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1253,6 +1377,21 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                     <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold border ${statusColors[req.status]}`}>
                       {req.status}
                     </span>
+                    {(() => {
+                      const timeInfo = getAcceptedTimeInfo(req);
+                      if (!timeInfo) return null;
+                      return (
+                        <div className="mt-1">
+                          <span 
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium bg-blue-50 text-blue-700 border border-blue-200"
+                            title="Accepted part history clears automatically after 1 day (24 hours)"
+                          >
+                            <Clock className="w-2.5 h-2.5" />
+                            {timeInfo.text}
+                          </span>
+                        </div>
+                      );
+                    })()}
                   </td>
 
                   <td className="p-3.5 text-right pr-4 align-top">
@@ -1260,6 +1399,14 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                       <div className="flex items-center justify-end gap-1.5 flex-wrap">
                         {req.status === 'Pending' && (
                           <>
+                            <button
+                              type="button"
+                              onClick={() => handleExportPending([req])}
+                              className="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                              title="Export this pending part to Excel"
+                            >
+                              <FileSpreadsheet className="w-3 h-3 text-amber-700" /> Excel
+                            </button>
                             <button
                               onClick={() => handleStatusChange(req.id, 'Accepted')}
                               className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
@@ -1308,9 +1455,19 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                     ) : (
                       <div className="text-right">
                         {req.status === 'Pending' ? (
-                          <span className="text-[10px] text-amber-600 font-semibold flex items-center justify-end gap-1">
-                            <Clock className="w-3 h-3" /> Awaiting Owner
-                          </span>
+                          <div className="flex items-center justify-end gap-1.5">
+                            <span className="text-[10px] text-amber-600 font-semibold flex items-center gap-1">
+                              <Clock className="w-3 h-3" /> Awaiting Owner
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleExportPending([req])}
+                              className="px-2 py-0.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                              title="Export this pending part to Excel"
+                            >
+                              <FileSpreadsheet className="w-3 h-3 text-amber-700" /> Excel
+                            </button>
+                          </div>
                         ) : req.status === 'Accepted' || req.status === 'Ordered with Dealer' ? (
                           <div className="flex items-center justify-end gap-1.5">
                             <span className="text-[10px] text-emerald-600 font-semibold flex items-center gap-1">
@@ -1355,6 +1512,20 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
           </div>
           <div className="h-4 w-px bg-slate-700 shrink-0" />
           <div className="flex items-center gap-2 flex-wrap">
+            {requests.some(r => selectedIds.includes(r.id) && r.status === 'Pending') && (
+              <button
+                type="button"
+                onClick={() => {
+                  const selectedPending = requests.filter(r => selectedIds.includes(r.id) && r.status === 'Pending');
+                  handleExportPending(selectedPending);
+                }}
+                className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
+                title="Export selected pending parts to Excel"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-slate-950" />
+                <span>Export Pending ({requests.filter(r => selectedIds.includes(r.id) && r.status === 'Pending').length})</span>
+              </button>
+            )}
             {isOwner && requests.some(r => selectedIds.includes(r.id) && r.status === 'Pending') && (
               <button
                 type="button"

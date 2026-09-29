@@ -256,6 +256,29 @@ const scrubRow = (row: any) => {
   return r;
 };
 
+// Auto-clears accepted order requests older than 1 day (24 hours = 86,400,000 ms)
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+export function filterOutExpiredAcceptedOrders(orders: OrderRequest[]): { validOrders: OrderRequest[]; expiredIds: string[] } {
+  const now = Date.now();
+  const validOrders: OrderRequest[] = [];
+  const expiredIds: string[] = [];
+
+  for (const req of orders) {
+    const isAcceptedStage = req.status === 'Accepted' || req.status === 'Ordered with Dealer' || req.status === 'Ordered' || req.status === 'Received';
+    if (isAcceptedStage) {
+      const acceptedTime = new Date(req.accepted_at || req.updated_at || req.created_at).getTime();
+      if (!isNaN(acceptedTime) && (now - acceptedTime) >= ONE_DAY_MS) {
+        expiredIds.push(req.id);
+        continue;
+      }
+    }
+    validOrders.push(req);
+  }
+
+  return { validOrders, expiredIds };
+}
+
 // Handle incoming realtime signals to propagate changes instantly across browser ports
 function handleRealtimePayload(schema: string, payload: any) {
   isSilentUpdating = true;
@@ -455,7 +478,12 @@ export const db = {
         }
         const localOrders = localStorage.getItem(KEY_ORDER_REQUESTS);
         if (localOrders && cache.order_requests.length === 0) {
-          cache.order_requests = JSON.parse(localOrders).map(scrubRow);
+          const parsed = JSON.parse(localOrders).map(scrubRow) as OrderRequest[];
+          const { validOrders, expiredIds } = filterOutExpiredAcceptedOrders(parsed);
+          cache.order_requests = validOrders;
+          if (expiredIds.length > 0) {
+            localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(validOrders));
+          }
         }
         const localAtt = localStorage.getItem(KEY_ATTENDANCE);
         if (localAtt && cache.staff_attendance.length === 0) {
@@ -531,8 +559,14 @@ export const db = {
           idbStore.set('cache_partitions', 'public_ledger', cache.customer_ledger);
         }
         if (ordersRes.data && ordersRes.data.length > 0) {
-          cache.order_requests = ordersRes.data.map(scrubRow) as OrderRequest[];
+          const parsed = ordersRes.data.map(scrubRow) as OrderRequest[];
+          const { validOrders, expiredIds } = filterOutExpiredAcceptedOrders(parsed);
+          cache.order_requests = validOrders;
           idbStore.set('cache_partitions', 'public_orders', cache.order_requests);
+          localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(cache.order_requests));
+          if (expiredIds.length > 0 && supabase) {
+            supabase.from('order_requests').delete().in('id', expiredIds).then();
+          }
         }
         if (attRes.data && attRes.data.length > 0) {
           cache.staff_attendance = attRes.data.map(scrubRow) as StaffAttendance[];
@@ -1666,11 +1700,44 @@ export const db = {
   },
 
   // Order Requests (Manager creates, Owner accepts without changing inventory)
+  // Accepted part history is automatically cleared after 1 day (24 hours)
   getOrderRequests: (brand?: Brand): OrderRequest[] => {
+    const { validOrders, expiredIds } = filterOutExpiredAcceptedOrders(cache.order_requests);
+    if (expiredIds.length > 0) {
+      cache.order_requests = validOrders;
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(validOrders));
+        idbStore.set('cache_partitions', 'public_orders', validOrders);
+      }
+      if (isSupabaseConfigured && supabase) {
+        supabase.from('order_requests').delete().in('id', expiredIds).then();
+      }
+    }
     if (brand) {
       return cache.order_requests.filter(r => r.brand === brand);
     }
     return cache.order_requests;
+  },
+
+  clearExpiredAcceptedOrderRequests: async (): Promise<number> => {
+    const { validOrders, expiredIds } = filterOutExpiredAcceptedOrders(cache.order_requests);
+    if (expiredIds.length > 0) {
+      cache.order_requests = validOrders;
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(validOrders));
+        idbStore.set('cache_partitions', 'public_orders', validOrders);
+      }
+      if (isSupabaseConfigured && supabase) {
+        try {
+          await supabase.from('order_requests').delete().in('id', expiredIds);
+        } catch (err) {
+          console.warn("[Auto-Clear Orders] Error deleting expired accepted orders from Supabase:", err);
+        }
+      }
+      console.log(`[Auto-Clear Orders] Cleared ${expiredIds.length} accepted order request(s) older than 1 day from history.`);
+      db.notify();
+    }
+    return expiredIds.length;
   },
 
   createOrderRequest: async (
@@ -1712,10 +1779,14 @@ export const db = {
     if (!req) throw new Error("Order request not found");
 
     const oldStatus = req.status;
+    const nowIso = new Date().toISOString();
     req.status = status;
     req.accepted_by = user.name;
+    if (status === 'Accepted' && !req.accepted_at) {
+      req.accepted_at = nowIso;
+    }
     req.action_notes = actionNotes || (status === 'Accepted' ? 'Approved by Owner' : (status === 'Ordered' ? 'Placed with Dealer' : 'Rejected by Owner'));
-    req.updated_at = new Date().toISOString();
+    req.updated_at = nowIso;
 
     if (isSupabaseConfigured && supabase) {
       await supabase.from('order_requests').update({
@@ -1746,6 +1817,9 @@ export const db = {
       if (ids.includes(req.id)) {
         req.status = status;
         req.accepted_by = user.name;
+        if (status === 'Accepted' && !req.accepted_at) {
+          req.accepted_at = now;
+        }
         req.action_notes = actionNotes || (status === 'Accepted' ? 'Approved in Bulk by Owner' : `Bulk status updated to ${status}`);
         req.updated_at = now;
         updatedReqs.push(req);

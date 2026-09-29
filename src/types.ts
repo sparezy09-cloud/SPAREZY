@@ -177,6 +177,7 @@ export interface OrderRequest {
   manager_id?: string;
   status: 'Pending' | 'Accepted' | 'Rejected' | 'Ordered' | 'Ordered with Dealer' | 'Received';
   accepted_by?: string;
+  accepted_at?: string;
   reviewed_by?: string;
   action_notes?: string;
   created_at: string;
