@@ -912,7 +912,7 @@ export default function SettingsModule({ brand, user }: SettingsModuleProps) {
                 <div className="mt-2 text-[11px] bg-slate-50 p-2.5 rounded-xl border border-slate-200 space-y-1">
                   {formRole === 'Manager' && (
                     <p className="text-amber-800 font-medium">
-                      🔒 <strong>Manager Scope:</strong> Restricted view. <strong>Sales POS & Daily Reconcile</strong>, <strong>Inventory</strong> (in read-only mode), and <strong>Order Requests</strong> tabs are visible.
+                      🔒 <strong>Manager Scope:</strong> Restricted view. <strong>Sales</strong> (simple billing console), <strong>Returns &amp; Restock</strong>, <strong>Inventory</strong> (read-only mode), and <strong>Order Requests</strong> tabs are visible.
                     </p>
                   )}
                   {formRole === 'Admin' && (

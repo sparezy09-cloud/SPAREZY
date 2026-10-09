@@ -333,7 +333,7 @@ export default function App() {
   // Enforce Manager role navigation restrictions
   useEffect(() => {
     if (activeUser?.role === 'Manager') {
-      const allowedModules = ['Sales', 'Sale POS', 'Inventory', 'Order Requests'];
+      const allowedModules = ['Sales', 'Sale POS', 'Returns', 'Inventory', 'Order Requests'];
       if (!allowedModules.includes(activeModule)) {
         setActiveModule('Sales');
       }
@@ -375,7 +375,7 @@ export default function App() {
     { name: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['Owner', 'Admin'] },
     { name: 'Inventory', icon: Layers, allowedRoles: ['Owner', 'Admin', 'Manager'] },
     { name: 'Sales', icon: ShoppingBag, allowedRoles: ['Owner', 'Admin', 'Manager'] },
-    { name: 'Returns', icon: RotateCcw, allowedRoles: ['Owner', 'Admin'] },
+    { name: 'Returns', icon: RotateCcw, allowedRoles: ['Owner', 'Admin', 'Manager'] },
     { name: 'Purchases', icon: FileText, allowedRoles: ['Owner', 'Admin'] },
     { name: 'Order Requests', icon: ClipboardList, allowedRoles: ['Owner', 'Admin', 'Manager'] },
     { name: 'Bulk Updates', icon: FileSpreadsheet, ownerOnly: true, allowedRoles: ['Owner', 'Admin'] },
@@ -386,11 +386,16 @@ export default function App() {
     { name: 'Settings / User Management', icon: Shield, allowedRoles: ['Owner', 'Admin'] },
   ];
 
-  // In Manager role only Inventory, Sales, and Order Requests tabs are visible; hide all other tabs.
+  // In Manager role Inventory, Sales, Returns, and Order Requests tabs are visible; hide all other tabs.
   const visibleSidebarItems = useMemo(() => {
     if (!activeUser) return [];
     if (activeUser.role === 'Manager') {
-      return sidebarItems.filter(item => item.name === 'Inventory' || item.name === 'Sales' || item.name === 'Order Requests');
+      return sidebarItems.filter(item => 
+        item.name === 'Inventory' || 
+        item.name === 'Sales' || 
+        item.name === 'Returns' || 
+        item.name === 'Order Requests'
+      );
     }
     return sidebarItems.filter(item => {
       if (item.ownerOnly && !isOwnerOrAdmin(activeUser.role)) return false;
@@ -479,13 +484,16 @@ export default function App() {
   const renderModuleContent = () => {
     if (!activeBrand || !activeUser) return null;
 
-    // Manager role permissions: Inventory (read-only), Sales, and Order Requests
+    // Manager role permissions: Sales, Returns, Inventory (read-only), and Order Requests
     if (activeUser.role === 'Manager') {
       if (activeModule === 'Order Requests') {
         return <OrderRequestsModule brand={activeBrand} user={activeUser} />;
       }
-      if (activeModule === 'Sales') {
+      if (activeModule === 'Sales' || activeModule === 'Sale POS') {
         return <SalesModule brand={activeBrand} user={activeUser} />;
+      }
+      if (activeModule === 'Returns') {
+        return <ReturnModule brand={activeBrand} user={activeUser} />;
       }
       return <InventoryModule brand={activeBrand} user={activeUser} readOnly={true} />;
     }

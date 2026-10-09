@@ -28,6 +28,13 @@ export type CheckoutPaymentType = 'UPI' | 'Cash' | 'Payment Pending' | 'Half Pay
 
 export default function SalesModule({ brand, user }: SalesModuleProps) {
   const [activeTab, setActiveTab] = useState<'checkout' | 'history' | 'reconcile'>('checkout');
+
+  // Prevent non-owners/admins from accessing the reconcile tab
+  useEffect(() => {
+    if (!isOwnerOrAdmin(user.role) && activeTab === 'reconcile') {
+      setActiveTab('checkout');
+    }
+  }, [user.role, activeTab]);
   
   // Checkout Wizards
   const [customerCategory, setCustomerCategory] = useState<CustomerCategory>('Walk-in');
@@ -1074,66 +1081,39 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
           <Calendar className="w-4 h-4" />
           Sales Invoice history ({salesList.length} Invoices)
         </button>
-        <button
-          onClick={() => {
-            setActiveTab('reconcile');
-            refreshComponentData();
-          }}
-          className={`px-5 py-3 text-xs font-bold border-b-2 transition flex items-center gap-2 whitespace-nowrap cursor-pointer ${
-            activeTab === 'reconcile'
-              ? 'border-emerald-600 text-emerald-700 font-extrabold'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <DollarSign className="w-4 h-4 text-emerald-600" />
-          Daily Reconcile &amp; Cash Handover
-          {todayHandover ? (
-            <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold ${
-              todayHandover.status === 'Matched'
-                ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                : todayHandover.status === 'Shortage'
-                ? 'bg-rose-100 text-rose-800 border border-rose-300'
-                : 'bg-amber-100 text-amber-800 border border-amber-300'
-            }`}>
-              {todayHandover.status === 'Matched' ? 'Closed: Matched' : `Closed: ${todayHandover.status}`}
-            </span>
-          ) : (
-            <span className="px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
-              Pending Today
-            </span>
-          )}
-        </button>
-      </div>
-
-      {/* Manager Session Banner */}
-      {user.role === 'Manager' && activeTab === 'checkout' && (
-        <div className="bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-250 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-amber-500 text-white flex items-center justify-center font-bold text-sm shadow-xs shrink-0">
-              M
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-slate-900 text-xs">Manager Billing Mode: {user.name}</span>
-                <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 text-[10px] font-bold border border-amber-300">
-                  Audit Stamped
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-600 mt-0.5">
-                Every bill is audit-stamped with your name &amp; timestamp. Cash collected must be handed over via Daily Reconcile at shop closing.
-              </p>
-            </div>
-          </div>
+        {/* Daily Reconcile & Cash Handover - Restricted to Owner & Admin only */}
+        {isOwnerOrAdmin(user.role) && (
           <button
-            type="button"
-            onClick={() => setActiveTab('reconcile')}
-            className="self-start sm:self-auto px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold cursor-pointer transition flex items-center gap-1.5 shadow-xs shrink-0"
+            onClick={() => {
+              setActiveTab('reconcile');
+              refreshComponentData();
+            }}
+            className={`px-5 py-3 text-xs font-bold border-b-2 transition flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+              activeTab === 'reconcile'
+                ? 'border-emerald-600 text-emerald-700 font-extrabold'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
           >
-            <DollarSign className="w-3.5 h-3.5" />
-            End-of-Day Handover
+            <DollarSign className="w-4 h-4 text-emerald-600" />
+            Daily Reconcile &amp; Cash Handover
+            {todayHandover ? (
+              <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold ${
+                todayHandover.status === 'Matched'
+                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                  : todayHandover.status === 'Shortage'
+                  ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                  : 'bg-amber-100 text-amber-800 border border-amber-300'
+              }`}>
+                {todayHandover.status === 'Matched' ? 'Closed: Matched' : `Closed: ${todayHandover.status}`}
+              </span>
+            ) : (
+              <span className="px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+                Pending Today
+              </span>
+            )}
           </button>
-        </div>
-      )}
+        )}
+      </div>
 
       {activeTab === 'checkout' ? (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -2208,7 +2188,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
           </div>
 
         </div>
-      ) : (
+      ) : activeTab === 'reconcile' && isOwnerOrAdmin(user.role) ? (
         /* DAILY RECONCILE & CASH HANDOVER TAB */
         <div className="space-y-6 animate-fade-in">
           {/* Top Bar: Date Selector & Header */}
@@ -2774,7 +2754,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
             </div>
           </div>
         </div>
-      )}
+      ) : null}
 
       {/* PRINT SLIP SLIDER MODAL (With direct print function) */}
       {selectedInvoiceForSlip !== null && (
