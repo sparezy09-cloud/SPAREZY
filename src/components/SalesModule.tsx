@@ -1,10 +1,11 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Brand, User, CustomerCategory, PaymentStatus, InventoryItem, Customer, Sale, SaleItem } from '../types';
+import { Brand, User, CustomerCategory, PaymentStatus, InventoryItem, Customer, Sale, SaleItem, DailyCashHandover, isOwnerOrAdmin } from '../types';
 import { db } from '../dbStore';
 import { 
   ShoppingBag, Search, PlusCircle, Check, Trash2, Printer, 
-  ChevronRight, Calendar, UserCheck, CreditCard, Eye, X, Plus,
-  Share2, MessageSquare, RotateCcw
+  ChevronRight, ChevronDown, Calendar, UserCheck, CreditCard, Eye, X, Plus,
+  Share2, MessageSquare, RotateCcw, Package, DollarSign, AlertCircle, AlertTriangle,
+  Calculator, Send, Copy, ShieldAlert, Sparkles, PhoneCall
 } from 'lucide-react';
 
 interface SalesModuleProps {
@@ -26,7 +27,7 @@ interface SelectedCheckoutPart {
 export type CheckoutPaymentType = 'UPI' | 'Cash' | 'Payment Pending' | 'Half Payment' | 'Custom Payment';
 
 export default function SalesModule({ brand, user }: SalesModuleProps) {
-  const [activeTab, setActiveTab] = useState<'checkout' | 'history'>('checkout');
+  const [activeTab, setActiveTab] = useState<'checkout' | 'history' | 'reconcile'>('checkout');
   
   // Checkout Wizards
   const [customerCategory, setCustomerCategory] = useState<CustomerCategory>('Walk-in');
@@ -188,7 +189,28 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
   const [inventoryList, setInventoryList] = useState<InventoryItem[]>(() => db.getInventory(brand));
   const [customersList, setCustomersList] = useState<Customer[]>(() => db.getCustomers());
   const [salesList, setSalesList] = useState<Sale[]>(() => db.getSales(brand));
+  const [allSaleItems, setAllSaleItems] = useState<SaleItem[]>(() => db.getSaleItems(brand));
+  const [expandedInvoiceIds, setExpandedInvoiceIds] = useState<Record<string, boolean>>({});
   const [toastMessageLocal, setToastMessageLocal] = useState<string | null>(null);
+
+  // Group line items by sale_id for quick O(1) lookup in history table and search
+  const saleItemsBySaleId = useMemo(() => {
+    const map: Record<string, SaleItem[]> = {};
+    for (const item of allSaleItems) {
+      if (!map[item.sale_id]) {
+        map[item.sale_id] = [];
+      }
+      map[item.sale_id].push(item);
+    }
+    return map;
+  }, [allSaleItems]);
+
+  const toggleInvoiceExpand = (invoiceId: string) => {
+    setExpandedInvoiceIds(prev => ({
+      ...prev,
+      [invoiceId]: !prev[invoiceId]
+    }));
+  };
 
   // Undo confirmation states
   const [undoConfirmSale, setUndoConfirmSale] = useState<Sale | null>(null);
@@ -202,6 +224,10 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
   const handleUndoSale = async () => {
     if (!undoConfirmSale) return;
+    if (!isOwnerOrAdmin(user.role)) {
+      setUndoError("Only the Owner or Admin is authorized to undo sales. This protection prevents unauthorized inventory manipulation.");
+      return;
+    }
     setIsUndoing(true);
     setUndoError(null);
     try {
@@ -216,10 +242,289 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     }
   };
 
+  const [dailyHandoversList, setDailyHandoversList] = useState<DailyCashHandover[]>(() => db.getDailyHandovers(brand));
+  const [selectedReconcileDate, setSelectedReconcileDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
+  const [actualHandoverCash, setActualHandoverCash] = useState<string>('');
+  const [handoverNotes, setHandoverNotes] = useState<string>('');
+  const [ownerPhone, setOwnerPhone] = useState<string>(() => db.getOwnerPhone());
+  const [isEditingOwnerPhone, setIsEditingOwnerPhone] = useState<boolean>(false);
+  const [showDenominationHelper, setShowDenominationHelper] = useState<boolean>(false);
+  const [denominations, setDenominations] = useState<Record<number, number>>({
+    500: 0,
+    200: 0,
+    100: 0,
+    50: 0,
+    20: 0,
+    10: 0
+  });
+  const [isSubmittingHandover, setIsSubmittingHandover] = useState<boolean>(false);
+
   const refreshComponentData = () => {
     setInventoryList(db.getInventory(brand));
     setCustomersList(db.getCustomers());
     setSalesList(db.getSales(brand));
+    setAllSaleItems(db.getSaleItems(brand));
+    setDailyHandoversList(db.getDailyHandovers(brand));
+  };
+
+  // Reconcile computations for selectedReconcileDate
+  const daySalesForReconcile = useMemo(() => {
+    return salesList.filter(s => {
+      const sDate = s.sale_date ? s.sale_date.split('T')[0] : '';
+      return sDate === selectedReconcileDate;
+    });
+  }, [salesList, selectedReconcileDate]);
+
+  const reconcileSummary = useMemo(() => {
+    const totalSalesValue = daySalesForReconcile.reduce((sum, s) => sum + s.total_amount, 0);
+    const totalInvoicesCount = daySalesForReconcile.length;
+    
+    let expectedCash = 0;
+    let upiTotal = 0;
+    let pendingCreditTotal = 0;
+
+    daySalesForReconcile.forEach(s => {
+      if (s.payment_type === 'Cash') {
+        expectedCash += (s.paid_amount || s.total_amount);
+      } else if (s.payment_type === 'UPI') {
+        upiTotal += (s.paid_amount || s.total_amount);
+      } else if (s.payment_type === 'Payment Pending') {
+        pendingCreditTotal += (s.pending_amount || s.total_amount);
+      } else {
+        expectedCash += (s.paid_amount || 0);
+        pendingCreditTotal += (s.pending_amount || 0);
+      }
+    });
+
+    const dayItems = daySalesForReconcile.flatMap(s => 
+      (saleItemsBySaleId[s.id] || []).map(item => ({ 
+        ...item, 
+        invoice_no: s.invoice_no, 
+        customer_name: s.customer_name 
+      }))
+    );
+    const totalItemsSold = dayItems.reduce((sum, item) => sum + item.quantity, 0);
+
+    const partMap = new Map<string, {
+      part_no: string;
+      part_name: string;
+      quantity: number;
+      mrp: number;
+      final_amount: number;
+      remaining_stock?: number;
+      invoice_no?: string;
+      customer_name?: string;
+    }>();
+    
+    dayItems.forEach(item => {
+      const existing = partMap.get(item.part_no);
+      const invMatch = inventoryList.find(i => i.part_no.toLowerCase().trim() === item.part_no.toLowerCase().trim());
+      const remainingStock = invMatch ? invMatch.quantity : 0;
+      
+      if (existing) {
+        existing.quantity += item.quantity;
+        existing.final_amount += item.final_amount;
+      } else {
+        partMap.set(item.part_no, {
+          part_no: item.part_no,
+          part_name: item.part_name,
+          quantity: item.quantity,
+          mrp: item.mrp,
+          final_amount: item.final_amount,
+          remaining_stock: remainingStock,
+          invoice_no: item.invoice_no,
+          customer_name: item.customer_name
+        });
+      }
+    });
+
+    const highValueParts = Array.from(partMap.values()).sort((a, b) => (b.final_amount || b.mrp) - (a.final_amount || a.mrp));
+
+    return {
+      totalSalesValue,
+      totalInvoicesCount,
+      expectedCash,
+      upiTotal,
+      pendingCreditTotal,
+      totalItemsSold,
+      highValueParts
+    };
+  }, [daySalesForReconcile, saleItemsBySaleId, inventoryList]);
+
+  const existingHandoverForDate = useMemo(() => {
+    return dailyHandoversList.find(h => h.brand.toLowerCase() === brand.toLowerCase() && h.date === selectedReconcileDate);
+  }, [dailyHandoversList, brand, selectedReconcileDate]);
+
+  const todayDateStr = useMemo(() => new Date().toISOString().split('T')[0], []);
+  const todayHandover = useMemo(() => {
+    return dailyHandoversList.find(h => h.brand.toLowerCase() === brand.toLowerCase() && h.date === todayDateStr);
+  }, [dailyHandoversList, brand, todayDateStr]);
+
+  const numericActualCash = parseFloat(actualHandoverCash) || 0;
+  const cashDiscrepancy = numericActualCash - reconcileSummary.expectedCash;
+
+  const totalDenominationCash = useMemo(() => {
+    return Object.entries(denominations).reduce((sum, [note, count]) => {
+      return sum + (Number(note) * (Number(count) || 0));
+    }, 0);
+  }, [denominations]);
+
+  const applyDenominations = () => {
+    setActualHandoverCash(totalDenominationCash.toString());
+  };
+
+  const generateDailySummaryText = () => {
+    const dateFormatted = new Date(selectedReconcileDate + 'T00:00:00').toLocaleDateString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric'
+    });
+    const nowTime = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    const handover = existingHandoverForDate;
+    const finalActual = handover ? handover.actual_cash : numericActualCash;
+    const finalExpected = handover ? handover.expected_cash : reconcileSummary.expectedCash;
+    const finalDiff = handover ? handover.discrepancy : cashDiscrepancy;
+    const finalNotes = handover ? handover.notes : handoverNotes;
+
+    let msg = `📊 *DAILY SHOP CLOSING REPORT - ${brand.toUpperCase()} SPARES*\n`;
+    msg += `📅 *Date:* ${dateFormatted}\n`;
+    msg += `👤 *Submitted By:* ${user.role} ${user.name}\n`;
+    msg += `🕒 *Time:* ${nowTime}\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `💰 *SALES & REVENUE SUMMARY*\n`;
+    msg += `• Total Sales Value: *₹${reconcileSummary.totalSalesValue.toLocaleString('en-IN')}*\n`;
+    msg += `• Total Invoices: *${reconcileSummary.totalInvoicesCount} bills*\n`;
+    msg += `• Total Units Sold: *${reconcileSummary.totalItemsSold} pcs*\n`;
+    msg += `• Cash Collected: ₹${finalExpected.toLocaleString('en-IN')}\n`;
+    msg += `• UPI / Online: ₹${reconcileSummary.upiTotal.toLocaleString('en-IN')}\n`;
+    msg += `• Pending / Credit: ₹${reconcileSummary.pendingCreditTotal.toLocaleString('en-IN')}\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `💵 *CASH DRAWER HANDOVER*\n`;
+    msg += `• Expected Drawer Cash: ₹${finalExpected.toLocaleString('en-IN')}\n`;
+    msg += `• Actual Handed Cash: ₹${finalActual.toLocaleString('en-IN')}\n`;
+    
+    if (finalDiff === 0) {
+      msg += `• Discrepancy: *₹0 (PERFECT MATCH ✅)*\n`;
+    } else if (finalDiff < 0) {
+      msg += `• Discrepancy: *⚠️ SHORTAGE: -₹${Math.abs(finalDiff).toLocaleString('en-IN')}*\n`;
+    } else {
+      msg += `• Discrepancy: *⚠️ SURPLUS: +₹${finalDiff.toLocaleString('en-IN')}*\n`;
+    }
+    if (finalNotes && finalNotes.trim()) {
+      msg += `• Handover Note: "${finalNotes.trim()}"\n`;
+    }
+    
+    msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `🔍 *HIGH-VALUE PARTS SOLD TODAY (Spot-Check List)*\n`;
+    msg += `_Owner shelf check guide: verify physical shop shelf quantities:_\n`;
+    
+    if (reconcileSummary.highValueParts.length === 0) {
+      msg += `_No parts sold on this date_\n`;
+    } else {
+      reconcileSummary.highValueParts.slice(0, 10).forEach((p, idx) => {
+        msg += `${idx + 1}. *${p.part_no}* | ${p.part_name}\n`;
+        msg += `   • Sold: *${p.quantity} pcs* (₹${p.final_amount.toLocaleString('en-IN')})\n`;
+        msg += `   • Remaining Shop Shelf Stock: *${p.remaining_stock ?? 'N/A'} pcs*\n`;
+      });
+      if (reconcileSummary.highValueParts.length > 10) {
+        msg += `_...and ${reconcileSummary.highValueParts.length - 10} more parts sold._\n`;
+      }
+    }
+
+    msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `🔒 *AUDIT TRAIL & INTEGRITY*\n`;
+    msg += `• Every invoice recorded with creator ID & timestamps in POS.\n`;
+    msg += `_Generated via SPAREZY POS Management_`;
+
+    return msg;
+  };
+
+  const handleSendDailySummaryWhatsApp = () => {
+    let cleanPhone = ownerPhone.replace(/[^0-9]/g, '');
+    if (!cleanPhone) {
+      const inputPhone = prompt("Enter Owner's WhatsApp Number (with 91 country code, e.g. 919876543210):");
+      if (!inputPhone) return;
+      cleanPhone = inputPhone.replace(/[^0-9]/g, '');
+      setOwnerPhone(cleanPhone);
+      db.setOwnerPhone(cleanPhone);
+    }
+    if (!cleanPhone.startsWith('91') && cleanPhone.length === 10) {
+      cleanPhone = `91${cleanPhone}`;
+    }
+
+    const text = generateDailySummaryText();
+    const encoded = encodeURIComponent(text);
+    const url = `https://api.whatsapp.com/send?phone=${cleanPhone}&text=${encoded}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+    triggerToast("Opening WhatsApp with Daily Closing Summary for Owner...");
+  };
+
+  const handleCopySummary = () => {
+    const text = generateDailySummaryText();
+    navigator.clipboard.writeText(text);
+    triggerToast("Daily Summary copied to clipboard! You can paste anywhere.");
+  };
+
+  const handleSubmitHandover = async () => {
+    if (!actualHandoverCash.trim()) {
+      alert("Please enter the actual cash amount handed over at closing.");
+      return;
+    }
+    const actual = parseFloat(actualHandoverCash);
+    if (isNaN(actual) || actual < 0) {
+      alert("Please enter a valid cash amount.");
+      return;
+    }
+
+    setIsSubmittingHandover(true);
+    try {
+      await db.saveDailyHandover({
+        brand,
+        date: selectedReconcileDate,
+        closed_by_name: user.name,
+        closed_by_role: user.role,
+        closed_by_id: user.id,
+        total_sales_value: reconcileSummary.totalSalesValue,
+        total_invoices_count: reconcileSummary.totalInvoicesCount,
+        total_items_sold: reconcileSummary.totalItemsSold,
+        expected_cash: reconcileSummary.expectedCash,
+        actual_cash: actual,
+        discrepancy: actual - reconcileSummary.expectedCash,
+        status: (actual - reconcileSummary.expectedCash) === 0 ? 'Matched' : ((actual - reconcileSummary.expectedCash) < 0 ? 'Shortage' : 'Surplus'),
+        cash_sales_total: reconcileSummary.expectedCash,
+        online_upi_total: reconcileSummary.upiTotal,
+        pending_credit_total: reconcileSummary.pendingCreditTotal,
+        notes: handoverNotes.trim(),
+        high_value_parts: reconcileSummary.highValueParts.slice(0, 15).map(p => ({
+          part_no: p.part_no,
+          part_name: p.part_name,
+          quantity: p.quantity,
+          mrp: p.mrp,
+          final_amount: p.final_amount,
+          current_stock: p.remaining_stock,
+          invoice_no: p.invoice_no,
+          customer_name: p.customer_name
+        }))
+      }, user);
+
+      setDailyHandoversList(db.getDailyHandovers(brand));
+      triggerToast("✅ Daily Cash Handover submitted successfully!");
+    } catch (err: any) {
+      console.error(err);
+      alert("Failed to submit handover: " + err.message);
+    } finally {
+      setIsSubmittingHandover(false);
+    }
+  };
+
+  const handleVerifyHandover = async (handoverId: string) => {
+    try {
+      await db.verifyDailyHandover(handoverId, user);
+      setDailyHandoversList(db.getDailyHandovers(brand));
+      triggerToast("✅ Handover verified & approved by Owner!");
+    } catch (err: any) {
+      alert("Verification failed: " + err.message);
+    }
   };
 
   React.useEffect(() => {
@@ -637,18 +942,26 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
     }
   };
 
-  // History filters
+  // History filters (supports searching by Customer Name, Invoice ID, or Part Number/Name)
   const filteredSalesHistory = useMemo(() => {
+    const query = historySearch.trim().toLowerCase();
     return salesList.filter(s => {
-      const matchesSearch = s.customer_name.toLowerCase().includes(historySearch.toLowerCase()) || 
-                            s.id.toLowerCase().includes(historySearch.toLowerCase());
+      const items = saleItemsBySaleId[s.id] || [];
+      const matchesSearch = !query || 
+        s.customer_name.toLowerCase().includes(query) || 
+        s.id.toLowerCase().includes(query) ||
+        (s.invoice_no && s.invoice_no.toLowerCase().includes(query)) ||
+        items.some(item => 
+          item.part_no.toLowerCase().includes(query) || 
+          item.part_name.toLowerCase().includes(query)
+        );
       
       const matchesCategory = historyCategory === 'All' || s.customer_category === historyCategory;
       const matchesPayment = historyPayment === 'All' || s.payment_status === historyPayment;
 
       return matchesSearch && matchesCategory && matchesPayment;
     });
-  }, [salesList, historySearch, historyCategory, historyPayment]);
+  }, [salesList, historySearch, historyCategory, historyPayment, saleItemsBySaleId]);
 
   const totalSalesPages = Math.ceil(filteredSalesHistory.length / salesPerPage) || 1;
 
@@ -732,13 +1045,13 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
       )}
 
       {/* Tabs */}
-      <div className="flex border-b border-slate-200">
+      <div className="flex border-b border-slate-200 overflow-x-auto">
         <button
           onClick={() => {
             setActiveTab('checkout');
             refreshComponentData();
           }}
-          className={`px-5 py-3 text-xs font-bold border-b-2 transition flex items-center gap-2 ${
+          className={`px-5 py-3 text-xs font-bold border-b-2 transition flex items-center gap-2 whitespace-nowrap cursor-pointer ${
             activeTab === 'checkout'
               ? 'border-indigo-600 text-indigo-650'
               : 'border-transparent text-slate-500 hover:text-slate-800'
@@ -752,7 +1065,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
             setActiveTab('history');
             refreshComponentData();
           }}
-          className={`px-5 py-3 text-xs font-bold border-b-2 transition flex items-center gap-2 ${
+          className={`px-5 py-3 text-xs font-bold border-b-2 transition flex items-center gap-2 whitespace-nowrap cursor-pointer ${
             activeTab === 'history'
               ? 'border-indigo-600 text-indigo-650'
               : 'border-transparent text-slate-500 hover:text-slate-800'
@@ -761,7 +1074,66 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
           <Calendar className="w-4 h-4" />
           Sales Invoice history ({salesList.length} Invoices)
         </button>
+        <button
+          onClick={() => {
+            setActiveTab('reconcile');
+            refreshComponentData();
+          }}
+          className={`px-5 py-3 text-xs font-bold border-b-2 transition flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+            activeTab === 'reconcile'
+              ? 'border-emerald-600 text-emerald-700 font-extrabold'
+              : 'border-transparent text-slate-500 hover:text-slate-800'
+          }`}
+        >
+          <DollarSign className="w-4 h-4 text-emerald-600" />
+          Daily Reconcile &amp; Cash Handover
+          {todayHandover ? (
+            <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-bold ${
+              todayHandover.status === 'Matched'
+                ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                : todayHandover.status === 'Shortage'
+                ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                : 'bg-amber-100 text-amber-800 border border-amber-300'
+            }`}>
+              {todayHandover.status === 'Matched' ? 'Closed: Matched' : `Closed: ${todayHandover.status}`}
+            </span>
+          ) : (
+            <span className="px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-amber-50 text-amber-700 border border-amber-200">
+              Pending Today
+            </span>
+          )}
+        </button>
       </div>
+
+      {/* Manager Session Banner */}
+      {user.role === 'Manager' && activeTab === 'checkout' && (
+        <div className="bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-250 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-amber-500 text-white flex items-center justify-center font-bold text-sm shadow-xs shrink-0">
+              M
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-slate-900 text-xs">Manager Billing Mode: {user.name}</span>
+                <span className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-800 text-[10px] font-bold border border-amber-300">
+                  Audit Stamped
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-600 mt-0.5">
+                Every bill is audit-stamped with your name &amp; timestamp. Cash collected must be handed over via Daily Reconcile at shop closing.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActiveTab('reconcile')}
+            className="self-start sm:self-auto px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold cursor-pointer transition flex items-center gap-1.5 shadow-xs shrink-0"
+          >
+            <DollarSign className="w-3.5 h-3.5" />
+            End-of-Day Handover
+          </button>
+        </div>
+      )}
 
       {activeTab === 'checkout' ? (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -1564,7 +1936,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
           </div>
 
         </div>
-      ) : (
+      ) : activeTab === 'history' ? (
         /* History tab */
         <div className="space-y-4">
           
@@ -1576,7 +1948,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
               <input
                 type="text"
                 className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-xl text-xs font-medium focus:ring-1 focus:ring-indigo-600/20"
-                placeholder="Search history by Customer Name or Sale ID..."
+                placeholder="Search history by Customer, Sale ID, or Part Number (e.g. 58101)..."
                 value={historySearchInput}
                 onChange={(e) => setHistorySearchInput(e.target.value)}
               />
@@ -1623,6 +1995,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
               <table className="min-w-full divide-y divide-slate-200 text-left text-xs font-semibold text-slate-600">
                 <thead className="bg-slate-50 text-slate-500 uppercase text-[10px] tracking-wider">
                   <tr>
+                    <th className="p-4 w-9"></th>
                     <th className="p-4">Invoice ID</th>
                     <th className="p-4">Sale Date</th>
                     <th className="p-4">Customer</th>
@@ -1631,73 +2004,175 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
                     <th className="p-4">Disc %</th>
                     <th className="p-4">Final Bill</th>
                     <th className="p-4">Collector Status</th>
+                    <th className="p-4">Billed By (Audit)</th>
                     <th className="p-4 text-right">Utility</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-slate-700">
-                  {paginatedSalesHistory.map((sale) => (
-                    <tr key={sale.id} className="hover:bg-slate-50/50">
-                      <td className="p-4 font-mono font-bold text-slate-900 animate-fade-in" title={sale.id}>
-                        {sale.id.length > 10 ? `#${sale.id.substring(0, 8).toUpperCase()}` : sale.id}
-                      </td>
-                      <td className="p-4 font-normal text-slate-450">{new Date(sale.sale_date).toLocaleDateString()}</td>
-                      <td className="p-4 font-medium text-slate-800">{sale.customer_name}</td>
-                      <td className="p-4">{sale.customer_category}</td>
-                      <td className="p-4">₹{sale.subtotal.toFixed(2)}</td>
-                      <td className="p-4 text-center">{sale.discount_percentage}%</td>
-                      <td className="p-4 font-bold text-slate-900">₹{sale.total_amount.toFixed(2)}</td>
-                      <td className="p-4">
-                        <div className="flex flex-col gap-0.5">
-                          <span className={`inline-flex self-start px-2 py-0.5 rounded-full text-[9px] font-bold ${
-                            sale.payment_status === 'Paid' 
-                              ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
-                              : 'bg-amber-50 text-amber-700 border border-amber-200'
-                          }`}>
-                            {sale.payment_status}
-                          </span>
-                          <span className="text-[10px] text-slate-400 font-mono">Paid: ₹{(sale.paid_amount || 0).toLocaleString('en-IN')}</span>
-                          {(sale.pending_amount || 0) > 0 && (
-                            <span className="text-[10px] text-amber-600 font-bold font-mono">Due: ₹{sale.pending_amount.toLocaleString('en-IN')}</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="p-4 text-right flex justify-end gap-1.5 items-center">
-                        {sale.pending_amount > 0 && (
-                          <button
-                            onClick={() => {
-                              setPaymentRecordingSale(sale);
-                              setReceivingAmount('');
-                            }}
-                            className="p-1 px-2 text-emerald-650 hover:bg-emerald-50 border border-emerald-200 hover:border-emerald-300 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
-                          >
-                            <CreditCard className="w-3 h-3 text-emerald-600" />
-                            Record Payment
-                          </button>
+                  {paginatedSalesHistory.map((sale) => {
+                    const items = saleItemsBySaleId[sale.id] || [];
+                    const isExpanded = !!expandedInvoiceIds[sale.id];
+
+                    return (
+                      <React.Fragment key={sale.id}>
+                        <tr className={`hover:bg-slate-50/50 transition-colors ${isExpanded ? 'bg-indigo-50/30' : ''}`}>
+                          <td className="p-4 pr-1 text-center">
+                            {items.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => toggleInvoiceExpand(sale.id)}
+                                className="p-1 rounded-md text-slate-400 hover:text-indigo-600 hover:bg-slate-100 cursor-pointer transition"
+                                title={isExpanded ? 'Collapse parts' : `Show all ${items.length} parts`}
+                              >
+                                {isExpanded ? (
+                                  <ChevronDown className="w-4 h-4 text-indigo-600" />
+                                ) : (
+                                  <ChevronRight className="w-4 h-4 text-slate-400" />
+                                )}
+                              </button>
+                            )}
+                          </td>
+                          <td className="p-4 font-mono font-bold text-slate-900 animate-fade-in" title={sale.id}>
+                            {sale.id.length > 10 ? `#${sale.id.substring(0, 8).toUpperCase()}` : sale.id}
+                          </td>
+                          <td className="p-4 font-normal text-slate-450">{new Date(sale.sale_date).toLocaleDateString()}</td>
+                          <td className="p-4 font-medium text-slate-800">{sale.customer_name}</td>
+                          <td className="p-4">{sale.customer_category}</td>
+
+                          <td className="p-4">₹{sale.subtotal.toFixed(2)}</td>
+                          <td className="p-4 text-center">{sale.discount_percentage}%</td>
+                          <td className="p-4 font-bold text-slate-900">₹{sale.total_amount.toFixed(2)}</td>
+                          <td className="p-4">
+                            <div className="flex flex-col gap-0.5">
+                              <span className={`inline-flex self-start px-2 py-0.5 rounded-full text-[9px] font-bold ${
+                                sale.payment_status === 'Paid' 
+                                   ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                                   : 'bg-amber-50 text-amber-700 border border-amber-200'
+                              }`}>
+                                {sale.payment_status}
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-mono">Paid: ₹{(sale.paid_amount || 0).toLocaleString('en-IN')}</span>
+                              {(sale.pending_amount || 0) > 0 && (
+                                <span className="text-[10px] text-amber-600 font-bold font-mono">Due: ₹{sale.pending_amount.toLocaleString('en-IN')}</span>
+                              )}
+                            </div>
+                          </td>
+
+                          {/* Audit Trail: Created By Tag */}
+                          <td className="p-4">
+                            <div className="flex flex-col gap-0.5">
+                              <span className="inline-flex items-center gap-1 font-bold text-slate-800 text-[11px]">
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                  sale.created_by_role === 'Manager' || (!isOwnerOrAdmin(sale.created_by_role) && sale.created_by?.toLowerCase() !== 'owner')
+                                    ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                    : 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                                }`}>
+                                  {sale.created_by_role || (sale.created_by?.toLowerCase().includes('manager') ? 'Manager' : (sale.created_by?.toLowerCase().includes('owner') ? 'Owner' : 'Staff'))}
+                                </span>
+                                <span className="truncate max-w-[100px]" title={sale.created_by}>
+                                  {sale.created_by || 'Staff'}
+                                </span>
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-mono">
+                                {new Date(sale.created_at || sale.sale_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                              </span>
+                            </div>
+                          </td>
+
+                          <td className="p-4 text-right flex justify-end gap-1.5 items-center">
+                            {sale.pending_amount > 0 && (
+                              <button
+                                onClick={() => {
+                                  setPaymentRecordingSale(sale);
+                                  setReceivingAmount('');
+                                }}
+                                className="p-1 px-2 text-emerald-650 hover:bg-emerald-50 border border-emerald-200 hover:border-emerald-300 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
+                              >
+                                <CreditCard className="w-3 h-3 text-emerald-600" />
+                                Record Payment
+                              </button>
+                            )}
+                            <button
+                              onClick={() => setSelectedInvoiceForSlip(sale)}
+                              className="p-1 px-2 text-indigo-650 hover:bg-indigo-50 border border-slate-200 hover:border-indigo-200 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition"
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              View / Print Slip
+                            </button>
+                            {isOwnerOrAdmin(user.role) ? (
+                              <button
+                                onClick={() => {
+                                  setUndoConfirmSale(sale);
+                                  setUndoError(null);
+                                }}
+                                className="p-1 px-2 text-rose-650 hover:bg-rose-50 border border-rose-250 hover:border-rose-400 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
+                                title="Undo sale & return parts to stock"
+                              >
+                                <RotateCcw className="w-3 h-3 text-rose-600" />
+                                Undo
+                              </button>
+                            ) : (
+                              <span 
+                                className="p-1 px-1.5 text-slate-350 border border-slate-200 rounded-lg text-[9px] font-medium inline-flex items-center gap-1 cursor-not-allowed opacity-60"
+                                title="Undo is restricted to Owner/Admin only"
+                              >
+                                <RotateCcw className="w-3 h-3 text-slate-300" />
+                                Undo Locked
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+
+                        {/* Inline Accordion Detail View for Part Numbers and Quantities */}
+                        {isExpanded && (
+                          <tr className="bg-slate-50/70 border-b border-indigo-100">
+                            <td colSpan={11} className="p-4 pl-12">
+                              <div className="bg-white rounded-xl border border-indigo-100 p-3.5 shadow-2xs space-y-2">
+                                <div className="flex items-center justify-between text-xs font-bold text-slate-800 flex-wrap gap-2">
+                                  <span className="flex items-center gap-1.5">
+                                    <Package className="w-3.5 h-3.5 text-indigo-600" />
+                                    Invoice Parts Breakdown ({items.length} parts)
+                                  </span>
+                                  <span className="text-[10px] text-slate-500 font-semibold bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-md">
+                                    Billed by: <strong className="text-slate-900">{sale.created_by || 'Staff'}</strong> ({sale.created_by_role || 'Staff'}) at {new Date(sale.created_at || sale.sale_date).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
+                                  </span>
+                                </div>
+                                <table className="w-full text-left text-xs border border-slate-100 rounded-lg overflow-hidden">
+                                  <thead className="bg-slate-100 text-slate-600 text-[10px] uppercase font-bold">
+                                    <tr>
+                                      <th className="p-2">Part Number</th>
+                                      <th className="p-2">Part Name / Description</th>
+                                      <th className="p-2 text-center">Quantity</th>
+                                      <th className="p-2 text-right">Unit MRP</th>
+                                      <th className="p-2 text-center">Discount</th>
+                                      <th className="p-2 text-right">Line Total</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-100">
+                                    {items.map(item => (
+                                      <tr key={item.id} className="hover:bg-slate-50/50">
+                                        <td className="p-2 font-mono font-bold text-indigo-700 bg-indigo-50/40">
+                                          {item.part_no}
+                                        </td>
+                                        <td className="p-2 text-slate-700 font-medium">{item.part_name}</td>
+                                        <td className="p-2 text-center font-bold text-slate-800">{item.quantity}</td>
+                                        <td className="p-2 text-right font-mono text-slate-600">₹{item.mrp.toFixed(2)}</td>
+                                        <td className="p-2 text-center text-slate-500">{item.discount_percentage > 0 ? `${item.discount_percentage}%` : '-'}</td>
+                                        <td className="p-2 text-right font-mono font-bold text-slate-900">₹{item.final_amount.toFixed(2)}</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </td>
+                          </tr>
                         )}
-                        <button
-                          onClick={() => setSelectedInvoiceForSlip(sale)}
-                          className="p-1 px-2 text-indigo-650 hover:bg-indigo-50 border border-slate-200 hover:border-indigo-200 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          View / Print Slip
-                        </button>
-                        <button
-                          onClick={() => {
-                            setUndoConfirmSale(sale);
-                            setUndoError(null);
-                          }}
-                          className="p-1 px-2 text-rose-650 hover:bg-rose-50 border border-rose-250 hover:border-rose-400 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer transition shadow-xs"
-                          title="Undo sale & return parts to stock"
-                        >
-                          <RotateCcw className="w-3 h-3 text-rose-600" />
-                          Undo
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                      </React.Fragment>
+                    );
+                  })}
                   {paginatedSalesHistory.length === 0 && (
                     <tr>
-                      <td colSpan={9} className="p-12 text-center text-slate-400 font-normal">
+                      <td colSpan={11} className="p-12 text-center text-slate-400 font-normal">
                         No invoices returned for active query filters.
                       </td>
                     </tr>
@@ -1733,6 +2208,572 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
           </div>
 
         </div>
+      ) : (
+        /* DAILY RECONCILE & CASH HANDOVER TAB */
+        <div className="space-y-6 animate-fade-in">
+          {/* Top Bar: Date Selector & Header */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <DollarSign className="w-5 h-5 text-emerald-600" />
+                  Daily Reconcile &amp; Cash Handover Tracker
+                </h2>
+                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                  {brand} Spares
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                Ensure shop drawer cash tallies with sales. Spot-check high-value parts to prevent unauthorized billing or stock slippage.
+              </p>
+            </div>
+
+            {/* Date Controls */}
+            <div className="flex items-center gap-2 self-start md:self-auto">
+              <button
+                type="button"
+                onClick={() => setSelectedReconcileDate(todayDateStr)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer border ${
+                  selectedReconcileDate === todayDateStr
+                    ? 'bg-indigo-50 border-indigo-200 text-indigo-700'
+                    : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                }`}
+              >
+                Today
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const y = new Date();
+                  y.setDate(y.getDate() - 1);
+                  setSelectedReconcileDate(y.toISOString().split('T')[0]);
+                }}
+                className="px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer bg-white border border-slate-200 text-slate-600 hover:bg-slate-50"
+              >
+                Yesterday
+              </button>
+              <input
+                type="date"
+                value={selectedReconcileDate}
+                onChange={(e) => setSelectedReconcileDate(e.target.value)}
+                className="px-3 py-1.5 text-xs font-bold border border-slate-200 rounded-xl bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-800"
+              />
+            </div>
+          </div>
+
+          {/* Submission Status Alert Banner */}
+          {existingHandoverForDate ? (
+            <div className={`rounded-2xl p-4 border flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-xs ${
+              existingHandoverForDate.status === 'Matched'
+                ? 'bg-emerald-50/90 border-emerald-200 text-emerald-950'
+                : existingHandoverForDate.status === 'Shortage'
+                ? 'bg-rose-50/90 border-rose-250 text-rose-950'
+                : 'bg-amber-50/90 border-amber-250 text-amber-950'
+            }`}>
+              <div className="flex items-center gap-3">
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg shrink-0 ${
+                  existingHandoverForDate.status === 'Matched'
+                    ? 'bg-emerald-500 text-white'
+                    : existingHandoverForDate.status === 'Shortage'
+                    ? 'bg-rose-500 text-white'
+                    : 'bg-amber-500 text-white'
+                }`}>
+                  {existingHandoverForDate.status === 'Matched' ? '✓' : '!'}
+                </div>
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-sm">
+                      {existingHandoverForDate.status === 'Matched'
+                        ? 'Cash Handover Completed & Tallied (Exact Match)'
+                        : existingHandoverForDate.status === 'Shortage'
+                        ? `Cash Shortage Flagged: -₹${Math.abs(existingHandoverForDate.discrepancy).toLocaleString('en-IN')}`
+                        : `Cash Surplus Flagged: +₹${existingHandoverForDate.discrepancy.toLocaleString('en-IN')}`}
+                    </span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
+                      existingHandoverForDate.status === 'Matched'
+                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                        : existingHandoverForDate.status === 'Shortage'
+                        ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                        : 'bg-amber-100 text-amber-800 border border-amber-300'
+                    }`}>
+                      {existingHandoverForDate.status}
+                    </span>
+                    {existingHandoverForDate.verified_by_owner && (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200 flex items-center gap-1">
+                        <CheckCircle2Icon className="w-3 h-3 text-indigo-600" />
+                        Verified by Owner
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs opacity-85 mt-0.5">
+                    Submitted by <strong>{existingHandoverForDate.closed_by_name}</strong> ({existingHandoverForDate.closed_by_role}) on {new Date(existingHandoverForDate.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • 
+                    Expected: ₹{existingHandoverForDate.expected_cash.toLocaleString('en-IN')} | Actual Handed: ₹{existingHandoverForDate.actual_cash.toLocaleString('en-IN')}
+                    {existingHandoverForDate.notes && ` • Note: "${existingHandoverForDate.notes}"`}
+                  </p>
+                </div>
+              </div>
+
+              {/* Owner Action button */}
+              {isOwnerOrAdmin(user.role) && !existingHandoverForDate.verified_by_owner && (
+                <button
+                  type="button"
+                  onClick={() => handleVerifyHandover(existingHandoverForDate.id)}
+                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold cursor-pointer transition shadow-xs flex items-center gap-1.5 self-start sm:self-auto shrink-0"
+                >
+                  <CheckCircle2Icon className="w-4 h-4" />
+                  Approve &amp; Verify Handover
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="bg-amber-50/80 border border-amber-250 rounded-2xl p-4 flex items-center justify-between text-amber-900 shadow-2xs">
+              <div className="flex items-center gap-2.5">
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0" />
+                <div className="text-xs">
+                  <span className="font-bold">Pending Closing Handover for {selectedReconcileDate === todayDateStr ? 'Today' : selectedReconcileDate}</span>
+                  <p className="text-[11px] text-amber-700">
+                    At shop closing time, count the physical cash in the drawer, enter it below, and submit the handover report.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Metric Cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-1">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Total Sales Value</span>
+              <div className="text-xl font-extrabold text-slate-900">
+                ₹{reconcileSummary.totalSalesValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span className="text-[11px] text-slate-500 font-medium">
+                {reconcileSummary.totalInvoicesCount} invoices generated
+              </span>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-emerald-200/80 bg-emerald-50/20 p-4 shadow-sm space-y-1">
+              <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider flex items-center gap-1">
+                <DollarSign className="w-3.5 h-3.5 text-emerald-600" />
+                Cash Collected (Drawer)
+              </span>
+              <div className="text-xl font-extrabold text-emerald-700">
+                ₹{reconcileSummary.expectedCash.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span className="text-[11px] text-emerald-600/90 font-medium">
+                Expected in cash register
+              </span>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-indigo-200/80 bg-indigo-50/20 p-4 shadow-sm space-y-1">
+              <span className="text-[10px] font-bold text-indigo-700 uppercase tracking-wider">UPI / Bank Received</span>
+              <div className="text-xl font-extrabold text-indigo-700">
+                ₹{reconcileSummary.upiTotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              </div>
+              <span className="text-[11px] text-indigo-600/90 font-medium">
+                Direct online transfers
+              </span>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-1">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Items Sold / Credit</span>
+              <div className="text-xl font-extrabold text-slate-900">
+                {reconcileSummary.totalItemsSold} pcs
+              </div>
+              <span className="text-[11px] text-amber-600 font-bold">
+                ₹{reconcileSummary.pendingCreditTotal.toLocaleString('en-IN')} pending credit
+              </span>
+            </div>
+          </div>
+
+          {/* Two-column Section: Handover Form & WhatsApp Dispatch */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+            {/* Left: Cash Handover Form */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Calculator className="w-4 h-4 text-emerald-600" />
+                  Cash Handover Submission
+                </h3>
+                <span className="text-xs font-bold text-slate-500">
+                  Expected Cash: <strong className="text-slate-900 font-mono">₹{reconcileSummary.expectedCash.toLocaleString('en-IN')}</strong>
+                </span>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-bold text-slate-700">
+                      Actual Cash Counted in Drawer (₹)
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setShowDenominationHelper(!showDenominationHelper)}
+                      className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 cursor-pointer flex items-center gap-1"
+                    >
+                      <Calculator className="w-3 h-3" />
+                      {showDenominationHelper ? 'Hide Calculator' : 'Denomination Counter'}
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <span className="absolute left-3 top-2.5 text-slate-400 font-bold text-sm">₹</span>
+                    <input
+                      type="number"
+                      placeholder="Enter counted physical cash..."
+                      value={actualHandoverCash}
+                      onChange={(e) => setActualHandoverCash(e.target.value)}
+                      className="w-full pl-8 pr-4 py-2 text-sm font-bold border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 font-mono"
+                    />
+                  </div>
+                </div>
+
+                {/* Denomination Counter Drawer */}
+                {showDenominationHelper && (
+                  <div className="bg-slate-50 rounded-xl border border-slate-200 p-3.5 space-y-2.5 text-xs">
+                    <span className="font-bold text-slate-700 block">Note Denomination Breakdown:</span>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {[500, 200, 100, 50, 20, 10].map(note => (
+                        <div key={note} className="flex items-center gap-1.5 bg-white p-1.5 rounded-lg border border-slate-200">
+                          <span className="font-mono font-bold text-slate-600 w-11 shrink-0 text-[11px]">₹{note} ×</span>
+                          <input
+                            type="number"
+                            min="0"
+                            placeholder="0"
+                            value={denominations[note] || ''}
+                            onChange={(e) => {
+                              const val = Math.max(0, parseInt(e.target.value, 10) || 0);
+                              setDenominations(prev => ({ ...prev, [note]: val }));
+                            }}
+                            className="w-full text-right p-1 font-mono font-bold border border-slate-200 rounded text-slate-800 text-xs focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex items-center justify-between pt-1 border-t border-slate-200">
+                      <span className="font-semibold text-slate-600">Calculated Sum: <strong className="font-mono text-emerald-700 font-bold">₹{totalDenominationCash.toLocaleString('en-IN')}</strong></span>
+                      <button
+                        type="button"
+                        onClick={applyDenominations}
+                        className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold cursor-pointer transition shadow-2xs"
+                      >
+                        Apply to Amount
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Real-time Discrepancy Box */}
+                {actualHandoverCash.trim() !== '' && (
+                  <div className={`p-3 rounded-xl border flex items-center justify-between text-xs ${
+                    cashDiscrepancy === 0
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : cashDiscrepancy < 0
+                      ? 'bg-rose-50 border-rose-250 text-rose-800'
+                      : 'bg-amber-50 border-amber-250 text-amber-800'
+                  }`}>
+                    <div className="flex items-center gap-2">
+                      {cashDiscrepancy === 0 ? (
+                        <CheckCircle2Icon className="w-4 h-4 text-emerald-600 shrink-0" />
+                      ) : cashDiscrepancy < 0 ? (
+                        <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                      ) : (
+                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                      )}
+                      <div>
+                        <span className="font-bold">
+                          {cashDiscrepancy === 0
+                            ? 'Exact Match (₹0 Difference)'
+                            : cashDiscrepancy < 0
+                            ? `SHORTAGE FLAGGED: -₹${Math.abs(cashDiscrepancy).toLocaleString('en-IN')}`
+                            : `SURPLUS FLAGGED: +₹${cashDiscrepancy.toLocaleString('en-IN')}`}
+                        </span>
+                        <p className="text-[10px] opacity-80">
+                          {cashDiscrepancy === 0
+                            ? 'Physical cash perfectly matches recorded cash sales.'
+                            : cashDiscrepancy < 0
+                            ? 'Cash is missing from drawer compared to recorded sales. Discrepancy will be flagged to owner.'
+                            : 'Extra cash in drawer. Verify if an advance payment was received.'}
+                        </p>
+                      </div>
+                    </div>
+                    <span className="font-mono font-extrabold text-sm shrink-0">
+                      {cashDiscrepancy >= 0 ? `+₹${cashDiscrepancy}` : `-₹${Math.abs(cashDiscrepancy)}`}
+                    </span>
+                  </div>
+                )}
+
+                {/* Notes */}
+                <div>
+                  <label className="text-xs font-bold text-slate-700 mb-1 block">
+                    Handover Notes &amp; Expense Explanations
+                  </label>
+                  <textarea
+                    rows={2}
+                    placeholder="e.g. ₹200 given for shop tea/transport, notes verified..."
+                    value={handoverNotes}
+                    onChange={(e) => setHandoverNotes(e.target.value)}
+                    className="w-full p-2.5 text-xs border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-800"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  disabled={isSubmittingHandover || !actualHandoverCash.trim()}
+                  onClick={handleSubmitHandover}
+                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs rounded-xl cursor-pointer transition shadow-xs flex items-center justify-center gap-2"
+                >
+                  <CheckCircle2Icon className="w-4 h-4" />
+                  {isSubmittingHandover ? 'Recording Handover...' : 'Submit & Save Daily Handover'}
+                </button>
+              </div>
+            </div>
+
+            {/* Right: Owner WhatsApp Dispatch & Verification */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                  <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                    <Send className="w-4 h-4 text-emerald-600" />
+                    Daily Summary to Owner WhatsApp
+                  </h3>
+                  <span className="px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+                    1-Tap WhatsApp
+                  </span>
+                </div>
+
+                {/* Owner Phone Config */}
+                <div className="mt-3 bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                      <PhoneCall className="w-3.5 h-3.5 text-slate-500" />
+                      Owner WhatsApp Mobile Number:
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingOwnerPhone(!isEditingOwnerPhone)}
+                      className="text-[11px] font-bold text-indigo-600 hover:text-indigo-800 cursor-pointer"
+                    >
+                      {isEditingOwnerPhone ? 'Done' : 'Change Number'}
+                    </button>
+                  </div>
+                  {isEditingOwnerPhone ? (
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        placeholder="e.g. 919876543210 (with country code)"
+                        value={ownerPhone}
+                        onChange={(e) => {
+                          setOwnerPhone(e.target.value);
+                          db.setOwnerPhone(e.target.value);
+                        }}
+                        className="flex-1 px-3 py-1.5 text-xs font-mono font-bold border border-slate-200 rounded-lg bg-white"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingOwnerPhone(false)}
+                        className="px-3 py-1.5 bg-indigo-600 text-white rounded-lg text-xs font-bold"
+                      >
+                        Save
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="font-mono font-bold text-slate-800 text-xs flex items-center justify-between">
+                      <span>{ownerPhone ? `+${ownerPhone}` : 'No phone set (Tap Change Number)'}</span>
+                      <span className="text-[10px] text-slate-400 font-normal">Auto-saved to device</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Summary Contents Details */}
+                <div className="mt-3 space-y-2 text-xs text-slate-600">
+                  <p className="font-semibold text-slate-800">WhatsApp Report will include:</p>
+                  <ul className="space-y-1 text-[11px] text-slate-600 list-disc list-inside">
+                    <li>Total Sales Value &amp; Invoices count ({reconcileSummary.totalInvoicesCount} bills)</li>
+                    <li>Total Items / Units Sold ({reconcileSummary.totalItemsSold} pcs)</li>
+                    <li>Cash Handover &amp; Discrepancy report ({cashDiscrepancy === 0 ? 'Exact Match' : (cashDiscrepancy < 0 ? 'Shortage' : 'Surplus')})</li>
+                    <li><strong className="text-slate-800">High-value parts sold today</strong> with shop shelf remaining stock for instant spot-checking!</li>
+                  </ul>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="space-y-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={handleSendDailySummaryWhatsApp}
+                  className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl cursor-pointer transition shadow-xs flex items-center justify-center gap-2"
+                >
+                  <MessageSquare className="w-4 h-4" />
+                  Send Closing Summary to Owner (WhatsApp)
+                </button>
+                <button
+                  type="button"
+                  onClick={handleCopySummary}
+                  className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl cursor-pointer transition flex items-center justify-center gap-2"
+                >
+                  <Copy className="w-3.5 h-3.5 text-slate-500" />
+                  Copy Summary Text to Clipboard
+                </button>
+              </div>
+            </div>
+
+          </div>
+
+          {/* HIGH-VALUE PARTS SPOT-CHECK SECTION */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-4 border-b border-slate-100 bg-slate-50/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <ShieldAlert className="w-4 h-4 text-indigo-600" />
+                  High-Value Parts Sold Today (Owner Shelf Spot-Check List)
+                </h3>
+                <p className="text-[11px] text-slate-500">
+                  Verify these physical stock counts on the shop shelf to confirm that no extra or unauthorized parts left the store.
+                </p>
+              </div>
+              <span className="px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-200 text-indigo-700 font-bold text-xs shrink-0">
+                {reconcileSummary.highValueParts.length} parts sold today
+              </span>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-slate-200 text-left text-xs font-semibold text-slate-600">
+                <thead className="bg-slate-50 text-slate-500 uppercase text-[10px] tracking-wider">
+                  <tr>
+                    <th className="p-3.5">Part No</th>
+                    <th className="p-3.5">Part Description</th>
+                    <th className="p-3.5 text-center">Qty Sold</th>
+                    <th className="p-3.5 text-right">Unit MRP</th>
+                    <th className="p-3.5 text-right">Total Value</th>
+                    <th className="p-3.5 text-center bg-indigo-50/50">Shelf Stock Balance</th>
+                    <th className="p-3.5">Last Billed To</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-slate-700">
+                  {reconcileSummary.highValueParts.map((item) => (
+                    <tr key={item.part_no} className="hover:bg-slate-50/50 transition-colors">
+                      <td className="p-3.5 font-mono font-bold text-indigo-700 bg-indigo-50/30">
+                        {item.part_no}
+                      </td>
+                      <td className="p-3.5 text-slate-800 font-medium">{item.part_name}</td>
+                      <td className="p-3.5 text-center font-bold text-slate-900">{item.quantity} pcs</td>
+                      <td className="p-3.5 text-right font-mono text-slate-600">₹{item.mrp.toFixed(2)}</td>
+                      <td className="p-3.5 text-right font-mono font-extrabold text-slate-900">
+                        ₹{item.final_amount.toFixed(2)}
+                      </td>
+                      <td className="p-3.5 text-center bg-indigo-50/30">
+                        <span className={`px-2 py-0.5 rounded-full font-mono text-xs font-bold ${
+                          (item.remaining_stock ?? 0) <= 2
+                            ? 'bg-rose-100 text-rose-800'
+                            : 'bg-emerald-100 text-emerald-800'
+                        }`}>
+                          {item.remaining_stock ?? 'N/A'} in shelf
+                        </span>
+                      </td>
+                      <td className="p-3.5 text-slate-500 text-[11px] truncate max-w-[150px]">
+                        {item.customer_name || 'Walk-in'}
+                      </td>
+                    </tr>
+                  ))}
+                  {reconcileSummary.highValueParts.length === 0 && (
+                    <tr>
+                      <td colSpan={7} className="p-8 text-center text-slate-400 font-normal">
+                        No parts recorded sold on this date ({selectedReconcileDate}).
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* PAST HANDOVER AUDIT LOG */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-4 border-b border-slate-100 bg-slate-50/60">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                <Calendar className="w-4 h-4 text-slate-600" />
+                Previous Cash Handover Records ({dailyHandoversList.length} days recorded)
+              </h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-slate-200 text-left text-xs font-semibold text-slate-600">
+                <thead className="bg-slate-50 text-slate-500 uppercase text-[10px] tracking-wider">
+                  <tr>
+                    <th className="p-3.5">Date</th>
+                    <th className="p-3.5">Submitted By</th>
+                    <th className="p-3.5 text-right">Expected Cash</th>
+                    <th className="p-3.5 text-right">Actual Handed</th>
+                    <th className="p-3.5 text-center">Discrepancy</th>
+                    <th className="p-3.5 text-center">Status</th>
+                    <th className="p-3.5">Notes</th>
+                    <th className="p-3.5 text-right">Verification</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-slate-700">
+                  {dailyHandoversList.map((h) => (
+                    <tr key={h.id} className="hover:bg-slate-50/50">
+                      <td className="p-3.5 font-bold text-slate-900">{h.date}</td>
+                      <td className="p-3.5">
+                        <span className="font-medium text-slate-800">{h.closed_by_name}</span>
+                        <span className="text-[10px] text-slate-400 block font-mono">({h.closed_by_role})</span>
+                      </td>
+                      <td className="p-3.5 text-right font-mono text-slate-600">₹{h.expected_cash.toLocaleString('en-IN')}</td>
+                      <td className="p-3.5 text-right font-mono font-bold text-slate-900">₹{h.actual_cash.toLocaleString('en-IN')}</td>
+                      <td className="p-3.5 text-center font-mono font-bold">
+                        {h.discrepancy === 0 ? (
+                          <span className="text-emerald-600">₹0</span>
+                        ) : h.discrepancy < 0 ? (
+                          <span className="text-rose-600">-₹{Math.abs(h.discrepancy).toLocaleString('en-IN')}</span>
+                        ) : (
+                          <span className="text-amber-600">+₹{h.discrepancy.toLocaleString('en-IN')}</span>
+                        )}
+                      </td>
+                      <td className="p-3.5 text-center">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          h.status === 'Matched'
+                            ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                            : h.status === 'Shortage'
+                            ? 'bg-rose-100 text-rose-800 border border-rose-300'
+                            : 'bg-amber-100 text-amber-800 border border-amber-300'
+                        }`}>
+                          {h.status}
+                        </span>
+                      </td>
+                      <td className="p-3.5 text-slate-500 text-[11px] max-w-[200px] truncate">
+                        {h.notes || '-'}
+                      </td>
+                      <td className="p-3.5 text-right">
+                        {h.verified_by_owner ? (
+                          <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                            <CheckCircle2Icon className="w-3 h-3 text-emerald-600" />
+                            Verified
+                          </span>
+                        ) : isOwnerOrAdmin(user.role) ? (
+                          <button
+                            type="button"
+                            onClick={() => handleVerifyHandover(h.id)}
+                            className="px-2 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded text-[10px] font-bold border border-indigo-200 cursor-pointer transition"
+                          >
+                            Verify
+                          </button>
+                        ) : (
+                          <span className="text-[10px] text-slate-400">Pending</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                  {dailyHandoversList.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="p-6 text-center text-slate-400 font-normal">
+                        No previous daily cash handovers recorded yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* PRINT SLIP SLIDER MODAL (With direct print function) */}
@@ -1742,7 +2783,10 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
             
             {/* Header */}
             <div className="bg-slate-50 px-5 py-3 border-b border-slate-200 flex justify-between items-center no-print">
-              <h3 className="font-bold text-slate-800">Print Store Reciept Slip</h3>
+              <div>
+                <h3 className="font-bold text-slate-800">Print Store Receipt Slip</h3>
+                <p className="text-[10px] text-slate-400 font-medium">Customer slip shows part names only • Part numbers omitted from print</p>
+              </div>
               <button 
                 onClick={() => setSelectedInvoiceForSlip(null)}
                 className="p-1 hover:bg-slate-200 rounded text-slate-500 cursor-pointer"
@@ -1822,7 +2866,9 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
 
               <div className="text-center pt-4 border-t-2 border-dashed border-slate-350 text-[10px] text-slate-400">
                 <p>Thank you for doing business with us!</p>
-                <p className="mt-1">Generated by User: {selectedInvoiceForSlip.created_by}</p>
+                <p className="mt-1">
+                  Billed by: <strong>{selectedInvoiceForSlip.created_by}</strong> ({selectedInvoiceForSlip.created_by_role || (selectedInvoiceForSlip.created_by?.toLowerCase().includes('manager') ? 'Manager' : (selectedInvoiceForSlip.created_by?.toLowerCase().includes('owner') ? 'Owner' : 'Staff'))}) &bull; {new Date(selectedInvoiceForSlip.created_at || selectedInvoiceForSlip.sale_date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </p>
               </div>
 
             </div>

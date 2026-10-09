@@ -110,8 +110,45 @@ export interface Sale {
   has_return?: boolean;
   returned_items_count?: number;
   created_by: string; // User Name
+  created_by_role?: UserRole | string;
   created_at: string;
   items?: SaleItem[];
+}
+
+export interface HighValueSoldPart {
+  part_no: string;
+  part_name: string;
+  quantity: number;
+  mrp: number;
+  final_amount: number;
+  current_stock?: number;
+  invoice_no?: string;
+  customer_name?: string;
+}
+
+export interface DailyCashHandover {
+  id: string;
+  brand: Brand;
+  date: string; // YYYY-MM-DD
+  closed_by_name: string;
+  closed_by_role: string;
+  closed_by_id: string;
+  total_sales_value: number;
+  total_invoices_count: number;
+  total_items_sold: number;
+  expected_cash: number;
+  actual_cash: number;
+  discrepancy: number; // actual - expected
+  status: 'Matched' | 'Shortage' | 'Surplus';
+  cash_sales_total: number;
+  online_upi_total: number;
+  pending_credit_total: number;
+  notes?: string;
+  high_value_parts: HighValueSoldPart[];
+  created_at: string;
+  verified_by_owner?: boolean;
+  verified_at?: string;
+  verified_by_name?: string;
 }
 
 export interface ReturnRecord {
@@ -177,7 +214,6 @@ export interface OrderRequest {
   manager_id?: string;
   status: 'Pending' | 'Accepted' | 'Rejected' | 'Ordered' | 'Ordered with Dealer' | 'Received';
   accepted_by?: string;
-  accepted_at?: string;
   reviewed_by?: string;
   action_notes?: string;
   created_at: string;

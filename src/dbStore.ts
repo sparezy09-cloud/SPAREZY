@@ -4,7 +4,7 @@ import { egressTracker } from './lib/egressTracker';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
-  ScanSource, CustomerLedgerEntry, OrderRequest, StaffAttendance, PaymentType
+  ScanSource, CustomerLedgerEntry, OrderRequest, StaffAttendance, PaymentType, DailyCashHandover
 } from './types';
 
 // Storage keys for active preferences and local storage fallback
@@ -13,6 +13,8 @@ const KEY_CUSTOMERS = 'sparezy_public_customers_fb';
 const KEY_LEDGER = 'sparezy_public_ledger_fb';
 const KEY_ORDER_REQUESTS = 'sparezy_public_orders_fb';
 const KEY_ATTENDANCE = 'sparezy_public_attendance_fb';
+const KEY_DAILY_HANDOVERS = 'sparezy_public_daily_handovers_fb';
+const KEY_OWNER_WHATSAPP_PHONE = 'sparezy_owner_whatsapp_phone';
 const KEY_LOGS = 'sparezy_public_logs_fb';
 const KEY_ACTIVE_USER = 'sparezy_active_user_fb';
 const KEY_ACTIVE_BRAND = 'sparezy_active_brand_fb';
@@ -61,6 +63,7 @@ let cache = {
   customer_ledger: [] as CustomerLedgerEntry[],
   order_requests: [] as OrderRequest[],
   staff_attendance: [] as StaffAttendance[],
+  daily_handovers: [] as DailyCashHandover[],
   transaction_logs: [] as TransactionLog[],
   hyundai: {
     inventory: [] as InventoryItem[],
@@ -674,6 +677,10 @@ export const db = {
         const localAtt = localStorage.getItem(KEY_ATTENDANCE);
         if (localAtt && cache.staff_attendance.length === 0) {
           cache.staff_attendance = JSON.parse(localAtt).map(scrubRow);
+        }
+        const localHandovers = localStorage.getItem(KEY_DAILY_HANDOVERS);
+        if (localHandovers && cache.daily_handovers.length === 0) {
+          cache.daily_handovers = JSON.parse(localHandovers).map(scrubRow);
         }
       } catch (e) {}
 
@@ -2081,6 +2088,74 @@ export const db = {
     db.notify();
   },
 
+  // Daily Cash Handover & Reconcile methods
+  getDailyHandovers: (brand?: Brand): DailyCashHandover[] => {
+    if (!brand) return cache.daily_handovers;
+    return cache.daily_handovers.filter(h => h.brand.toLowerCase() === brand.toLowerCase());
+  },
+
+  saveDailyHandover: async (handoverData: Omit<DailyCashHandover, 'id' | 'created_at'>, user: User): Promise<DailyCashHandover> => {
+    const newHandover: DailyCashHandover = {
+      ...handoverData,
+      id: uuid(),
+      created_at: new Date().toISOString()
+    };
+    const existingIdx = cache.daily_handovers.findIndex(
+      h => h.brand.toLowerCase() === handoverData.brand.toLowerCase() && h.date === handoverData.date
+    );
+    if (existingIdx > -1) {
+      cache.daily_handovers[existingIdx] = newHandover;
+    } else {
+      cache.daily_handovers.unshift(newHandover);
+    }
+    localStorage.setItem(KEY_DAILY_HANDOVERS, JSON.stringify(cache.daily_handovers));
+    db.logTransaction(
+      user.id,
+      user.name,
+      'Cash Handover Reconcile',
+      'Sales',
+      `Daily cash handover submitted for ${handoverData.brand} on ${handoverData.date}: Expected ₹${handoverData.expected_cash}, Actual ₹${handoverData.actual_cash}, Diff ₹${handoverData.discrepancy} (${handoverData.status})`,
+      null,
+      newHandover
+    );
+    db.notify();
+    return newHandover;
+  },
+
+  verifyDailyHandover: async (id: string, user: User): Promise<void> => {
+    const idx = cache.daily_handovers.findIndex(h => h.id === id);
+    if (idx === -1) throw new Error("Handover record not found");
+    cache.daily_handovers[idx].verified_by_owner = true;
+    cache.daily_handovers[idx].verified_at = new Date().toISOString();
+    cache.daily_handovers[idx].verified_by_name = user.name;
+    localStorage.setItem(KEY_DAILY_HANDOVERS, JSON.stringify(cache.daily_handovers));
+    db.logTransaction(
+      user.id,
+      user.name,
+      'Verify Cash Handover',
+      'Sales',
+      `Owner verified daily cash handover for ${cache.daily_handovers[idx].brand} on ${cache.daily_handovers[idx].date}`,
+      null,
+      cache.daily_handovers[idx]
+    );
+    db.notify();
+  },
+
+  getOwnerPhone: (): string => {
+    try {
+      return localStorage.getItem(KEY_OWNER_WHATSAPP_PHONE) || '';
+    } catch (_) {
+      return '';
+    }
+  },
+
+  setOwnerPhone: (phone: string): void => {
+    try {
+      localStorage.setItem(KEY_OWNER_WHATSAPP_PHONE, phone.trim());
+      db.notify();
+    } catch (_) {}
+  },
+
   // Inventory lists
   getInventory: (brand: Brand, includeArchived: boolean = false): InventoryItem[] => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
@@ -2542,6 +2617,7 @@ export const db = {
       has_return: false,
       returned_items_count: 0,
       created_by: user.name,
+      created_by_role: user.role,
       created_at: new Date().toISOString(),
       items: itemsToSave
     };

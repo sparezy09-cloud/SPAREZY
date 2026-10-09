@@ -373,7 +373,7 @@ export default function App() {
   }[] = [
     { name: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['Owner', 'Admin'] },
     { name: 'Inventory', icon: Layers, allowedRoles: ['Owner', 'Admin', 'Manager'] },
-    { name: 'Sales', icon: ShoppingBag, allowedRoles: ['Owner', 'Admin'] },
+    { name: 'Sales', icon: ShoppingBag, allowedRoles: ['Owner', 'Admin', 'Manager'] },
     { name: 'Returns', icon: RotateCcw, allowedRoles: ['Owner', 'Admin'] },
     { name: 'Purchases', icon: FileText, allowedRoles: ['Owner', 'Admin'] },
     { name: 'Order Requests', icon: ClipboardList, allowedRoles: ['Owner', 'Admin', 'Manager'] },
@@ -385,11 +385,11 @@ export default function App() {
     { name: 'Settings / User Management', icon: Shield, allowedRoles: ['Owner', 'Admin'] },
   ];
 
-  // In Manager role only Inventory and Order Requests tabs are visible; hide all other tabs.
+  // In Manager role only Inventory, Sales, and Order Requests tabs are visible; hide all other tabs.
   const visibleSidebarItems = useMemo(() => {
     if (!activeUser) return [];
     if (activeUser.role === 'Manager') {
-      return sidebarItems.filter(item => item.name === 'Inventory' || item.name === 'Order Requests');
+      return sidebarItems.filter(item => item.name === 'Inventory' || item.name === 'Sales' || item.name === 'Order Requests');
     }
     return sidebarItems.filter(item => {
       if (item.ownerOnly && !isOwnerOrAdmin(activeUser.role)) return false;
@@ -478,10 +478,13 @@ export default function App() {
   const renderModuleContent = () => {
     if (!activeBrand || !activeUser) return null;
 
-    // Strict Manager role enforcement: only Inventory in read-only mode and Order Requests can be rendered
+    // Manager role permissions: Inventory (read-only), Sales, and Order Requests
     if (activeUser.role === 'Manager') {
       if (activeModule === 'Order Requests') {
         return <OrderRequestsModule brand={activeBrand} user={activeUser} />;
+      }
+      if (activeModule === 'Sales') {
+        return <SalesModule brand={activeBrand} user={activeUser} />;
       }
       return <InventoryModule brand={activeBrand} user={activeUser} readOnly={true} />;
     }
