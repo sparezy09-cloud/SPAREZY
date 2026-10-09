@@ -319,8 +319,8 @@ export default function App() {
     db.setActiveBrand(brand);
     setActiveBrand(brand);
     setActiveUser(user);
-    // Managers only have access to Inventory (read-only) and Order Requests
-    setActiveModule(user.role === 'Manager' ? 'Inventory' : 'Dashboard');
+    // Managers have access to Sales POS, Inventory (read-only), and Order Requests
+    setActiveModule(user.role === 'Manager' ? 'Sales' : 'Dashboard');
 
     // Lazily load the brand's dataset partitions in the background without blocking the screen
     try {
@@ -333,8 +333,9 @@ export default function App() {
   // Enforce Manager role navigation restrictions
   useEffect(() => {
     if (activeUser?.role === 'Manager') {
-      if (activeModule !== 'Inventory' && activeModule !== 'Order Requests') {
-        setActiveModule('Inventory');
+      const allowedModules = ['Sales', 'Sale POS', 'Inventory', 'Order Requests'];
+      if (!allowedModules.includes(activeModule)) {
+        setActiveModule('Sales');
       }
     }
   }, [activeUser?.role, activeModule]);
