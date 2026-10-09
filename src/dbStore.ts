@@ -256,29 +256,6 @@ const scrubRow = (row: any) => {
   return r;
 };
 
-// Auto-clears accepted order requests older than 1 day (24 hours = 86,400,000 ms)
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-
-export function filterOutExpiredAcceptedOrders(orders: OrderRequest[]): { validOrders: OrderRequest[]; expiredIds: string[] } {
-  const now = Date.now();
-  const validOrders: OrderRequest[] = [];
-  const expiredIds: string[] = [];
-
-  for (const req of orders) {
-    const isAcceptedStage = req.status === 'Accepted' || req.status === 'Ordered with Dealer' || req.status === 'Ordered' || req.status === 'Received';
-    if (isAcceptedStage) {
-      const acceptedTime = new Date(req.accepted_at || req.updated_at || req.created_at).getTime();
-      if (!isNaN(acceptedTime) && (now - acceptedTime) >= ONE_DAY_MS) {
-        expiredIds.push(req.id);
-        continue;
-      }
-    }
-    validOrders.push(req);
-  }
-
-  return { validOrders, expiredIds };
-}
-
 // Handle incoming realtime signals to propagate changes instantly across browser ports
 function handleRealtimePayload(schema: string, payload: any) {
   isSilentUpdating = true;
@@ -337,6 +314,220 @@ function handleRealtimePayload(schema: string, payload: any) {
   } finally {
     isSilentUpdating = false;
   }
+}
+
+// Initial sample order requests across multiple recent dates for testing & demo
+function getInitialOrderRequests(): OrderRequest[] {
+  const now = new Date();
+  const todayISO = now.toISOString();
+  const yesterdayISO = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+  const twoDaysAgoISO = new Date(now.getTime() - 48 * 60 * 60 * 1000).toISOString();
+  const threeDaysAgoISO = new Date(now.getTime() - 72 * 60 * 60 * 1000).toISOString();
+
+  return [
+    // Today Hyundai
+    {
+      id: 'req-h-1',
+      brand: 'Hyundai',
+      part_no: '58101-1RA00',
+      part_name: 'Front Brake Pad Set (Verna/i20)',
+      quantity: 4,
+      urgency: 'High',
+      reason: 'Customer Demand',
+      customer_name: 'Rajesh Sharma',
+      customer_phone: '9876543210',
+      notes: 'Customer car waiting for brake overhaul',
+      requested_by: 'Manager Rajesh',
+      requested_by_role: 'Manager',
+      status: 'Pending',
+      created_at: todayISO,
+      updated_at: todayISO
+    },
+    {
+      id: 'req-h-2',
+      brand: 'Hyundai',
+      part_no: '26300-35505',
+      part_name: 'Engine Oil Filter Cartridge',
+      quantity: 12,
+      urgency: 'Medium',
+      reason: 'Out of Stock',
+      requested_by: 'Manager Rajesh',
+      requested_by_role: 'Manager',
+      status: 'Accepted',
+      accepted_by: 'Owner Amit',
+      reviewed_by: 'Owner Amit',
+      action_notes: 'Approved for weekly supplier order',
+      created_at: todayISO,
+      updated_at: todayISO
+    },
+    // Yesterday Hyundai
+    {
+      id: 'req-h-3',
+      brand: 'Hyundai',
+      part_no: '28113-1R100',
+      part_name: 'Air Cleaner Filter Element',
+      quantity: 6,
+      urgency: 'Medium',
+      reason: 'Regular Reorder',
+      requested_by: 'Manager Rajesh',
+      requested_by_role: 'Manager',
+      status: 'Pending',
+      created_at: yesterdayISO,
+      updated_at: yesterdayISO
+    },
+    {
+      id: 'req-h-4',
+      brand: 'Hyundai',
+      part_no: '97133-2E210',
+      part_name: 'Cabin AC Air Filter Pollen',
+      quantity: 8,
+      urgency: 'Low',
+      reason: 'Regular Reorder',
+      requested_by: 'Manager Rajesh',
+      requested_by_role: 'Manager',
+      status: 'Accepted',
+      accepted_by: 'Owner Amit',
+      reviewed_by: 'Owner Amit',
+      created_at: yesterdayISO,
+      updated_at: yesterdayISO
+    },
+    {
+      id: 'req-h-5',
+      brand: 'Hyundai',
+      part_no: '54651-1R000',
+      part_name: 'Front Strut Shock Absorber LH',
+      quantity: 2,
+      urgency: 'Critical',
+      reason: 'Emergency',
+      customer_name: 'Vikas Patel',
+      customer_phone: '9822334455',
+      notes: 'Car broken down on hoist',
+      requested_by: 'Manager Rajesh',
+      requested_by_role: 'Manager',
+      status: 'Accepted',
+      accepted_by: 'Owner Amit',
+      reviewed_by: 'Owner Amit',
+      created_at: yesterdayISO,
+      updated_at: yesterdayISO
+    },
+    // 2 Days Ago Hyundai
+    {
+      id: 'req-h-6',
+      brand: 'Hyundai',
+      part_no: '21421-2B020',
+      part_name: 'Crankshaft Front Oil Seal',
+      quantity: 5,
+      urgency: 'Medium',
+      reason: 'Regular Reorder',
+      requested_by: 'Manager Rajesh',
+      requested_by_role: 'Manager',
+      status: 'Ordered with Dealer',
+      accepted_by: 'Owner Amit',
+      reviewed_by: 'Owner Amit',
+      action_notes: 'PO-2026-HYU-88 sent to authorized dealer',
+      created_at: twoDaysAgoISO,
+      updated_at: twoDaysAgoISO
+    },
+    {
+      id: 'req-h-7',
+      brand: 'Hyundai',
+      part_no: '18855-10060',
+      part_name: 'Nickel Spark Plug Set (Pack of 4)',
+      quantity: 10,
+      urgency: 'Low',
+      reason: 'Out of Stock',
+      requested_by: 'Manager Rajesh',
+      requested_by_role: 'Manager',
+      status: 'Accepted',
+      accepted_by: 'Owner Amit',
+      reviewed_by: 'Owner Amit',
+      created_at: twoDaysAgoISO,
+      updated_at: twoDaysAgoISO
+    },
+    // Today Mahindra
+    {
+      id: 'req-m-1',
+      brand: 'Mahindra',
+      part_no: '0303BC0081N',
+      part_name: 'Oil Filter Cartridge Scorpio CRDe',
+      quantity: 10,
+      urgency: 'High',
+      reason: 'Out of Stock',
+      requested_by: 'Manager Rajesh',
+      requested_by_role: 'Manager',
+      status: 'Pending',
+      created_at: todayISO,
+      updated_at: todayISO
+    },
+    {
+      id: 'req-m-2',
+      brand: 'Mahindra',
+      part_no: '0603AAB00221N',
+      part_name: 'Front Disc Brake Pad Set Bolero',
+      quantity: 6,
+      urgency: 'Critical',
+      reason: 'Customer Demand',
+      customer_name: 'Suresh Kumar',
+      customer_phone: '9988776655',
+      notes: 'Taxi operator vehicle repair urgent',
+      requested_by: 'Manager Rajesh',
+      requested_by_role: 'Manager',
+      status: 'Accepted',
+      accepted_by: 'Owner Amit',
+      reviewed_by: 'Owner Amit',
+      created_at: todayISO,
+      updated_at: todayISO
+    },
+    // Yesterday Mahindra
+    {
+      id: 'req-m-3',
+      brand: 'Mahindra',
+      part_no: '0305AA0190N',
+      part_name: 'Diesel Fuel Filter Element XUV500',
+      quantity: 8,
+      urgency: 'Medium',
+      reason: 'Regular Reorder',
+      requested_by: 'Manager Rajesh',
+      requested_by_role: 'Manager',
+      status: 'Accepted',
+      accepted_by: 'Owner Amit',
+      reviewed_by: 'Owner Amit',
+      created_at: yesterdayISO,
+      updated_at: yesterdayISO
+    },
+    {
+      id: 'req-m-4',
+      brand: 'Mahindra',
+      part_no: '0401AB0050N',
+      part_name: 'Clutch Release Bearing Bolero Camper',
+      quantity: 3,
+      urgency: 'High',
+      reason: 'Customer Demand',
+      customer_name: 'Anil Verma',
+      requested_by: 'Manager Rajesh',
+      requested_by_role: 'Manager',
+      status: 'Pending',
+      created_at: yesterdayISO,
+      updated_at: yesterdayISO
+    },
+    // 2 Days Ago Mahindra
+    {
+      id: 'req-m-5',
+      brand: 'Mahindra',
+      part_no: '0067645',
+      part_name: 'Fan Belt Poly-V Scorpio mHawk',
+      quantity: 10,
+      urgency: 'Low',
+      reason: 'Regular Reorder',
+      requested_by: 'Manager Rajesh',
+      requested_by_role: 'Manager',
+      status: 'Ordered with Dealer',
+      accepted_by: 'Owner Amit',
+      reviewed_by: 'Owner Amit',
+      created_at: twoDaysAgoISO,
+      updated_at: twoDaysAgoISO
+    }
+  ];
 }
 
 export const db = {
@@ -478,12 +669,7 @@ export const db = {
         }
         const localOrders = localStorage.getItem(KEY_ORDER_REQUESTS);
         if (localOrders && cache.order_requests.length === 0) {
-          const parsed = JSON.parse(localOrders).map(scrubRow) as OrderRequest[];
-          const { validOrders, expiredIds } = filterOutExpiredAcceptedOrders(parsed);
-          cache.order_requests = validOrders;
-          if (expiredIds.length > 0) {
-            localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(validOrders));
-          }
+          cache.order_requests = JSON.parse(localOrders).map(scrubRow);
         }
         const localAtt = localStorage.getItem(KEY_ATTENDANCE);
         if (localAtt && cache.staff_attendance.length === 0) {
@@ -559,14 +745,8 @@ export const db = {
           idbStore.set('cache_partitions', 'public_ledger', cache.customer_ledger);
         }
         if (ordersRes.data && ordersRes.data.length > 0) {
-          const parsed = ordersRes.data.map(scrubRow) as OrderRequest[];
-          const { validOrders, expiredIds } = filterOutExpiredAcceptedOrders(parsed);
-          cache.order_requests = validOrders;
+          cache.order_requests = ordersRes.data.map(scrubRow) as OrderRequest[];
           idbStore.set('cache_partitions', 'public_orders', cache.order_requests);
-          localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(cache.order_requests));
-          if (expiredIds.length > 0 && supabase) {
-            supabase.from('order_requests').delete().in('id', expiredIds).then();
-          }
         }
         if (attRes.data && attRes.data.length > 0) {
           cache.staff_attendance = attRes.data.map(scrubRow) as StaffAttendance[];
@@ -1700,44 +1880,23 @@ export const db = {
   },
 
   // Order Requests (Manager creates, Owner accepts without changing inventory)
-  // Accepted part history is automatically cleared after 1 day (24 hours)
   getOrderRequests: (brand?: Brand): OrderRequest[] => {
-    const { validOrders, expiredIds } = filterOutExpiredAcceptedOrders(cache.order_requests);
-    if (expiredIds.length > 0) {
-      cache.order_requests = validOrders;
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(validOrders));
-        idbStore.set('cache_partitions', 'public_orders', validOrders);
+    if (cache.order_requests.length === 0) {
+      const local = typeof window !== 'undefined' ? localStorage.getItem(KEY_ORDER_REQUESTS) : null;
+      if (local) {
+        try { cache.order_requests = JSON.parse(local).map(scrubRow); } catch (e) {}
       }
-      if (isSupabaseConfigured && supabase) {
-        supabase.from('order_requests').delete().in('id', expiredIds).then();
+      if (cache.order_requests.length === 0) {
+        cache.order_requests = getInitialOrderRequests();
+        try {
+          localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(cache.order_requests));
+        } catch (e) {}
       }
     }
     if (brand) {
       return cache.order_requests.filter(r => r.brand === brand);
     }
     return cache.order_requests;
-  },
-
-  clearExpiredAcceptedOrderRequests: async (): Promise<number> => {
-    const { validOrders, expiredIds } = filterOutExpiredAcceptedOrders(cache.order_requests);
-    if (expiredIds.length > 0) {
-      cache.order_requests = validOrders;
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(validOrders));
-        idbStore.set('cache_partitions', 'public_orders', validOrders);
-      }
-      if (isSupabaseConfigured && supabase) {
-        try {
-          await supabase.from('order_requests').delete().in('id', expiredIds);
-        } catch (err) {
-          console.warn("[Auto-Clear Orders] Error deleting expired accepted orders from Supabase:", err);
-        }
-      }
-      console.log(`[Auto-Clear Orders] Cleared ${expiredIds.length} accepted order request(s) older than 1 day from history.`);
-      db.notify();
-    }
-    return expiredIds.length;
   },
 
   createOrderRequest: async (
@@ -1779,14 +1938,10 @@ export const db = {
     if (!req) throw new Error("Order request not found");
 
     const oldStatus = req.status;
-    const nowIso = new Date().toISOString();
     req.status = status;
     req.accepted_by = user.name;
-    if (status === 'Accepted' && !req.accepted_at) {
-      req.accepted_at = nowIso;
-    }
     req.action_notes = actionNotes || (status === 'Accepted' ? 'Approved by Owner' : (status === 'Ordered' ? 'Placed with Dealer' : 'Rejected by Owner'));
-    req.updated_at = nowIso;
+    req.updated_at = new Date().toISOString();
 
     if (isSupabaseConfigured && supabase) {
       await supabase.from('order_requests').update({
@@ -1817,9 +1972,6 @@ export const db = {
       if (ids.includes(req.id)) {
         req.status = status;
         req.accepted_by = user.name;
-        if (status === 'Accepted' && !req.accepted_at) {
-          req.accepted_at = now;
-        }
         req.action_notes = actionNotes || (status === 'Accepted' ? 'Approved in Bulk by Owner' : `Bulk status updated to ${status}`);
         req.updated_at = now;
         updatedReqs.push(req);

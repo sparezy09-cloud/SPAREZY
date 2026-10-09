@@ -6,38 +6,9 @@ import {
   Clock, AlertTriangle, Truck, Eye, RefreshCw, Filter, 
   ChevronRight, ArrowRight, UserCheck, PackageCheck, Zap, Sparkles, Check,
   FileSpreadsheet, Download, CheckCheck, ChevronDown, CheckSquare, Square,
-  Layers, ArrowDownToLine, FileText
+  Layers, ArrowDownToLine, FileText, Calendar, CalendarDays, LayoutGrid, Table, X
 } from 'lucide-react';
 import { exportOrderRequestsToExcel } from '../lib/exportOrderRequestsExcel';
-
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-
-function getAcceptedTimeInfo(req: OrderRequest) {
-  const isAcceptedStage = req.status === 'Accepted' || req.status === 'Ordered with Dealer' || req.status === 'Ordered' || req.status === 'Received';
-  if (!isAcceptedStage) return null;
-
-  const acceptedTimestamp = req.accepted_at 
-    ? new Date(req.accepted_at).getTime() 
-    : new Date(req.updated_at || req.created_at).getTime();
-
-  if (isNaN(acceptedTimestamp)) return null;
-
-  const now = Date.now();
-  const elapsedMs = now - acceptedTimestamp;
-  const remainingMs = ONE_DAY_MS - elapsedMs;
-
-  if (remainingMs <= 0) {
-    return { expired: true, text: 'Auto-clearing soon' };
-  }
-
-  const hours = Math.floor(remainingMs / (60 * 60 * 1000));
-  const mins = Math.floor((remainingMs % (60 * 60 * 1000)) / (60 * 1000));
-
-  if (hours > 0) {
-    return { expired: false, text: `Clears in ${hours}h ${mins}m` };
-  }
-  return { expired: false, text: `Clears in ${mins}m` };
-}
 
 interface OrderRequestsModuleProps {
   brand: Brand;
@@ -50,6 +21,10 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
   const [statusFilter, setStatusFilter] = useState<string>('All');
   const [urgencyFilter, setUrgencyFilter] = useState<string>('All');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Date-based filter card system & view mode states
+  const [selectedDateFilter, setSelectedDateFilter] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<'cards' | 'table'>('cards');
 
   // Multi-select & Batch operations
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -102,15 +77,7 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
 
   useEffect(() => {
     refreshData();
-    db.clearExpiredAcceptedOrderRequests();
-    const timer = setInterval(() => {
-      db.clearExpiredAcceptedOrderRequests();
-    }, 60000);
-    const unsub = db.subscribe(refreshData);
-    return () => {
-      clearInterval(timer);
-      unsub();
-    };
+    return db.subscribe(refreshData);
   }, [brand]);
 
   useEffect(() => {
@@ -322,27 +289,6 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
   };
 
   // Export handlers
-  const handleExportPending = (customRequests?: OrderRequest[]) => {
-    try {
-      const target = customRequests || pendingRequests;
-      if (!target || target.length === 0) {
-        alert("No pending order requests found to export.");
-        return;
-      }
-      const result = exportOrderRequestsToExcel({
-        brand,
-        requests: target,
-        inventoryList,
-        title: `${brand} Pending Requested Parts`,
-        filenameSuffix: 'Pending_Requested_Parts'
-      });
-      triggerToast(`✓ Exported ${result.totalParts} pending parts (${result.totalQty} units) to Excel: ${result.fileName}`);
-      setShowExportMenu(false);
-    } catch (err: any) {
-      alert(err.message || "Failed to export Excel file");
-    }
-  };
-
   const handleExportAccepted = (customRequests?: OrderRequest[]) => {
     try {
       const target = customRequests || acceptedRequests;
@@ -390,12 +336,13 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
         alert("No order requests match current filter to export.");
         return;
       }
+      const dateLabel = selectedDateFilter ? formatDateDetails(selectedDateFilter).title : '';
       const result = exportOrderRequestsToExcel({
         brand,
         requests: filteredRequests,
         inventoryList,
-        title: `${brand} Filtered Order Requests`,
-        filenameSuffix: 'Filtered_Requested_Parts'
+        title: selectedDateFilter ? `${brand} Orders for ${dateLabel}` : `${brand} Filtered Order Requests`,
+        filenameSuffix: selectedDateFilter ? `Orders_${selectedDateFilter}` : 'Filtered_Requested_Parts'
       });
       triggerToast(`✓ Exported ${result.totalParts} filtered parts (${result.totalQty} units) to Excel: ${result.fileName}`);
       setShowExportMenu(false);
@@ -561,8 +508,165 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
     }
   };
 
+  // Date extraction and formatting helpers for the Date Card System
+  const getDateKey = (dateStr?: string): string => {
+    if (!dateStr) return '';
+    try {
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) return '';
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    } catch {
+      return '';
+    }
+  };
+
+  const formatDateDetails = (dateKey: string) => {
+    if (!dateKey) return { title: 'All Dates', subtitle: 'Full History', dayOfWeek: 'All', fullWeekday: 'All Dates', isToday: false, isYesterday: false };
+    const today = new Date();
+    const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayKey = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
+
+    const [y, m, d] = dateKey.split('-').map(Number);
+    const targetDate = new Date(y, m - 1, d);
+
+    const dayOfWeek = targetDate.toLocaleDateString(undefined, { weekday: 'short' });
+    const fullWeekday = targetDate.toLocaleDateString(undefined, { weekday: 'long' });
+    const formattedDate = targetDate.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+
+    if (dateKey === todayKey) {
+      return { title: 'Today', subtitle: formattedDate, dayOfWeek, fullWeekday, isToday: true, isYesterday: false };
+    } else if (dateKey === yesterdayKey) {
+      return { title: 'Yesterday', subtitle: formattedDate, dayOfWeek, fullWeekday, isToday: false, isYesterday: true };
+    } else {
+      return { title: formattedDate, subtitle: fullWeekday, dayOfWeek, fullWeekday, isToday: false, isYesterday: false };
+    }
+  };
+
+  interface DateCardSummary {
+    dateKey: string;
+    title: string;
+    subtitle: string;
+    dayOfWeek: string;
+    fullWeekday: string;
+    isToday: boolean;
+    isYesterday: boolean;
+    totalOrders: number;
+    totalUnits: number;
+    pendingCount: number;
+    acceptedCount: number;
+    rejectedCount: number;
+    distinctParts: number;
+    rawDate: Date;
+  }
+
+  // Group requested orders by date for card type system
+  const dateSummaries = useMemo<DateCardSummary[]>(() => {
+    const groups: Record<string, OrderRequest[]> = {};
+
+    requests.forEach(req => {
+      const key = getDateKey(req.created_at);
+      if (!key) return;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(req);
+    });
+
+    const cards: DateCardSummary[] = Object.entries(groups).map(([dateKey, list]) => {
+      const [y, m, d] = dateKey.split('-').map(Number);
+      const rawDate = new Date(y, m - 1, d);
+      const details = formatDateDetails(dateKey);
+      const totalOrders = list.length;
+      const totalUnits = list.reduce((sum, r) => sum + r.quantity, 0);
+      const pendingCount = list.filter(r => r.status === 'Pending').length;
+      const acceptedCount = list.filter(r => r.status === 'Accepted' || r.status === 'Ordered with Dealer' || r.status === 'Ordered').length;
+      const rejectedCount = list.filter(r => r.status === 'Rejected').length;
+      const distinctParts = new Set(list.map(r => r.part_no)).size;
+
+      return {
+        dateKey,
+        ...details,
+        totalOrders,
+        totalUnits,
+        pendingCount,
+        acceptedCount,
+        rejectedCount,
+        distinctParts,
+        rawDate
+      };
+    });
+
+    // Sort descending: newest dates first
+    cards.sort((a, b) => b.rawDate.getTime() - a.rawDate.getTime());
+    return cards;
+  }, [requests]);
+
+  const selectedDateSummary = useMemo(() => {
+    if (!selectedDateFilter) return null;
+    return dateSummaries.find(d => d.dateKey === selectedDateFilter) || {
+      dateKey: selectedDateFilter,
+      ...formatDateDetails(selectedDateFilter),
+      totalOrders: 0,
+      totalUnits: 0,
+      pendingCount: 0,
+      acceptedCount: 0,
+      rejectedCount: 0,
+      distinctParts: 0,
+      rawDate: new Date()
+    };
+  }, [dateSummaries, selectedDateFilter]);
+
+  // Click on date card -> Filter by that date AND show accepted or pending both!
+  const handleSelectDateCard = (dateKey: string | null) => {
+    if (selectedDateFilter === dateKey) {
+      // Toggle off if clicking the currently active date card
+      setSelectedDateFilter(null);
+    } else {
+      setSelectedDateFilter(dateKey);
+      // Key user requirement: "show that date requested order accepted or pending both"
+      // Automatically reset status filter to 'All' so both accepted & pending orders appear together!
+      setStatusFilter('All');
+    }
+  };
+
+  const handleAcceptAllOnDate = async (dateKey: string) => {
+    const pendingOnDate = requests.filter(r => getDateKey(r.created_at) === dateKey && r.status === 'Pending');
+    if (pendingOnDate.length === 0) return;
+    const ids = pendingOnDate.map(r => r.id);
+    const totalUnits = pendingOnDate.reduce((sum, r) => sum + r.quantity, 0);
+    const distinctParts = new Set(pendingOnDate.map(r => r.part_no)).size;
+    const note = `Approved by Owner for date ${formatDateDetails(dateKey).title}`;
+    try {
+      await db.updateBatchOrderRequestStatus(ids, 'Accepted', user, note);
+      const acceptedSnapshot: OrderRequest[] = pendingOnDate.map(r => ({
+        ...r,
+        status: 'Accepted' as const,
+        accepted_by: user.name,
+        action_notes: note,
+        updated_at: new Date().toISOString()
+      }));
+      setPostAcceptBanner({
+        count: ids.length,
+        totalQty: totalUnits,
+        distinctParts,
+        acceptedReqs: acceptedSnapshot
+      });
+      triggerToast(`✓ Accepted ${ids.length} pending orders for ${formatDateDetails(dateKey).title}!`);
+    } catch (err: any) {
+      alert(err.message || "Failed to accept orders for this date");
+    }
+  };
+
   const filteredRequests = useMemo(() => {
     return requests.filter(req => {
+      // Date filter check
+      if (selectedDateFilter && getDateKey(req.created_at) !== selectedDateFilter) {
+        return false;
+      }
       if (statusFilter !== 'All' && req.status !== statusFilter) return false;
       if (urgencyFilter !== 'All' && req.urgency !== urgencyFilter) return false;
       if (search) {
@@ -575,7 +679,7 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
       }
       return true;
     });
-  }, [requests, search, statusFilter, urgencyFilter]);
+  }, [requests, search, statusFilter, urgencyFilter, selectedDateFilter]);
 
   const stats = useMemo(() => {
     const total = requests.length;
@@ -626,10 +730,6 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
         e.preventDefault();
         if (selectedIds.length > 0) {
           handleExportSelected();
-        } else if (statusFilter === 'Pending' && pendingRequests.length > 0) {
-          handleExportPending();
-        } else if (pendingRequests.length > 0) {
-          handleExportPending();
         } else if (acceptedRequests.length > 0) {
           handleExportAccepted();
         } else {
@@ -716,19 +816,6 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
         </div>
 
         <div className="flex items-center gap-2.5 flex-wrap">
-          {pendingRequests.length > 0 && (
-            <button
-              type="button"
-              onClick={() => handleExportPending()}
-              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-xl text-xs font-black shadow-sm transition cursor-pointer shrink-0"
-              title="Export all pending requested parts to Excel (.xlsx)"
-            >
-              <FileSpreadsheet className="w-4 h-4 text-slate-950" />
-              <span>Export Pending ({pendingRequests.length})</span>
-              <Download className="w-3.5 h-3.5 text-slate-950" />
-            </button>
-          )}
-
           {isOwner && pendingRequests.length > 0 && (
             <button
               onClick={() => setIsAcceptAllModalOpen(true)}
@@ -764,21 +851,6 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
 
                 <button
                   type="button"
-                  onClick={() => handleExportPending()}
-                  disabled={stats.pending === 0}
-                  className="w-full px-3 py-2 text-left hover:bg-amber-50 hover:text-amber-950 transition flex items-center justify-between text-slate-800 disabled:opacity-40 disabled:pointer-events-none cursor-pointer border-b border-slate-100 bg-amber-50/50"
-                >
-                  <div className="flex items-center gap-2">
-                    <Clock className="w-3.5 h-3.5 text-amber-600" />
-                    <span className="font-bold text-amber-950">Pending Requested Parts</span>
-                  </div>
-                  <span className="font-mono text-[11px] bg-amber-200 text-amber-900 px-1.5 py-0.5 rounded-full font-bold">
-                    {stats.pending}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
                   onClick={() => handleExportAccepted()}
                   disabled={stats.accepted === 0}
                   className="w-full px-3 py-2 text-left hover:bg-emerald-50 hover:text-emerald-900 transition flex items-center justify-between text-slate-700 disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
@@ -806,6 +878,22 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                     {stats.total}
                   </span>
                 </button>
+
+                {selectedDateFilter && (
+                  <button
+                    type="button"
+                    onClick={() => handleExportFiltered()}
+                    className="w-full px-3 py-2 text-left bg-indigo-50/70 hover:bg-indigo-100 text-indigo-900 transition flex items-center justify-between font-semibold border-t border-slate-100 cursor-pointer"
+                  >
+                    <div className="flex items-center gap-2">
+                      <Calendar className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>{formatDateDetails(selectedDateFilter).title} Orders</span>
+                    </div>
+                    <span className="font-mono text-[11px] bg-indigo-200 text-indigo-900 px-1.5 py-0.5 rounded-full font-bold">
+                      {filteredRequests.length}
+                    </span>
+                  </button>
+                )}
 
                 {filteredRequests.length !== requests.length && (
                   <button
@@ -918,29 +1006,16 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
             <p className="text-2xl font-black text-amber-900 mt-1">{stats.pending}</p>
             <span className="text-[10px] text-amber-700">Awaiting owner review</span>
           </div>
-          <div className="flex items-center gap-1.5 mt-3 flex-wrap">
-            {isOwner && stats.pending > 0 && (
-              <button
-                type="button"
-                onClick={() => setIsAcceptAllModalOpen(true)}
-                className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 px-2.5 py-1 rounded-lg transition cursor-pointer"
-              >
-                <CheckCheck className="w-3.5 h-3.5" />
-                <span>Accept All ({stats.pending})</span>
-              </button>
-            )}
-            {stats.pending > 0 && (
-              <button
-                type="button"
-                onClick={() => handleExportPending()}
-                className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-900 bg-amber-300 hover:bg-amber-400 px-2.5 py-1 rounded-lg transition cursor-pointer"
-                title="Export pending requested parts to Excel (.xlsx)"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5 text-slate-900" />
-                <span>Export Excel</span>
-              </button>
-            )}
-          </div>
+          {isOwner && stats.pending > 0 && (
+            <button
+              type="button"
+              onClick={() => setIsAcceptAllModalOpen(true)}
+              className="mt-3 inline-flex items-center gap-1 text-[11px] font-bold text-amber-900 bg-amber-100 hover:bg-amber-200 px-2.5 py-1 rounded-lg transition cursor-pointer w-fit"
+            >
+              <CheckCheck className="w-3.5 h-3.5" />
+              <span>Accept All ({stats.pending})</span>
+            </button>
+          )}
         </div>
         <div className="bg-white p-4 rounded-2xl border border-blue-200 bg-blue-50/20 shadow-sm flex flex-col justify-between">
           <div>
@@ -948,10 +1023,7 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
               <PackageCheck className="w-3.5 h-3.5" /> Accepted / Ordered
             </span>
             <p className="text-2xl font-black text-blue-900 mt-1">{stats.accepted}</p>
-            <div className="flex items-center gap-1 text-[10px] text-blue-700 font-medium mt-0.5">
-              <Clock className="w-3 h-3 text-blue-500 shrink-0" />
-              <span>Clears after 1 day (24h)</span>
-            </div>
+            <span className="text-[10px] text-blue-700">In order pipeline</span>
           </div>
           {stats.accepted > 0 && (
             <button
@@ -1218,6 +1290,313 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
         )}
       </div>
 
+      {/* ========================================================================= */}
+      {/* CARD TYPE SYSTEM: REQUESTED ORDERS FILTER BY DATE                           */}
+      {/* ========================================================================= */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 bg-indigo-50 text-indigo-700 rounded-lg">
+                <Calendar className="w-4 h-4" />
+              </div>
+              <h2 className="text-sm font-bold text-slate-900">
+                Filter Requested Orders by Date
+              </h2>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
+                Card System
+              </span>
+            </div>
+            <p className="text-slate-500 text-xs mt-1">
+              Click any date card to view that date's requested orders — showing <strong className="text-slate-800">both accepted and pending</strong> orders.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Custom Date Input */}
+            <div className="flex items-center gap-1.5 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-700">
+              <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <span className="text-[11px] font-medium text-slate-500">Pick Date:</span>
+              <input
+                type="date"
+                value={selectedDateFilter || ''}
+                onChange={(e) => handleSelectDateCard(e.target.value || null)}
+                className="bg-transparent text-xs font-semibold text-slate-800 outline-none cursor-pointer"
+              />
+              {selectedDateFilter && (
+                <button
+                  type="button"
+                  onClick={() => handleSelectDateCard(null)}
+                  className="text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer"
+                  title="Clear custom date"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+
+            {/* View Mode Toggle: Cards View vs Table View */}
+            <div className="flex items-center bg-slate-100 p-0.5 rounded-xl border border-slate-200 text-xs">
+              <button
+                type="button"
+                onClick={() => setViewMode('cards')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition cursor-pointer ${
+                  viewMode === 'cards'
+                    ? 'bg-white text-indigo-700 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+                title="View requested orders as cards"
+              >
+                <LayoutGrid className="w-3.5 h-3.5" />
+                <span>Cards View</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('table')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold transition cursor-pointer ${
+                  viewMode === 'table'
+                    ? 'bg-white text-indigo-700 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+                title="View requested orders in detailed table"
+              >
+                <Table className="w-3.5 h-3.5" />
+                <span>Table View</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Scrollable Date Cards Carousel */}
+        <div className="flex items-stretch gap-3 overflow-x-auto pb-2 pt-1 scroll-smooth">
+          {/* "All Dates" Card */}
+          <button
+            type="button"
+            onClick={() => handleSelectDateCard(null)}
+            className={`min-w-[200px] sm:min-w-[210px] text-left p-3.5 rounded-2xl transition cursor-pointer border flex flex-col justify-between shrink-0 group ${
+              selectedDateFilter === null
+                ? 'border-indigo-600 bg-indigo-50/70 shadow-sm ring-2 ring-indigo-500/20'
+                : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/70 shadow-2xs'
+            }`}
+          >
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+                  <CalendarDays className="w-3 h-3 text-slate-400" />
+                  All Dates
+                </span>
+                {selectedDateFilter === null && (
+                  <span className="text-[9px] font-bold bg-indigo-600 text-white px-1.5 py-0.5 rounded-md flex items-center gap-0.5">
+                    <Check className="w-2.5 h-2.5" /> Active
+                  </span>
+                )}
+              </div>
+              <div className="font-black text-slate-900 text-sm">
+                All Order Requests
+              </div>
+              <div className="text-[11px] text-slate-500 mt-0.5">
+                Complete History ({stats.total} total)
+              </div>
+            </div>
+
+            <div className="mt-3 pt-2.5 border-t border-slate-150/70 space-y-1">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="font-bold text-slate-700">{stats.total} Orders</span>
+                <span className="text-slate-400 text-[10px]">
+                  {requests.reduce((sum, r) => sum + r.quantity, 0)} units
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 text-[10px] font-semibold flex-wrap">
+                <span className="text-amber-800 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200/70">
+                  ⏳ {stats.pending} Pending
+                </span>
+                <span className="text-emerald-800 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200/70">
+                  ✓ {stats.accepted} Accepted
+                </span>
+              </div>
+            </div>
+          </button>
+
+          {/* Individual Date Cards */}
+          {dateSummaries.map((dateSummary) => {
+            const isSelected = selectedDateFilter === dateSummary.dateKey;
+            return (
+              <button
+                key={dateSummary.dateKey}
+                type="button"
+                onClick={() => handleSelectDateCard(dateSummary.dateKey)}
+                className={`min-w-[210px] sm:min-w-[220px] text-left p-3.5 rounded-2xl transition cursor-pointer border flex flex-col justify-between shrink-0 group ${
+                  isSelected
+                    ? 'border-indigo-600 bg-indigo-50/80 shadow-sm ring-2 ring-indigo-500/25'
+                    : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/70 shadow-2xs'
+                }`}
+              >
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1">
+                      <Calendar className="w-3 h-3 text-slate-400" />
+                      {dateSummary.dayOfWeek}
+                    </span>
+                    {isSelected ? (
+                      <span className="text-[9px] font-bold bg-indigo-600 text-white px-1.5 py-0.5 rounded-md flex items-center gap-0.5">
+                        <Check className="w-2.5 h-2.5" /> Selected
+                      </span>
+                    ) : dateSummary.isToday ? (
+                      <span className="text-[9px] font-bold bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded-md">
+                        Today
+                      </span>
+                    ) : null}
+                  </div>
+
+                  <div className="font-black text-slate-900 text-sm flex items-center gap-1.5">
+                    <span>{dateSummary.title}</span>
+                    {dateSummary.isToday && (
+                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    )}
+                  </div>
+
+                  <div className="text-[11px] text-slate-500 mt-0.5">
+                    {dateSummary.subtitle}
+                  </div>
+                </div>
+
+                <div className="mt-3 pt-2.5 border-t border-slate-150/70 space-y-1">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-bold text-slate-800">
+                      {dateSummary.totalOrders} {dateSummary.totalOrders === 1 ? 'Order' : 'Orders'}
+                    </span>
+                    <span className="text-slate-400 text-[10px]">
+                      {dateSummary.totalUnits} units ({dateSummary.distinctParts} parts)
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 text-[10px] font-semibold flex-wrap">
+                    <span className={`px-1.5 py-0.5 rounded border ${
+                      dateSummary.pendingCount > 0 
+                        ? 'text-amber-800 bg-amber-50 border-amber-200 font-bold' 
+                        : 'text-slate-400 bg-slate-50 border-slate-200'
+                    }`}>
+                      ⏳ {dateSummary.pendingCount} Pending
+                    </span>
+
+                    <span className={`px-1.5 py-0.5 rounded border ${
+                      dateSummary.acceptedCount > 0 
+                        ? 'text-emerald-800 bg-emerald-50 border-emerald-200 font-bold' 
+                        : 'text-slate-400 bg-slate-50 border-slate-200'
+                    }`}>
+                      ✓ {dateSummary.acceptedCount} Accepted
+                    </span>
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Active Date Filter Banner (when a date is selected) */}
+      {selectedDateFilter && (
+        <div className="bg-gradient-to-r from-indigo-50 via-blue-50 to-indigo-50 border-2 border-indigo-200/80 rounded-2xl p-4 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-3 animate-in fade-in duration-200">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-indigo-600 text-white rounded-xl shadow-xs shrink-0">
+              <Calendar className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-bold text-indigo-900">
+                  Filtered by Date:
+                </span>
+                <span className="text-sm font-black text-indigo-950">
+                  {formatDateDetails(selectedDateFilter).title}
+                </span>
+                <span className="text-xs text-indigo-700 font-medium">
+                  ({formatDateDetails(selectedDateFilter).subtitle})
+                </span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                  Showing Accepted & Pending Both
+                </span>
+              </div>
+              <p className="text-[11px] text-indigo-800 mt-1 flex items-center gap-2 flex-wrap">
+                <span><strong>{filteredRequests.length}</strong> orders matching on this date</span>
+                <span>•</span>
+                <span className="text-amber-800 font-semibold">
+                  ⏳ {selectedDateSummary?.pendingCount || 0} Pending
+                </span>
+                <span>•</span>
+                <span className="text-emerald-800 font-semibold">
+                  ✓ {selectedDateSummary?.acceptedCount || 0} Accepted / In Order Pipeline
+                </span>
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap shrink-0">
+            {/* Quick status sub-filter toggle for this date */}
+            <div className="flex items-center bg-white/90 p-0.5 rounded-xl border border-indigo-200 text-xs shadow-2xs">
+              <button
+                type="button"
+                onClick={() => setStatusFilter('All')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                  statusFilter === 'All'
+                    ? 'bg-indigo-600 text-white shadow-2xs'
+                    : 'text-indigo-900 hover:bg-indigo-100/60'
+                }`}
+                title="Show both accepted and pending orders for this date"
+              >
+                Both (All)
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter('Pending')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                  statusFilter === 'Pending'
+                    ? 'bg-amber-600 text-white shadow-2xs'
+                    : 'text-amber-900 hover:bg-amber-100/60'
+                }`}
+              >
+                Pending Only ({selectedDateSummary?.pendingCount || 0})
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter('Accepted')}
+                className={`px-2.5 py-1 rounded-lg text-xs font-bold transition cursor-pointer ${
+                  statusFilter === 'Accepted'
+                    ? 'bg-emerald-600 text-white shadow-2xs'
+                    : 'text-emerald-900 hover:bg-emerald-100/60'
+                }`}
+              >
+                Accepted Only ({selectedDateSummary?.acceptedCount || 0})
+              </button>
+            </div>
+
+            {/* If Owner and has pending orders on this date: Accept All on Date */}
+            {isOwner && (selectedDateSummary?.pendingCount || 0) > 0 && (
+              <button
+                type="button"
+                onClick={() => handleAcceptAllOnDate(selectedDateFilter)}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1 shadow-2xs"
+                title={`Accept all ${selectedDateSummary?.pendingCount} pending requests for this date`}
+              >
+                <CheckCheck className="w-3.5 h-3.5" />
+                <span>Accept Date's Pending ({selectedDateSummary?.pendingCount})</span>
+              </button>
+            )}
+
+            {/* Clear Date Filter Button */}
+            <button
+              type="button"
+              onClick={() => handleSelectDateCard(null)}
+              className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1 shadow-2xs"
+              title="Reset date filter to view all dates"
+            >
+              <X className="w-3.5 h-3.5 text-slate-500" />
+              <span>Show All Dates</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Filters and Search Bar */}
       <div className="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm space-y-3">
         <div className="flex flex-col sm:flex-row gap-3">
@@ -1235,15 +1614,15 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
             </kbd>
           </div>
 
-          <div className="flex gap-2 flex-wrap items-center">
+          <div className="flex gap-2">
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
               className="px-3 py-2 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 bg-white outline-none focus:ring-2 focus:ring-indigo-500"
             >
-              <option value="All">All Statuses</option>
-              <option value="Pending">Pending Only ({stats.pending})</option>
-              <option value="Accepted">Accepted ({stats.accepted})</option>
+              <option value="All">All Statuses (Accepted & Pending)</option>
+              <option value="Pending">Pending Only</option>
+              <option value="Accepted">Accepted</option>
               <option value="Ordered with Dealer">Ordered with Dealer</option>
               <option value="Received">Received</option>
               <option value="Rejected">Rejected</option>
@@ -1261,160 +1640,185 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
               <option value="Low">Low</option>
             </select>
 
-            {statusFilter === 'Pending' && pendingRequests.length > 0 && (
+            {(search || statusFilter !== 'All' || urgencyFilter !== 'All' || selectedDateFilter) && (
               <button
                 type="button"
-                onClick={() => handleExportPending()}
-                className="px-3 py-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-xl text-xs transition cursor-pointer flex items-center gap-1.5 shadow-sm"
+                onClick={() => {
+                  setSearch('');
+                  setStatusFilter('All');
+                  setUrgencyFilter('All');
+                  setSelectedDateFilter(null);
+                }}
+                className="px-2.5 py-2 text-slate-500 hover:text-slate-800 text-xs font-bold hover:bg-slate-100 rounded-xl transition cursor-pointer"
+                title="Reset all filters"
               >
-                <FileSpreadsheet className="w-3.5 h-3.5 text-slate-950" />
-                <span>Export Pending to Excel ({pendingRequests.length})</span>
+                Reset
               </button>
-            )}
-
-            {statusFilter === 'Accepted' && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-xl text-[11px] text-blue-800 font-medium">
-                <Clock className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                <span>Accepted parts history is automatically cleared after 1 day (24 hours).</span>
-              </div>
             )}
           </div>
         </div>
       </div>
 
-      {/* Requests Table */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="min-w-full divide-y divide-slate-200 text-left text-xs">
-            <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-[10px] tracking-wider">
-              <tr>
-                <th className="p-3.5 pl-4 w-12 text-center">
-                  <div className="flex items-center justify-center gap-1">
-                    <input
-                      type="checkbox"
-                      checked={filteredRequests.length > 0 && filteredRequests.every(r => selectedIds.includes(r.id))}
-                      onChange={() => handleToggleSelectAll(filteredRequests)}
-                      className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
-                      title={filteredRequests.length > 0 && filteredRequests.every(r => selectedIds.includes(r.id)) ? "Deselect all (Ctrl+A)" : "Select all filtered orders (Ctrl+A)"}
-                    />
-                  </div>
-                </th>
-                <th className="p-3.5 px-4">Date & Urgency</th>
-                <th className="p-3.5">Part Details</th>
-                <th className="p-3.5 text-center">Req. Qty</th>
-                <th className="p-3.5">Reason & Customer</th>
-                <th className="p-3.5">Requested By</th>
-                <th className="p-3.5 text-center">Status</th>
-                <th className="p-3.5 text-right pr-4">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-200 text-slate-700">
-              {filteredRequests.map((req) => (
-                <tr key={req.id} className={`hover:bg-slate-50/70 transition ${selectedIds.includes(req.id) ? 'bg-indigo-50/40' : ''}`}>
-                  <td className="p-3.5 pl-4 align-top text-center">
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.includes(req.id)}
-                      onChange={() => handleToggleSelectRow(req.id)}
-                      className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer mt-1"
-                    />
-                  </td>
-                  <td className="p-3.5 px-4 align-top">
-                    <p className="font-mono text-[11px] text-slate-900 font-semibold">
-                      {new Date(req.created_at).toLocaleDateString()}
-                    </p>
-                    <p className="text-[10px] text-slate-400">
-                      {new Date(req.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </p>
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold border mt-1.5 ${urgencyColors[req.urgency]}`}>
-                      {req.urgency} Urgency
-                    </span>
-                  </td>
+      {/* ========================================================================= */}
+      {/* REQUESTS LIST: CARDS VIEW OR TABLE VIEW                                    */}
+      {/* ========================================================================= */}
+      {viewMode === 'cards' ? (
+        <div className="space-y-4">
+          {/* Card Selection Header bar when in cards view */}
+          <div className="bg-white rounded-2xl border border-slate-200 px-4 py-3 flex items-center justify-between text-xs shadow-2xs">
+            <div className="flex items-center gap-2.5">
+              <label className="inline-flex items-center gap-2 cursor-pointer font-bold text-slate-700 select-none">
+                <input
+                  type="checkbox"
+                  checked={filteredRequests.length > 0 && filteredRequests.every(r => selectedIds.includes(r.id))}
+                  onChange={() => handleToggleSelectAll(filteredRequests)}
+                  className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                />
+                <span>Select All Filtered ({filteredRequests.length})</span>
+              </label>
+              {selectedIds.length > 0 && (
+                <span className="text-[11px] font-semibold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200">
+                  {selectedIds.length} selected
+                </span>
+              )}
+            </div>
 
-                  <td className="p-3.5 align-top">
-                    <p className="font-mono font-bold text-slate-900">{req.part_no}</p>
-                    <p className="font-medium text-slate-600 text-[11px] mt-0.5">{req.part_name}</p>
-                    {req.notes && (
-                      <p className="text-[10px] text-slate-400 italic mt-1 bg-slate-50 p-1.5 rounded border border-slate-150">
-                        "{req.notes}"
-                      </p>
-                    )}
-                  </td>
+            <div className="text-slate-500 text-[11px]">
+              Showing <strong>{filteredRequests.length}</strong> {filteredRequests.length === 1 ? 'order request' : 'order requests'}
+              {selectedDateFilter && (
+                <span className="ml-1 text-indigo-600 font-semibold">
+                  for {formatDateDetails(selectedDateFilter).title}
+                </span>
+              )}
+            </div>
+          </div>
 
-                  <td className="p-3.5 text-center align-top">
-                    <span className="inline-flex items-center justify-center font-bold px-3 py-1 rounded-lg bg-indigo-50 text-indigo-700 text-sm border border-indigo-100">
-                      {req.quantity}
-                    </span>
-                  </td>
-
-                  <td className="p-3.5 align-top">
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700">
-                      {req.reason}
-                    </span>
-                    {req.customer_name && (
-                      <div className="mt-1 text-[11px]">
-                        <span className="font-semibold text-slate-800">{req.customer_name}</span>
-                        {req.customer_phone && (
-                          <span className="text-slate-400 ml-1">({req.customer_phone})</span>
-                        )}
-                      </div>
-                    )}
-                  </td>
-
-                  <td className="p-3.5 align-top">
-                    <p className="font-semibold text-slate-800 text-[11px]">{req.requested_by}</p>
-                    <span className="text-[9px] text-slate-400 uppercase font-bold tracking-wider">
-                      {req.requested_by_role}
-                    </span>
-                    {req.reviewed_by && (
-                      <p className="text-[9px] text-emerald-600 mt-1">
-                        Reviewed by {req.reviewed_by}
-                      </p>
-                    )}
-                  </td>
-
-                  <td className="p-3.5 text-center align-top">
-                    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold border ${statusColors[req.status]}`}>
-                      {req.status}
-                    </span>
-                    {(() => {
-                      const timeInfo = getAcceptedTimeInfo(req);
-                      if (!timeInfo) return null;
-                      return (
-                        <div className="mt-1">
-                          <span 
-                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] font-medium bg-blue-50 text-blue-700 border border-blue-200"
-                            title="Accepted part history clears automatically after 1 day (24 hours)"
-                          >
-                            <Clock className="w-2.5 h-2.5" />
-                            {timeInfo.text}
+          {/* Cards Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {filteredRequests.map((req) => {
+              const isSelected = selectedIds.includes(req.id);
+              const reqDate = new Date(req.created_at);
+              return (
+                <div
+                  key={req.id}
+                  className={`bg-white rounded-2xl border transition-all duration-200 p-4.5 flex flex-col justify-between shadow-2xs hover:shadow-md ${
+                    isSelected 
+                      ? 'border-indigo-600 ring-2 ring-indigo-500/20 bg-indigo-50/20' 
+                      : 'border-slate-200 hover:border-slate-300'
+                  }`}
+                >
+                  <div>
+                    {/* Card Top Row: Checkbox, Part No, Status, Urgency */}
+                    <div className="flex items-start justify-between gap-2 mb-2.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => handleToggleSelectRow(req.id)}
+                          className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer shrink-0"
+                        />
+                        <div className="truncate">
+                          <span className="font-mono font-black text-slate-900 text-sm tracking-wide block truncate">
+                            {req.part_no}
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-medium flex items-center gap-1 mt-0.5">
+                            <Calendar className="w-3 h-3 text-slate-400 shrink-0" />
+                            {reqDate.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })} · {reqDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                           </span>
                         </div>
-                      );
-                    })()}
-                  </td>
+                      </div>
 
-                  <td className="p-3.5 text-right pr-4 align-top">
+                      <div className="flex flex-col items-end gap-1 shrink-0">
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${statusColors[req.status]}`}>
+                          {req.status}
+                        </span>
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold border ${urgencyColors[req.urgency]}`}>
+                          {req.urgency} Urgency
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Part Name / Description */}
+                    <div className="text-xs font-semibold text-slate-800 line-clamp-2 mb-3">
+                      {req.part_name}
+                    </div>
+
+                    {/* Quantity & Reason Highlight */}
+                    <div className="bg-slate-50/80 rounded-xl p-2.5 border border-slate-150 grid grid-cols-2 gap-2 mb-3">
+                      <div>
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                          Requested Qty
+                        </span>
+                        <div className="flex items-baseline gap-1 mt-0.5">
+                          <span className="text-xl font-black font-mono text-indigo-700">
+                            {req.quantity}
+                          </span>
+                          <span className="text-[10px] text-slate-500 font-medium">units</span>
+                        </div>
+                      </div>
+
+                      <div>
+                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block">
+                          Reason
+                        </span>
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-200/70 text-slate-700 mt-1">
+                          {req.reason}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Customer & Requester Meta */}
+                    <div className="space-y-1.5 text-[11px] mb-3">
+                      {req.customer_name && (
+                        <div className="flex items-center justify-between text-slate-600 bg-slate-50 p-2 rounded-lg border border-slate-150">
+                          <span className="text-slate-400 text-[10px]">Customer:</span>
+                          <span className="font-semibold text-slate-800 truncate max-w-[180px]">
+                            {req.customer_name} {req.customer_phone ? `(${req.customer_phone})` : ''}
+                          </span>
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between text-slate-600 px-1">
+                        <span className="text-slate-400 text-[10px]">Requested By:</span>
+                        <span className="font-medium text-slate-700">
+                          {req.requested_by} <span className="text-slate-400 text-[10px]">({req.requested_by_role || 'Staff'})</span>
+                        </span>
+                      </div>
+
+                      {req.notes && (
+                        <div className="bg-amber-50/60 p-2 rounded-lg border border-amber-200/60 text-slate-600 text-[10px] italic">
+                          "{req.notes}"
+                        </div>
+                      )}
+
+                      {req.action_notes && (
+                        <div className="bg-blue-50/60 p-2 rounded-lg border border-blue-200/60 text-slate-600 text-[10px]">
+                          <strong>Action Note:</strong> {req.action_notes}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Actions Footer */}
+                  <div className="pt-2.5 border-t border-slate-100 flex items-center justify-between gap-2 flex-wrap">
+                    <div className="text-[10px] text-slate-400">
+                      {req.reviewed_by ? `Reviewed by ${req.reviewed_by}` : 'Pending review'}
+                    </div>
+
                     {isOwner ? (
-                      <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         {req.status === 'Pending' && (
                           <>
                             <button
                               type="button"
-                              onClick={() => handleExportPending([req])}
-                              className="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
-                              title="Export this pending part to Excel"
-                            >
-                              <FileSpreadsheet className="w-3 h-3 text-amber-700" /> Excel
-                            </button>
-                            <button
                               onClick={() => handleStatusChange(req.id, 'Accepted')}
-                              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1 shadow-2xs"
                               title="Accept request"
                             >
                               <CheckCircle2 className="w-3 h-3" /> Accept
                             </button>
                             <button
+                              type="button"
                               onClick={() => setRejectingRequest(req)}
                               className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
                               title="Reject request"
@@ -1423,60 +1827,56 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                             </button>
                           </>
                         )}
+
                         {req.status === 'Accepted' && (
-                          <div className="flex items-center gap-1">
+                          <>
                             <button
+                              type="button"
                               onClick={() => handleExportAccepted([req])}
                               className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
-                              title="Export this accepted part to Excel"
+                              title="Export this part to Excel"
                             >
                               <FileSpreadsheet className="w-3 h-3" /> Excel
                             </button>
                             <button
+                              type="button"
                               onClick={() => handleStatusChange(req.id, 'Ordered with Dealer')}
-                              className="px-2.5 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                              className="px-2.5 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1 shadow-2xs"
                             >
-                              <Truck className="w-3 h-3" /> Order Placed
+                              <Truck className="w-3 h-3" /> Placed
                             </button>
-                          </div>
+                          </>
                         )}
+
                         {req.status === 'Ordered with Dealer' && (
                           <button
+                            type="button"
                             onClick={() => handleStatusChange(req.id, 'Received')}
-                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                            className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1 shadow-2xs"
                           >
                             <PackageCheck className="w-3 h-3" /> Mark Received
                           </button>
                         )}
+
                         {(req.status === 'Received' || req.status === 'Rejected') && (
                           <span className="text-[10px] text-slate-400 italic">Archived</span>
                         )}
                       </div>
                     ) : (
-                      <div className="text-right">
+                      <div>
                         {req.status === 'Pending' ? (
-                          <div className="flex items-center justify-end gap-1.5">
-                            <span className="text-[10px] text-amber-600 font-semibold flex items-center gap-1">
-                              <Clock className="w-3 h-3" /> Awaiting Owner
+                          <span className="text-[10px] text-amber-600 font-semibold flex items-center gap-1">
+                            <Clock className="w-3 h-3" /> Awaiting Owner
+                          </span>
+                        ) : req.status === 'Accepted' || req.status === 'Ordered with Dealer' ? (
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[10px] text-emerald-600 font-semibold flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3" /> Approved
                             </span>
                             <button
                               type="button"
-                              onClick={() => handleExportPending([req])}
-                              className="px-2 py-0.5 bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 rounded text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
-                              title="Export this pending part to Excel"
-                            >
-                              <FileSpreadsheet className="w-3 h-3 text-amber-700" /> Excel
-                            </button>
-                          </div>
-                        ) : req.status === 'Accepted' || req.status === 'Ordered with Dealer' ? (
-                          <div className="flex items-center justify-end gap-1.5">
-                            <span className="text-[10px] text-emerald-600 font-semibold flex items-center gap-1">
-                              <CheckCircle2 className="w-3 h-3" /> Approved by Owner
-                            </span>
-                            <button
                               onClick={() => handleExportAccepted([req])}
                               className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
-                              title="Export to Excel"
                             >
                               <FileSpreadsheet className="w-3 h-3" />
                             </button>
@@ -1486,22 +1886,234 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                         )}
                       </div>
                     )}
-                  </td>
-                </tr>
-              ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
 
-              {filteredRequests.length === 0 && (
-                <tr>
-                  <td colSpan={8} className="p-8 text-center text-slate-400">
-                    <ClipboardList className="w-8 h-8 mx-auto mb-2 text-slate-300" />
-                    No order requests found matching your filters.
-                  </td>
-                </tr>
+          {/* Cards Empty State */}
+          {filteredRequests.length === 0 && (
+            <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-400">
+              <ClipboardList className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+              <p className="font-semibold text-slate-700">No order requests found</p>
+              <p className="text-xs text-slate-400 mt-1">
+                {selectedDateFilter 
+                  ? `No order requests found for ${formatDateDetails(selectedDateFilter).title}.`
+                  : "No order requests matching your active filters."}
+              </p>
+              {selectedDateFilter && (
+                <button
+                  type="button"
+                  onClick={() => handleSelectDateCard(null)}
+                  className="mt-3 px-3.5 py-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-xl text-xs font-bold transition cursor-pointer inline-flex items-center gap-1.5"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  <span>Show All Dates</span>
+                </button>
               )}
-            </tbody>
-          </table>
+            </div>
+          )}
         </div>
-      </div>
+      ) : (
+        /* Table View */
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-slate-200 text-left text-xs">
+              <thead className="bg-slate-50 text-slate-500 uppercase font-bold text-[10px] tracking-wider">
+                <tr>
+                  <th className="p-3.5 pl-4 w-12 text-center">
+                    <div className="flex items-center justify-center gap-1">
+                      <input
+                        type="checkbox"
+                        checked={filteredRequests.length > 0 && filteredRequests.every(r => selectedIds.includes(r.id))}
+                        onChange={() => handleToggleSelectAll(filteredRequests)}
+                        className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                        title={filteredRequests.length > 0 && filteredRequests.every(r => selectedIds.includes(r.id)) ? "Deselect all (Ctrl+A)" : "Select all filtered orders (Ctrl+A)"}
+                      />
+                    </div>
+                  </th>
+                  <th className="p-3.5 px-4">Date & Urgency</th>
+                  <th className="p-3.5">Part Details</th>
+                  <th className="p-3.5 text-center">Req. Qty</th>
+                  <th className="p-3.5">Reason & Customer</th>
+                  <th className="p-3.5">Requested By</th>
+                  <th className="p-3.5 text-center">Status</th>
+                  <th className="p-3.5 text-right pr-4">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200 text-slate-700">
+                {filteredRequests.map((req) => (
+                  <tr key={req.id} className={`hover:bg-slate-50/70 transition ${selectedIds.includes(req.id) ? 'bg-indigo-50/40' : ''}`}>
+                    <td className="p-3.5 pl-4 align-top text-center">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.includes(req.id)}
+                        onChange={() => handleToggleSelectRow(req.id)}
+                        className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer mt-1"
+                      />
+                    </td>
+                    <td className="p-3.5 px-4 align-top">
+                      <p className="font-mono text-[11px] text-slate-900 font-semibold">
+                        {new Date(req.created_at).toLocaleDateString()}
+                      </p>
+                      <p className="text-[10px] text-slate-400">
+                        {new Date(req.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </p>
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[9px] font-bold border mt-1.5 ${urgencyColors[req.urgency]}`}>
+                        {req.urgency} Urgency
+                      </span>
+                    </td>
+
+                    <td className="p-3.5 align-top">
+                      <p className="font-mono font-bold text-slate-900">{req.part_no}</p>
+                      <p className="font-medium text-slate-600 text-[11px] mt-0.5">{req.part_name}</p>
+                      {req.notes && (
+                        <p className="text-[10px] text-slate-400 italic mt-1 bg-slate-50 p-1.5 rounded border border-slate-150">
+                          "{req.notes}"
+                        </p>
+                      )}
+                    </td>
+
+                    <td className="p-3.5 text-center align-top">
+                      <span className="inline-flex items-center justify-center font-bold px-3 py-1 rounded-lg bg-indigo-50 text-indigo-700 text-sm border border-indigo-100">
+                        {req.quantity}
+                      </span>
+                    </td>
+
+                    <td className="p-3.5 align-top">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-100 text-slate-700">
+                        {req.reason}
+                      </span>
+                      {req.customer_name && (
+                        <div className="mt-1 text-[11px]">
+                          <span className="font-semibold text-slate-800">{req.customer_name}</span>
+                          {req.customer_phone && (
+                            <span className="text-slate-400 ml-1">({req.customer_phone})</span>
+                          )}
+                        </div>
+                      )}
+                    </td>
+
+                    <td className="p-3.5 align-top">
+                      <p className="font-semibold text-slate-800 text-[11px]">{req.requested_by}</p>
+                      <span className="text-[9px] text-slate-400 uppercase font-bold tracking-wider">
+                        {req.requested_by_role}
+                      </span>
+                      {req.reviewed_by && (
+                        <p className="text-[9px] text-emerald-600 mt-1">
+                          Reviewed by {req.reviewed_by}
+                        </p>
+                      )}
+                    </td>
+
+                    <td className="p-3.5 text-center align-top">
+                      <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold border ${statusColors[req.status]}`}>
+                        {req.status}
+                      </span>
+                    </td>
+
+                    <td className="p-3.5 text-right pr-4 align-top">
+                      {isOwner ? (
+                        <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                          {req.status === 'Pending' && (
+                            <>
+                              <button
+                                onClick={() => handleStatusChange(req.id, 'Accepted')}
+                                className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                                title="Accept request"
+                              >
+                                <CheckCircle2 className="w-3 h-3" /> Accept
+                              </button>
+                              <button
+                                onClick={() => setRejectingRequest(req)}
+                                className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                                title="Reject request"
+                              >
+                                <XCircle className="w-3 h-3" /> Reject
+                              </button>
+                            </>
+                          )}
+                          {req.status === 'Accepted' && (
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => handleExportAccepted([req])}
+                                className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                                title="Export this accepted part to Excel"
+                              >
+                                <FileSpreadsheet className="w-3 h-3" /> Excel
+                              </button>
+                              <button
+                                onClick={() => handleStatusChange(req.id, 'Ordered with Dealer')}
+                                className="px-2.5 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                              >
+                                <Truck className="w-3 h-3" /> Order Placed
+                              </button>
+                            </div>
+                          )}
+                          {req.status === 'Ordered with Dealer' && (
+                            <button
+                              onClick={() => handleStatusChange(req.id, 'Received')}
+                              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                            >
+                              <PackageCheck className="w-3 h-3" /> Mark Received
+                            </button>
+                          )}
+                          {(req.status === 'Received' || req.status === 'Rejected') && (
+                            <span className="text-[10px] text-slate-400 italic">Archived</span>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-right">
+                          {req.status === 'Pending' ? (
+                            <span className="text-[10px] text-amber-600 font-semibold flex items-center justify-end gap-1">
+                              <Clock className="w-3 h-3" /> Awaiting Owner
+                            </span>
+                          ) : req.status === 'Accepted' || req.status === 'Ordered with Dealer' ? (
+                            <div className="flex items-center justify-end gap-1.5">
+                              <span className="text-[10px] text-emerald-600 font-semibold flex items-center gap-1">
+                                <CheckCircle2 className="w-3 h-3" /> Approved by Owner
+                              </span>
+                              <button
+                                onClick={() => handleExportAccepted([req])}
+                                className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                                title="Export to Excel"
+                              >
+                                <FileSpreadsheet className="w-3 h-3" />
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-slate-400">{req.status}</span>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+
+                {filteredRequests.length === 0 && (
+                  <tr>
+                    <td colSpan={8} className="p-8 text-center text-slate-400">
+                      <ClipboardList className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+                      <p className="font-semibold text-slate-700">No order requests found matching your filters</p>
+                      {selectedDateFilter && (
+                        <button
+                          type="button"
+                          onClick={() => handleSelectDateCard(null)}
+                          className="mt-3 px-3.5 py-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded-xl text-xs font-bold transition cursor-pointer inline-flex items-center gap-1.5"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                          <span>Show All Dates</span>
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* Floating Multi-Select Action Bar */}
       {selectedIds.length > 0 && (
@@ -1512,20 +2124,6 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
           </div>
           <div className="h-4 w-px bg-slate-700 shrink-0" />
           <div className="flex items-center gap-2 flex-wrap">
-            {requests.some(r => selectedIds.includes(r.id) && r.status === 'Pending') && (
-              <button
-                type="button"
-                onClick={() => {
-                  const selectedPending = requests.filter(r => selectedIds.includes(r.id) && r.status === 'Pending');
-                  handleExportPending(selectedPending);
-                }}
-                className="px-3.5 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm"
-                title="Export selected pending parts to Excel"
-              >
-                <FileSpreadsheet className="w-3.5 h-3.5 text-slate-950" />
-                <span>Export Pending ({requests.filter(r => selectedIds.includes(r.id) && r.status === 'Pending').length})</span>
-              </button>
-            )}
             {isOwner && requests.some(r => selectedIds.includes(r.id) && r.status === 'Pending') && (
               <button
                 type="button"
