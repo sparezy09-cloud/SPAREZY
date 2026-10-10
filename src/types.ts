@@ -275,3 +275,25 @@ export interface TransactionLog {
   created_at: string;
 }
 
+export interface PartInventoryEdit {
+  id: string;
+  brand: Brand;
+  part_no: string;
+  action: 'edit' | 'create' | 'delete' | 'archive' | 'unarchive';
+  user_id: string;
+  user_name: string;
+  user_role: string;
+  old_quantity?: number;
+  new_quantity?: number;
+  old_part_name?: string;
+  new_part_name?: string;
+  old_hsn?: string;
+  new_hsn?: string;
+  old_mrp?: number;
+  new_mrp?: number;
+  old_status?: boolean;
+  new_status?: boolean;
+  summary: string;
+  created_at: string;
+}
+

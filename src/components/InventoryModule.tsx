@@ -7,7 +7,7 @@ import {
   Trash2, Plus, ArrowLeft, ArrowRight, X, Layers, Download, FileSpreadsheet,
   AlertTriangle, History, Calendar, Lock, Eye, Filter, ArrowDownAZ, ArrowUpAZ, 
   ArrowDown10, ArrowUp10, RotateCcw, Check, ArrowUpDown, ArrowUp, ArrowDown,
-  ClipboardPlus
+  ClipboardPlus, Edit3
 } from 'lucide-react';
 
 export type SortColumn = 'part_no' | 'part_name' | 'quantity' | 'mrp' | 'hsn' | null;
@@ -43,7 +43,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
   const [inlineEdits, setInlineEdits] = useState<Record<string, { part_name: string; quantity: number }>>({});
   const [deletingItemConfirm, setDeletingItemConfirm] = useState<InventoryItem | null>(null);
   const [viewingPartDetails, setViewingPartDetails] = useState<InventoryItem | null>(null);
-  const [movementTab, setMovementTab] = useState<'all' | 'sales' | 'purchases' | 'returns'>('all');
+  const [movementTab, setMovementTab] = useState<'all' | 'sales' | 'purchases' | 'returns' | 'edits'>('all');
 
   // Quick Order Request from Inventory
   const [orderRequestingItem, setOrderRequestingItem] = useState<InventoryItem | null>(null);
@@ -372,7 +372,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
   // Part Movement calculator for the details popup
   const partMovements = useMemo(() => {
     if (!viewingPartDetails) {
-      return { sales: [], purchases: [], returns: [], unified: [] };
+      return { sales: [], purchases: [], returns: [], edits: [], unified: [] };
     }
     const targetNo = viewingPartDetails.part_no.trim().toLowerCase();
 
@@ -441,17 +441,42 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
         };
       });
 
+    // 4. Match direct inventory edits made by owner/admin
+    const allEdits = db.getPartEditHistory(brand, viewingPartDetails.part_no) || [];
+    const editsMovements = allEdits.map(edit => {
+      const qtyChange = edit.old_quantity !== undefined && edit.new_quantity !== undefined
+        ? edit.new_quantity - edit.old_quantity
+        : (edit.new_quantity ?? viewingPartDetails.quantity);
+      
+      const displayQty = Math.abs(qtyChange);
+
+      return {
+        id: edit.id,
+        type: 'edit' as const,
+        date: edit.created_at,
+        quantity: displayQty,
+        quantityChange: qtyChange,
+        mrp: edit.new_mrp ?? viewingPartDetails.mrp,
+        total: (edit.new_mrp ?? viewingPartDetails.mrp) * displayQty,
+        info: `Inventory Update: ${edit.summary}`,
+        referenceId: edit.id,
+        operator: edit.user_name || 'Owner'
+      };
+    });
+
     // Combine all and sort by date descending
     const unifiedMovements = [
       ...salesMovements,
       ...purchasesMovements,
-      ...returnsMovements
+      ...returnsMovements,
+      ...editsMovements
     ].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
     return {
       sales: salesMovements,
       purchases: purchasesMovements,
       returns: returnsMovements,
+      edits: editsMovements,
       unified: unifiedMovements
     };
   }, [viewingPartDetails, brand]);
@@ -2584,12 +2609,12 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
               </div>
 
               {/* Part Quick Meta / KPIs */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
                 
                 {/* Available Stock Card */}
-                <div className="bg-slate-50 border border-slate-200/80 p-4 rounded-xl flex flex-col justify-between shadow-xs">
+                <div className="bg-slate-50 border border-slate-200/80 p-3.5 rounded-xl flex flex-col justify-between shadow-xs">
                   <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">Current Stock</span>
-                  <div className="flex items-baseline gap-1.5 mt-2">
+                  <div className="flex items-baseline gap-1.5 mt-1.5">
                     <span className={`text-xl font-black font-mono ${viewingPartDetails.quantity <= lowStockThreshold ? 'text-rose-600' : 'text-slate-900'}`}>
                       {viewingPartDetails.quantity.toLocaleString()}
                     </span>
@@ -2609,11 +2634,11 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                 </div>
 
                 {/* Total Sales Outward */}
-                <div className="bg-rose-50/50 border border-rose-100 p-4 rounded-xl flex flex-col justify-between shadow-xs">
+                <div className="bg-rose-50/50 border border-rose-100 p-3.5 rounded-xl flex flex-col justify-between shadow-xs">
                   <span className="text-[10px] text-rose-700 font-bold uppercase tracking-wider">Total Sales</span>
-                  <div className="flex items-baseline gap-1.5 mt-2">
+                  <div className="flex items-baseline gap-1.5 mt-1.5">
                     <span className="text-xl font-black font-mono text-rose-800">
-                      {partMovements.sales.reduce((acc, curr) => acc + curr.quantity, 0).toLocaleString()}
+                      {partMovements.sales.reduce((acc: number, curr) => acc + curr.quantity, 0).toLocaleString()}
                     </span>
                     <span className="text-[10px] text-rose-500 font-bold font-sans">units</span>
                   </div>
@@ -2621,11 +2646,11 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                 </div>
 
                 {/* Total Purchases Inward */}
-                <div className="bg-emerald-50/50 border border-emerald-100 p-4 rounded-xl flex flex-col justify-between shadow-xs">
+                <div className="bg-emerald-50/50 border border-emerald-100 p-3.5 rounded-xl flex flex-col justify-between shadow-xs">
                   <span className="text-[10px] text-emerald-700 font-bold uppercase tracking-wider">Total Purchases</span>
-                  <div className="flex items-baseline gap-1.5 mt-2">
+                  <div className="flex items-baseline gap-1.5 mt-1.5">
                     <span className="text-xl font-black font-mono text-emerald-800">
-                      {partMovements.purchases.reduce((acc, curr) => acc + curr.quantity, 0).toLocaleString()}
+                      {partMovements.purchases.reduce((acc: number, curr) => acc + curr.quantity, 0).toLocaleString()}
                     </span>
                     <span className="text-[10px] text-emerald-500 font-bold font-sans">units</span>
                   </div>
@@ -2633,15 +2658,29 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                 </div>
 
                 {/* Sales Returns */}
-                <div className="bg-amber-50/50 border border-amber-100 p-4 rounded-xl flex flex-col justify-between shadow-xs">
+                <div className="bg-amber-50/50 border border-amber-100 p-3.5 rounded-xl flex flex-col justify-between shadow-xs">
                   <span className="text-[10px] text-amber-700 font-bold uppercase tracking-wider">Total Returns</span>
-                  <div className="flex items-baseline gap-1.5 mt-2">
+                  <div className="flex items-baseline gap-1.5 mt-1.5">
                     <span className="text-xl font-black font-mono text-amber-800">
-                      {partMovements.returns.reduce((acc, curr) => acc + curr.quantity, 0).toLocaleString()}
+                      {partMovements.returns.reduce((acc: number, curr) => acc + curr.quantity, 0).toLocaleString()}
                     </span>
                     <span className="text-[10px] text-amber-600 font-bold font-sans">units</span>
                   </div>
                   <span className="text-[10px] text-slate-400 font-medium">Returns Log: {partMovements.returns.length} records</span>
+                </div>
+
+                {/* Direct Inventory Edits */}
+                <div className="bg-purple-50/60 border border-purple-150 p-3.5 rounded-xl flex flex-col justify-between shadow-xs">
+                  <span className="text-[10px] text-purple-700 font-bold uppercase tracking-wider flex items-center gap-1">
+                    <Edit3 className="w-3 h-3 text-purple-600" /> Direct Edits
+                  </span>
+                  <div className="flex items-baseline gap-1.5 mt-1.5">
+                    <span className="text-xl font-black font-mono text-purple-900">
+                      {partMovements.edits.length}
+                    </span>
+                    <span className="text-[10px] text-purple-600 font-bold font-sans">updates</span>
+                  </div>
+                  <span className="text-[10px] text-purple-500 font-medium">Manual owner adjustments</span>
                 </div>
 
               </div>
@@ -2653,7 +2692,8 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                     { id: 'all', label: `All Movements (${partMovements.unified.length})` },
                     { id: 'sales', label: `Sales (${partMovements.sales.length})` },
                     { id: 'purchases', label: `Purchases (${partMovements.purchases.length})` },
-                    { id: 'returns', label: `Returns (${partMovements.returns.length})` }
+                    { id: 'returns', label: `Returns (${partMovements.returns.length})` },
+                    { id: 'edits', label: `Direct Edits (${partMovements.edits.length})` }
                   ].map((tab) => (
                     <button
                       key={tab.id}
@@ -2678,7 +2718,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                       <tr>
                         <th className="p-4">Type</th>
                         <th className="p-4">Date</th>
-                        <th className="p-4">Quantity</th>
+                        <th className="p-4">Quantity / Change</th>
                         <th className="p-4">Details / Counterparty</th>
                         <th className="p-4">Unit Price (INR)</th>
                         <th className="p-4">Total (INR)</th>
@@ -2691,6 +2731,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                           movementTab === 'sales' ? partMovements.sales :
                           movementTab === 'purchases' ? partMovements.purchases :
                           movementTab === 'returns' ? partMovements.returns :
+                          movementTab === 'edits' ? partMovements.edits :
                           partMovements.unified;
 
                         if (list.length === 0) {
@@ -2704,7 +2745,7 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                           );
                         }
 
-                        return list.map((mv) => (
+                        return list.map((mv: any) => (
                           <tr key={mv.id} className="hover:bg-slate-50/50 transition duration-100">
                             <td className="p-4 font-semibold">
                               {mv.type === 'sale' && (
@@ -2722,6 +2763,11 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                                   Return
                                 </span>
                               )}
+                              {mv.type === 'edit' && (
+                                <span className="px-2.5 py-0.5 text-[9px] bg-purple-50 text-purple-700 rounded-full border border-purple-200 uppercase font-black tracking-wider shadow-2xs inline-flex items-center gap-1">
+                                  <Edit3 className="w-2.5 h-2.5" /> Direct Edit
+                                </span>
+                              )}
                             </td>
                             <td className="p-4 font-mono text-slate-500 whitespace-nowrap text-[11px]">
                               {new Date(mv.date).toLocaleDateString(undefined, {
@@ -2733,7 +2779,13 @@ export default function InventoryModule({ brand, user, readOnly = false }: Inven
                               })}
                             </td>
                             <td className="p-4 font-bold font-mono text-slate-900">
-                              {mv.quantity.toLocaleString()}
+                              {mv.type === 'edit' && mv.quantityChange !== undefined ? (
+                                <span className={mv.quantityChange > 0 ? 'text-emerald-700' : mv.quantityChange < 0 ? 'text-rose-700' : 'text-slate-800'}>
+                                  {mv.quantityChange > 0 ? `+${mv.quantityChange}` : mv.quantityChange} units
+                                </span>
+                              ) : (
+                                `${mv.quantity.toLocaleString()} units`
+                              )}
                             </td>
                             <td className="p-4 font-semibold text-slate-600 max-w-xs truncate" title={mv.info}>
                               {mv.info}

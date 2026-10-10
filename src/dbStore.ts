@@ -3,7 +3,7 @@ import { idbStore } from './lib/idbStore';
 import { egressTracker } from './lib/egressTracker';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
-  Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, Brand, CustomerCategory, PaymentStatus, UserRole,
+  Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, PartInventoryEdit, Brand, CustomerCategory, PaymentStatus, UserRole,
   ScanSource, CustomerLedgerEntry, OrderRequest, StaffAttendance, PaymentType, DailyCashHandover
 } from './types';
 
@@ -2336,6 +2336,117 @@ export const db = {
       return deletedItem;
     }
     return null;
+  },
+
+  getPartEditHistory: (brand: Brand, partNo: string): PartInventoryEdit[] => {
+    if (!partNo) return [];
+    const targetNo = partNo.trim().toLowerCase();
+    const b = brand.toLowerCase();
+    const logs = cache.transaction_logs || [];
+    const results: PartInventoryEdit[] = [];
+
+    logs.forEach(log => {
+      if (log.module_name !== 'Inventory') return;
+
+      const desc = (log.description || '').toLowerCase();
+      let oldData: any = null;
+      let newData: any = null;
+      try {
+        oldData = log.old_data ? (typeof log.old_data === 'string' ? JSON.parse(log.old_data) : log.old_data) : null;
+      } catch (e) {
+        oldData = null;
+      }
+      try {
+        newData = log.new_data ? (typeof log.new_data === 'string' ? JSON.parse(log.new_data) : log.new_data) : null;
+      } catch (e) {
+        newData = null;
+      }
+
+      // Check if this log relates to the part
+      let matched = false;
+      let action: 'edit' | 'create' | 'delete' | 'archive' | 'unarchive' = 'edit';
+      let summary = log.description;
+
+      if (log.action_type === 'Edit Inventory') {
+        const oldNo = (oldData?.part_no || '').trim().toLowerCase();
+        const newNo = (newData?.part_no || '').trim().toLowerCase();
+        if (oldNo === targetNo || newNo === targetNo || desc.includes(`part ${targetNo}`)) {
+          matched = true;
+          action = 'edit';
+          const changes: string[] = [];
+          if (oldData?.quantity !== undefined && newData?.quantity !== undefined && oldData.quantity !== newData.quantity) {
+            changes.push(`Stock: ${oldData.quantity} → ${newData.quantity} units (${newData.quantity >= oldData.quantity ? '+' : ''}${newData.quantity - oldData.quantity})`);
+          }
+          if (oldData?.part_name !== undefined && newData?.part_name !== undefined && oldData.part_name !== newData.part_name) {
+            changes.push(`Name: "${oldData.part_name}" → "${newData.part_name}"`);
+          }
+          if (oldData?.hsn !== undefined && newData?.hsn !== undefined && oldData.hsn !== newData.hsn) {
+            changes.push(`HSN: "${oldData.hsn || 'None'}" → "${newData.hsn || 'None'}"`);
+          }
+          if (oldData?.mrp !== undefined && newData?.mrp !== undefined && oldData.mrp !== newData.mrp) {
+            changes.push(`MRP: ₹${oldData.mrp} → ₹${newData.mrp}`);
+          }
+          if (oldData?.is_active !== undefined && newData?.is_active !== undefined && oldData.is_active !== newData.is_active) {
+            changes.push(`Status: ${oldData.is_active ? 'Active' : 'Archived'} → ${newData.is_active ? 'Active' : 'Archived'}`);
+          }
+          summary = changes.length > 0 ? changes.join(' | ') : log.description;
+        }
+      } else if (log.action_type === 'Create Inventory') {
+        const itemNo = (newData?.part_no || '').trim().toLowerCase();
+        if (itemNo === targetNo || desc.includes(`part ${targetNo}`)) {
+          matched = true;
+          action = 'create';
+          summary = `Part Created in Master (Stock: ${newData?.quantity ?? 0} units, MRP: ₹${newData?.mrp ?? 0})`;
+        }
+      } else if (log.action_type === 'Delete Part') {
+        const itemNo = (oldData?.part_no || '').trim().toLowerCase();
+        if (itemNo === targetNo || desc.includes(`part ${targetNo}`)) {
+          matched = true;
+          action = 'delete';
+          summary = `Part Deleted from Inventory by Owner`;
+        }
+      } else if (log.action_type === 'Archive Parts' || log.action_type === 'Unarchive Parts') {
+        const isArch = log.action_type === 'Archive Parts';
+        action = isArch ? 'archive' : 'unarchive';
+        // old_data and new_data might be arrays of items
+        if (Array.isArray(oldData)) {
+          const found = oldData.find((it: any) => (it?.part_no || '').trim().toLowerCase() === targetNo);
+          if (found) {
+            matched = true;
+            summary = isArch ? 'Part Archived (Hidden from billing)' : 'Part Unarchived (Restored to active)';
+          }
+        } else if (desc.includes(targetNo)) {
+          matched = true;
+          summary = isArch ? 'Part Archived' : 'Part Unarchived';
+        }
+      }
+
+      if (matched) {
+        results.push({
+          id: log.id,
+          brand,
+          part_no: partNo,
+          action,
+          user_id: log.user_id,
+          user_name: log.user_name,
+          user_role: 'Owner / Admin',
+          old_quantity: oldData?.quantity,
+          new_quantity: newData?.quantity,
+          old_part_name: oldData?.part_name,
+          new_part_name: newData?.part_name,
+          old_hsn: oldData?.hsn,
+          new_hsn: newData?.hsn,
+          old_mrp: oldData?.mrp,
+          new_mrp: newData?.mrp,
+          old_status: oldData?.is_active,
+          new_status: newData?.is_active,
+          summary,
+          created_at: log.created_at
+        });
+      }
+    });
+
+    return results;
   },
 
   archivePartsFiltered: async (brand: Brand, searchText: string, user: User, onProgress?: (count: number) => void): Promise<number> => {
