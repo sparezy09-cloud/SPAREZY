@@ -297,3 +297,40 @@ export interface PartInventoryEdit {
   created_at: string;
 }
 
+export interface EstimateItem {
+  id: string;
+  part_no: string;
+  part_name: string;
+  quantity: number;
+  mrp: number;
+  is_net_price?: boolean;
+  net_price?: number;
+  discount_percentage: number;
+  final_amount: number;
+  hsn?: string;
+}
+
+export type EstimateStatus = 'Draft' | 'Sent' | 'Converted to Bill' | 'Cancelled';
+
+export interface Estimate {
+  id: string;
+  estimate_no: string;
+  brand: Brand;
+  customer_id?: string;
+  customer_name: string;
+  customer_phone?: string;
+  customer_category: CustomerCategory;
+  items: EstimateItem[];
+  subtotal: number;
+  discount_percentage: number;
+  discount_amount: number;
+  total_amount: number;
+  notes?: string;
+  status: EstimateStatus;
+  converted_sale_id?: string;
+  converted_invoice_no?: string;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+

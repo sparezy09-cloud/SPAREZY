@@ -19,13 +19,14 @@ import AuditTrail from './components/AuditTrail';
 import SettingsModule from './components/SettingsModule';
 import OrderRequestsModule from './components/OrderRequestsModule';
 import AttendanceModule from './components/AttendanceModule';
+import EstimateMakerModule from './components/EstimateMakerModule';
 
 // Menu icons
 import { 
   CarFront, LayoutDashboard, Layers, ShoppingBag, RotateCcw, 
   FileText, FileSpreadsheet, Users, Terminal, Shield, LogOut, Menu, X, CheckCircle,
   AlertTriangle, RefreshCw, Download, Receipt, ClipboardList, CalendarCheck, History,
-  Wrench, Keyboard
+  Wrench, Keyboard, Calculator
 } from 'lucide-react';
 import { SupabasePermissionsFixModal } from './components/SupabasePermissionsFixModal';
 import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
@@ -333,7 +334,7 @@ export default function App() {
   // Enforce Manager role navigation restrictions
   useEffect(() => {
     if (activeUser?.role === 'Manager') {
-      const allowedModules = ['Sales', 'Sale POS', 'Returns', 'Inventory', 'Order Requests'];
+      const allowedModules = ['Sales', 'Sale POS', 'Estimate Maker', 'Returns', 'Inventory', 'Order Requests'];
       if (!allowedModules.includes(activeModule)) {
         setActiveModule('Sales');
       }
@@ -375,6 +376,7 @@ export default function App() {
     { name: 'Dashboard', icon: LayoutDashboard, allowedRoles: ['Owner', 'Admin'] },
     { name: 'Inventory', icon: Layers, allowedRoles: ['Owner', 'Admin', 'Manager'] },
     { name: 'Sales', icon: ShoppingBag, allowedRoles: ['Owner', 'Admin', 'Manager'] },
+    { name: 'Estimate Maker', icon: Calculator, allowedRoles: ['Owner', 'Admin', 'Manager'] },
     { name: 'Returns', icon: RotateCcw, allowedRoles: ['Owner', 'Admin', 'Manager'] },
     { name: 'Purchases', icon: FileText, allowedRoles: ['Owner', 'Admin'] },
     { name: 'Order Requests', icon: ClipboardList, allowedRoles: ['Owner', 'Admin', 'Manager'] },
@@ -386,13 +388,14 @@ export default function App() {
     { name: 'Settings / User Management', icon: Shield, allowedRoles: ['Owner', 'Admin'] },
   ];
 
-  // In Manager role Inventory, Sales, Returns, and Order Requests tabs are visible; hide all other tabs.
+  // In Manager role Inventory, Sales, Estimate Maker, Returns, and Order Requests tabs are visible; hide all other tabs.
   const visibleSidebarItems = useMemo(() => {
     if (!activeUser) return [];
     if (activeUser.role === 'Manager') {
       return sidebarItems.filter(item => 
         item.name === 'Inventory' || 
         item.name === 'Sales' || 
+        item.name === 'Estimate Maker' || 
         item.name === 'Returns' || 
         item.name === 'Order Requests'
       );
@@ -484,8 +487,11 @@ export default function App() {
   const renderModuleContent = () => {
     if (!activeBrand || !activeUser) return null;
 
-    // Manager role permissions: Sales, Returns, Inventory (read-only), and Order Requests
+    // Manager role permissions: Sales, Estimate Maker, Returns, Inventory (read-only), and Order Requests
     if (activeUser.role === 'Manager') {
+      if (activeModule === 'Estimate Maker') {
+        return <EstimateMakerModule brand={activeBrand} user={activeUser} onNavigateToSales={() => setActiveModule('Sales')} />;
+      }
       if (activeModule === 'Order Requests') {
         return <OrderRequestsModule brand={activeBrand} user={activeUser} />;
       }
@@ -522,6 +528,8 @@ export default function App() {
       case 'Sales':
       case 'Sale POS':
         return <SalesModule brand={activeBrand} user={activeUser} />;
+      case 'Estimate Maker':
+        return <EstimateMakerModule brand={activeBrand} user={activeUser} onNavigateToSales={() => setActiveModule('Sales')} />;
       case 'Returns':
         return <ReturnModule brand={activeBrand} user={activeUser} />;
       case 'Purchases':

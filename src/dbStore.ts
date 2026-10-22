@@ -4,7 +4,7 @@ import { egressTracker } from './lib/egressTracker';
 import { 
   User, InventoryItem, Customer, Sale, SaleItem, ReturnRecord, 
   Purchase, PurchaseItem, BulkUpdateHistory, MRPHistory, TransactionLog, PartInventoryEdit, Brand, CustomerCategory, PaymentStatus, UserRole,
-  ScanSource, CustomerLedgerEntry, OrderRequest, StaffAttendance, PaymentType, DailyCashHandover
+  ScanSource, CustomerLedgerEntry, OrderRequest, StaffAttendance, PaymentType, DailyCashHandover, Estimate, EstimateItem
 } from './types';
 
 // Storage keys for active preferences and local storage fallback
@@ -16,6 +16,7 @@ const KEY_ATTENDANCE = 'sparezy_public_attendance_fb';
 const KEY_DAILY_HANDOVERS = 'sparezy_public_daily_handovers_fb';
 const KEY_OWNER_WHATSAPP_PHONE = 'sparezy_owner_whatsapp_phone';
 const KEY_LOGS = 'sparezy_public_logs_fb';
+const KEY_ESTIMATES = 'sparezy_public_estimates_fb';
 const KEY_ACTIVE_USER = 'sparezy_active_user_fb';
 const KEY_ACTIVE_BRAND = 'sparezy_active_brand_fb';
 
@@ -65,6 +66,7 @@ let cache = {
   staff_attendance: [] as StaffAttendance[],
   daily_handovers: [] as DailyCashHandover[],
   transaction_logs: [] as TransactionLog[],
+  estimates: [] as Estimate[],
   hyundai: {
     inventory: [] as InventoryItem[],
     sales: [] as Sale[],
@@ -642,13 +644,14 @@ export const db = {
       
       // Fast hydration from IndexedDB for zero-egress initial UI render
       try {
-        const [cachedUsers, cachedCustomers, cachedLogs, cachedLedger, cachedOrders, cachedAtt] = await Promise.all([
+        const [cachedUsers, cachedCustomers, cachedLogs, cachedLedger, cachedOrders, cachedAtt, cachedEstimates] = await Promise.all([
           idbStore.get<User[]>('cache_partitions', 'public_users'),
           idbStore.get<Customer[]>('cache_partitions', 'public_customers'),
           idbStore.get<TransactionLog[]>('cache_partitions', 'public_logs'),
           idbStore.get<CustomerLedgerEntry[]>('cache_partitions', 'public_ledger'),
           idbStore.get<OrderRequest[]>('cache_partitions', 'public_orders'),
-          idbStore.get<StaffAttendance[]>('cache_partitions', 'public_attendance')
+          idbStore.get<StaffAttendance[]>('cache_partitions', 'public_attendance'),
+          idbStore.get<Estimate[]>('cache_partitions', 'public_estimates')
         ]);
         if (cachedUsers && cachedUsers.length > 0) cache.users = cachedUsers;
         if (cachedCustomers && cachedCustomers.length > 0) cache.customers = cachedCustomers;
@@ -656,6 +659,7 @@ export const db = {
         if (cachedLedger && cachedLedger.length > 0) cache.customer_ledger = cachedLedger;
         if (cachedOrders && cachedOrders.length > 0) cache.order_requests = cachedOrders;
         if (cachedAtt && cachedAtt.length > 0) cache.staff_attendance = cachedAtt;
+        if (cachedEstimates && cachedEstimates.length > 0) cache.estimates = cachedEstimates;
         if (cachedUsers || cachedCustomers) {
           egressTracker.recordCacheHit();
           db.notify();
@@ -681,6 +685,10 @@ export const db = {
         const localHandovers = localStorage.getItem(KEY_DAILY_HANDOVERS);
         if (localHandovers && cache.daily_handovers.length === 0) {
           cache.daily_handovers = JSON.parse(localHandovers).map(scrubRow);
+        }
+        const localEstimates = localStorage.getItem(KEY_ESTIMATES);
+        if (localEstimates && cache.estimates.length === 0) {
+          cache.estimates = JSON.parse(localEstimates).map(scrubRow);
         }
       } catch (e) {}
 
@@ -2563,6 +2571,132 @@ export const db = {
       db.notify();
       return matchCount;
     }
+  },
+
+  // Estimates (Quotation / Estimate Maker)
+  getEstimates: (brand?: Brand): Estimate[] => {
+    if (!brand) return cache.estimates || [];
+    return (cache.estimates || []).filter(e => e.brand.toLowerCase() === brand.toLowerCase());
+  },
+
+  createEstimate: (
+    brand: Brand,
+    customerName: string,
+    customerCategory: CustomerCategory,
+    items: EstimateItem[],
+    discountPercentage: number,
+    notes: string | undefined,
+    user: User,
+    customerPhone?: string,
+    customerId?: string
+  ): Estimate => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    const subtotal = items.reduce((acc, curr) => acc + (curr.final_amount || (curr.mrp * curr.quantity)), 0);
+    const discountAmount = subtotal * (discountPercentage / 100);
+    const totalAmount = subtotal - discountAmount;
+
+    const nextSeq = (cache.estimates || []).filter(e => e.brand.toLowerCase() === b).length + 101;
+    const estimateNo = `EST-${b.slice(0, 3).toUpperCase()}-${nextSeq}`;
+
+    const newEstimate: Estimate = {
+      id: uuid(),
+      estimate_no: estimateNo,
+      brand,
+      customer_id: customerId,
+      customer_name: customerName.trim(),
+      customer_phone: customerPhone?.trim() || undefined,
+      customer_category: customerCategory,
+      items,
+      subtotal,
+      discount_percentage: discountPercentage,
+      discount_amount: discountAmount,
+      total_amount: totalAmount,
+      notes: notes?.trim() || undefined,
+      status: 'Draft',
+      created_by: user.name,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    cache.estimates.unshift(newEstimate);
+    localStorage.setItem(KEY_ESTIMATES, JSON.stringify(cache.estimates));
+    idbStore.set('cache_partitions', 'public_estimates', cache.estimates);
+
+    db.logTransaction(
+      user.id,
+      user.name,
+      'Create Estimate',
+      'Estimates',
+      `Created estimate ${estimateNo} for ${customerName} (Total: ₹${totalAmount.toFixed(2)}, Items: ${items.length})`,
+      null,
+      newEstimate
+    );
+    db.notify();
+    return newEstimate;
+  },
+
+  updateEstimate: (
+    estimateId: string,
+    updates: Partial<Estimate>,
+    user: User
+  ): Estimate => {
+    const idx = (cache.estimates || []).findIndex(e => e.id === estimateId);
+    if (idx === -1) {
+      throw new Error(`Estimate with ID ${estimateId} not found.`);
+    }
+    const oldEstimate = { ...cache.estimates[idx] };
+    const updated: Estimate = {
+      ...cache.estimates[idx],
+      ...updates,
+      updated_at: new Date().toISOString()
+    };
+
+    // If items or discount changed, recompute totals
+    if (updates.items || updates.discount_percentage !== undefined) {
+      const items = updated.items;
+      const subtotal = items.reduce((acc, curr) => acc + (curr.final_amount || (curr.mrp * curr.quantity)), 0);
+      const discountAmount = subtotal * (updated.discount_percentage / 100);
+      updated.subtotal = subtotal;
+      updated.discount_amount = discountAmount;
+      updated.total_amount = subtotal - discountAmount;
+    }
+
+    cache.estimates[idx] = updated;
+    localStorage.setItem(KEY_ESTIMATES, JSON.stringify(cache.estimates));
+    idbStore.set('cache_partitions', 'public_estimates', cache.estimates);
+
+    db.logTransaction(
+      user.id,
+      user.name,
+      'Update Estimate',
+      'Estimates',
+      `Updated estimate ${updated.estimate_no} (${updated.status})`,
+      oldEstimate,
+      updated
+    );
+    db.notify();
+    return updated;
+  },
+
+  deleteEstimate: (estimateId: string, user: User): boolean => {
+    const idx = (cache.estimates || []).findIndex(e => e.id === estimateId);
+    if (idx === -1) return false;
+    const deleted = cache.estimates[idx];
+    cache.estimates.splice(idx, 1);
+    localStorage.setItem(KEY_ESTIMATES, JSON.stringify(cache.estimates));
+    idbStore.set('cache_partitions', 'public_estimates', cache.estimates);
+
+    db.logTransaction(
+      user.id,
+      user.name,
+      'Delete Estimate',
+      'Estimates',
+      `Deleted estimate ${deleted.estimate_no}`,
+      deleted,
+      null
+    );
+    db.notify();
+    return true;
   },
 
   // Sales
