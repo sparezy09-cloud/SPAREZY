@@ -99,6 +99,33 @@ CREATE TABLE IF NOT EXISTS public.transaction_logs (
     created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
 );
 
+-- Estimates / Quotations Maker Table
+CREATE TABLE IF NOT EXISTS public.estimates (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    estimate_no TEXT UNIQUE NOT NULL,
+    brand TEXT NOT NULL CHECK (brand IN ('Hyundai', 'Mahindra')),
+    customer_id UUID REFERENCES public.customers(id) ON DELETE SET NULL,
+    customer_name TEXT NOT NULL,
+    customer_phone TEXT,
+    customer_category TEXT NOT NULL CHECK (customer_category IN ('Mistri', 'Garage', 'Walk-in', 'Retailer')),
+    items JSONB NOT NULL DEFAULT '[]'::jsonb,
+    subtotal NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    discount_percentage NUMERIC(5,2) DEFAULT 0.00,
+    discount_amount NUMERIC(12,2) DEFAULT 0.00,
+    total_amount NUMERIC(12,2) NOT NULL DEFAULT 0.00,
+    notes TEXT,
+    status TEXT NOT NULL DEFAULT 'Draft' CHECK (status IN ('Draft', 'Sent', 'Converted to Bill', 'Cancelled')),
+    converted_sale_id TEXT,
+    converted_invoice_no TEXT,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_estimates_brand ON public.estimates (brand);
+CREATE INDEX IF NOT EXISTS idx_estimates_status ON public.estimates (status);
+CREATE INDEX IF NOT EXISTS idx_estimates_created_at ON public.estimates (created_at DESC);
+
 -- ====================================================================
 -- 3. BRAND SPECIFIC SCHEMA TABLES (Hyundai Schema Example)
 -- ====================================================================
@@ -854,6 +881,7 @@ GRANT ALL ON TABLE public.order_requests TO authenticated, anon;
 GRANT ALL ON TABLE public.staff_attendance TO authenticated, anon;
 GRANT ALL ON TABLE public.users TO authenticated, anon;
 GRANT ALL ON TABLE public.transaction_logs TO authenticated, anon;
+GRANT ALL ON TABLE public.estimates TO authenticated, anon;
 GRANT ALL ON ALL TABLES IN SCHEMA hyundai TO authenticated, anon;
 GRANT ALL ON ALL TABLES IN SCHEMA mahindra TO authenticated, anon;
 

@@ -716,7 +716,8 @@ export const db = {
           mInvRes,
           ledgerRes,
           ordersRes,
-          attRes
+          attRes,
+          estimatesRes
         ] = await Promise.all([
           supabase.from('users').select('id, name, email, role, status, created_at, per_day_salary'),
           supabase.from('customers').select('id, customer_name, customer_category, phone, address, starting_balance, starting_balance_type, created_at'),
@@ -727,7 +728,8 @@ export const db = {
           supabase.schema('mahindra').from('inventory').select('id').limit(1),
           supabase.from('customer_ledger').select('*').order('date', { ascending: false }).limit(500),
           supabase.from('order_requests').select('*').order('created_at', { ascending: false }).limit(200),
-          supabase.from('staff_attendance').select('*').order('date', { ascending: false }).limit(500)
+          supabase.from('staff_attendance').select('*').order('date', { ascending: false }).limit(500),
+          supabase.from('estimates').select('*').order('created_at', { ascending: false }).limit(300)
         ]);
         
         const usersData = usersRes.data;
@@ -766,6 +768,10 @@ export const db = {
         if (attRes.data && attRes.data.length > 0) {
           cache.staff_attendance = attRes.data.map(scrubRow) as StaffAttendance[];
           idbStore.set('cache_partitions', 'public_attendance', cache.staff_attendance);
+        }
+        if (estimatesRes.data && estimatesRes.data.length > 0) {
+          cache.estimates = estimatesRes.data.map(scrubRow) as Estimate[];
+          idbStore.set('cache_partitions', 'public_estimates', cache.estimates);
         }
 
         // Asynchronously persist to IndexedDB
@@ -2622,6 +2628,14 @@ export const db = {
     localStorage.setItem(KEY_ESTIMATES, JSON.stringify(cache.estimates));
     idbStore.set('cache_partitions', 'public_estimates', cache.estimates);
 
+    if (isSupabaseConfigured && supabase) {
+      supabase.from('estimates').insert(newEstimate).then(({ error }) => {
+        if (error) {
+          console.warn("Supabase public.estimates insert notice:", error.message);
+        }
+      });
+    }
+
     db.logTransaction(
       user.id,
       user.name,
@@ -2665,6 +2679,14 @@ export const db = {
     localStorage.setItem(KEY_ESTIMATES, JSON.stringify(cache.estimates));
     idbStore.set('cache_partitions', 'public_estimates', cache.estimates);
 
+    if (isSupabaseConfigured && supabase) {
+      supabase.from('estimates').update(updated).eq('id', estimateId).then(({ error }) => {
+        if (error) {
+          console.warn("Supabase public.estimates update notice:", error.message);
+        }
+      });
+    }
+
     db.logTransaction(
       user.id,
       user.name,
@@ -2685,6 +2707,14 @@ export const db = {
     cache.estimates.splice(idx, 1);
     localStorage.setItem(KEY_ESTIMATES, JSON.stringify(cache.estimates));
     idbStore.set('cache_partitions', 'public_estimates', cache.estimates);
+
+    if (isSupabaseConfigured && supabase) {
+      supabase.from('estimates').delete().eq('id', estimateId).then(({ error }) => {
+        if (error) {
+          console.warn("Supabase public.estimates delete notice:", error.message);
+        }
+      });
+    }
 
     db.logTransaction(
       user.id,
