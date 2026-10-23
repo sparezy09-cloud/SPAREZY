@@ -925,7 +925,7 @@ export default function SalesModule({ brand, user }: SalesModuleProps) {
         throw new Error(payload.error || 'No structured data extracted from image.');
       }
 
-      setSlipModelUsed(payload.modelUsed || 'gemini-3.8-flash');
+      setSlipModelUsed(payload.modelUsed || 'gemini-3.5-flash');
       const scanData = payload.data;
       if (scanData.customerName && !modalTargetCustomerName) {
         setModalTargetCustomerName(scanData.customerName);

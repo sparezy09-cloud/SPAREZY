@@ -353,26 +353,26 @@ Return strictly valid JSON adhering to the schema.`;
     };
 
     let responseData;
-    let modelUsed = "gemini-3.8-flash";
+    let modelUsed = "gemini-3.5-flash";
     const startTime = Date.now();
 
     try {
-      console.log(`[SALES SLIP SCAN] Calling gemini-3.8-flash...`);
+      console.log(`[SALES SLIP SCAN] Calling gemini-3.5-flash...`);
       const response = await ai.models.generateContent({
-        model: "gemini-3.8-flash",
+        model: "gemini-3.5-flash",
         contents: { parts },
         config: schemaConfig
       });
 
       const responseTime = ((Date.now() - startTime) / 1000).toFixed(2);
-      console.log(`[SALES SLIP SCAN] gemini-3.8-flash responded in ${responseTime}s`);
+      console.log(`[SALES SLIP SCAN] gemini-3.5-flash responded in ${responseTime}s`);
 
       if (!response.text) {
-        throw new Error("No text output received from gemini-3.8-flash.");
+        throw new Error("No text output received from gemini-3.5-flash.");
       }
       responseData = parseCleanJson(response.text);
     } catch (primaryErr: any) {
-      console.warn(`[SALES SLIP SCAN WARNING] gemini-3.8-flash failed:`, primaryErr.message || primaryErr);
+      console.warn(`[SALES SLIP SCAN WARNING] gemini-3.5-flash failed:`, primaryErr.message || primaryErr);
       
       console.log(`[SALES SLIP SCAN] Falling back gracefully to gemini-3.1-flash-lite...`);
       const fallbackStartTime = Date.now();
