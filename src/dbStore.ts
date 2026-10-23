@@ -3316,9 +3316,10 @@ export const db = {
     invoiceDate: string,
     subtotal: number,
     discountPercentage: number,
-    items: { part_no: string; part_name: string; quantity: number; mrp: number; hsn: string; is_new_part?: boolean }[],
+    items: { part_no: string; part_name: string; quantity: number; mrp: number; hsn: string; is_new_part?: boolean; update_mrp?: boolean }[],
     scanSource: ScanSource,
-    user: User
+    user: User,
+    updateInventoryMrp: boolean = true
   ): Promise<Purchase> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const listPurchases = cache[b].purchases;
@@ -3334,15 +3335,34 @@ export const db = {
     
     const purchaseId = uuid();
     const pItemsToSave: PurchaseItem[] = [];
+    const mrpLogsToInsert: MRPHistory[] = [];
     
     for (const pItem of items) {
       const invIdx = inventory.findIndex(i => i.part_no.toLowerCase() === pItem.part_no.toLowerCase());
       const hasMatched = invIdx > -1;
+      const shouldUpdateThisMrp = pItem.update_mrp !== undefined ? pItem.update_mrp : updateInventoryMrp;
+      const newMrp = Number(pItem.mrp) || 0;
       
       if (hasMatched) {
         const invPart = inventory[invIdx];
         invPart.quantity += pItem.quantity;
-        // Strictly do NOT update MRP in purchase tab: MRP can only be updated by the MRP update tool in Bulk Update
+        const oldMrp = invPart.mrp;
+
+        // If enabled and MRP is positive and differs, update inventory MRP according to invoice
+        if (shouldUpdateThisMrp && newMrp > 0 && oldMrp !== newMrp) {
+          invPart.mrp = newMrp;
+          const mrpLog: MRPHistory = {
+            id: uuid(),
+            part_no: invPart.part_no,
+            old_mrp: oldMrp,
+            new_mrp: newMrp,
+            changed_by: `${user.name} (Purchase ${invoiceNo})`,
+            changed_at: new Date().toISOString()
+          };
+          cache[b].mrp_history.unshift(mrpLog);
+          mrpLogsToInsert.push(mrpLog);
+        }
+
         if (!invPart.is_active) {
           invPart.is_active = true;
           invPart.archived_at = null;
@@ -3352,23 +3372,24 @@ export const db = {
         if (isSupabaseConfigured && supabase) {
           const { error: invErr } = await supabase.schema(b).from('inventory').update({
             quantity: invPart.quantity,
+            mrp: invPart.mrp,
             is_active: invPart.is_active,
             archived_at: invPart.archived_at,
             updated_at: invPart.updated_at
           }).eq('id', invPart.id);
           if (invErr) {
-            throw new Error(`Failed to update stock quantity for part ${invPart.part_no}: ${invErr.message}`);
+            throw new Error(`Failed to update stock quantity & MRP for part ${invPart.part_no}: ${invErr.message}`);
           }
         }
       } else {
+        const initialPartMrp = newMrp > 0 ? newMrp : 0;
         const newInv: InventoryItem = {
           id: uuid(),
           part_no: pItem.part_no,
           part_name: pItem.part_name || 'New Spares Part',
           quantity: pItem.quantity,
           hsn: pItem.hsn || '',
-          // New part created via purchase starts with MRP 0; MRP can only be updated via the Bulk MRP Update tool
-          mrp: 0,
+          mrp: initialPartMrp,
           brand,
           is_active: true,
           archived_at: null,
@@ -3376,13 +3397,25 @@ export const db = {
           updated_at: new Date().toISOString()
         };
         inventory.push(newInv);
+        if (initialPartMrp > 0) {
+          const mrpLog: MRPHistory = {
+            id: uuid(),
+            part_no: newInv.part_no,
+            old_mrp: 0,
+            new_mrp: initialPartMrp,
+            changed_by: `${user.name} (New Part Purchase ${invoiceNo})`,
+            changed_at: new Date().toISOString()
+          };
+          cache[b].mrp_history.unshift(mrpLog);
+          mrpLogsToInsert.push(mrpLog);
+        }
         if (isSupabaseConfigured && supabase) {
           const { error: invErr } = await supabase.schema(b).from('inventory').insert(newInv);
           if (invErr) {
              throw new Error(`Failed to add new part ${pItem.part_no} to DB: ${invErr.message}`);
           }
         }
-        db.logTransaction(user.id, user.name, 'Create Inventory', 'Inventory', `Auto-added new part ${pItem.part_no} from Purchase ${invoiceNo}`, null, newInv);
+        db.logTransaction(user.id, user.name, 'Create Inventory', 'Inventory', `Auto-added new part ${pItem.part_no} (MRP ₹${initialPartMrp}) from Purchase ${invoiceNo}`, null, newInv);
       }
       
       const purchaseItemRec: PurchaseItem = {
@@ -3399,6 +3432,18 @@ export const db = {
       };
       
       pItemsToSave.push(purchaseItemRec);
+    }
+
+    // Save any newly created MRP history records
+    if (mrpLogsToInsert.length > 0) {
+      if (isSupabaseConfigured && supabase) {
+        supabase.schema(b).from('mrp_history').insert(mrpLogsToInsert).then(({ error }) => {
+          if (error) console.warn("Supabase mrp_history purchase update notice:", error.message);
+        });
+      } else {
+        localStorage.setItem(`sparezy_schema_${b}_mrp_history`, JSON.stringify(cache[b].mrp_history));
+      }
+      idbStore.set('cache_partitions', `${b}_mrp`, cache[b].mrp_history);
     }
     
     const purchase: Purchase = {
@@ -3433,12 +3478,14 @@ export const db = {
       localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
       localStorage.setItem(`sparezy_schema_${b}_purchases`, JSON.stringify(listPurchases));
       localStorage.setItem(`sparezy_schema_${b}_purchase_items`, JSON.stringify(purchaseItemsList));
+      localStorage.setItem(`sparezy_schema_${b}_mrp_history`, JSON.stringify(cache[b].mrp_history));
     }
     idbStore.set('cache_partitions', `${b}_inventory`, inventory);
     idbStore.set('cache_partitions', `${b}_purchases`, listPurchases);
     idbStore.set('cache_partitions', `${b}_purchase_items`, purchaseItemsList);
     
-    db.logTransaction(user.id, user.name, 'Create Purchase', 'Purchases', `Added brand purchase invoice ${invoiceNo} for dealer ${dealerName}`, null, purchase);
+    const mrpChangeSummary = mrpLogsToInsert.length > 0 ? ` (${mrpLogsToInsert.length} inventory MRPs updated)` : '';
+    db.logTransaction(user.id, user.name, 'Create Purchase', 'Purchases', `Added brand purchase invoice ${invoiceNo} for dealer ${dealerName}${mrpChangeSummary}`, null, purchase);
     db.notify();
     return purchase;
   },

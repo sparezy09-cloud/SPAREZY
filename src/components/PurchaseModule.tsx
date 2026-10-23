@@ -1,11 +1,13 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Brand, User, ScanSource, Purchase, PurchaseItem, InventoryItem } from '../types';
+import { Brand, User, ScanSource, Purchase, PurchaseItem, InventoryItem, isOwnerOrAdmin } from '../types';
 import { db } from '../dbStore';
 import { optimizeFileForEgress } from '../lib/imageOptimizer';
 import { 
   FileText, UploadCloud, Search, Calendar, CheckSquare, Sparkles, 
   Trash2, Plus, X, Eye, FileSpreadsheet, ShieldAlert, BadgeInfo, Zap,
-  CheckCircle2, Archive, PlusCircle
+  CheckCircle2, Archive, PlusCircle, ArrowUpRight, ArrowDownRight, 
+  TrendingUp, TrendingDown, ToggleLeft, ToggleRight, Check, AlertCircle,
+  Sliders, RefreshCw, ArrowRight
 } from 'lucide-react';
 
 interface PurchaseModuleProps {
@@ -19,6 +21,7 @@ interface NewPurchaseLineItem {
   hsn: string;
   quantity: number;
   mrp: number;
+  update_mrp?: boolean;
 }
 
 export type ScanMatchStatus = 'matched' | 'archived' | 'new';
@@ -28,7 +31,10 @@ interface ParsedAIScanRow {
   part_name: string;
   hsn: string;
   quantity: number;
-  mrp: number;
+  mrp: number; // Current scanned/edited invoice MRP
+  currentInventoryMrp?: number; // Existing inventory MRP in database
+  mrpDiff: number; // Difference: mrp - currentInventoryMrp
+  updateMrp: boolean; // Admin toggle: whether to update inventory MRP to this invoice MRP
   matchStatus: ScanMatchStatus;
   isNewPart?: boolean;
 }
@@ -41,6 +47,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   const [inventoryList, setInventoryList] = useState<InventoryItem[]>(() => db.getInventory(brand));
   const [purchasesList, setPurchasesList] = useState<Purchase[]>(() => db.getPurchases(brand));
   const [toastMessageLocal, setToastMessageLocal] = useState<string | null>(null);
+  const isAdmin = isOwnerOrAdmin(user?.role);
 
   const refreshComponentData = () => {
     setAllInventoryList(db.getInventory(brand, true));
@@ -61,6 +68,32 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
     return 'matched';
   };
 
+  // Helper to enrich a scanned or entered part with MRP variance and matching intelligence:
+  const enrichParsedRow = (
+    row: { part_no: string; part_name?: string; hsn?: string; quantity: number; mrp: number; updateMrp?: boolean },
+    allInv: InventoryItem[]
+  ): ParsedAIScanRow => {
+    const clean = String(row.part_no || '').trim().toLowerCase();
+    const found = allInv.find(inv => inv.part_no.trim().toLowerCase() === clean);
+    const status: ScanMatchStatus = !found ? 'new' : (found.is_active === false ? 'archived' : 'matched');
+    const currentMrp = found ? Number(found.mrp) || 0 : undefined;
+    const scannedMrp = Number(row.mrp) || 0;
+    const diff = currentMrp !== undefined ? (scannedMrp - currentMrp) : 0;
+
+    return {
+      part_no: String(row.part_no || '').trim().toUpperCase(),
+      part_name: String(row.part_name || (found ? found.part_name : '')).trim(),
+      hsn: String(row.hsn || (found?.hsn ? found.hsn : '87089900')).trim(),
+      quantity: Number(row.quantity) || 1,
+      mrp: scannedMrp,
+      currentInventoryMrp: currentMrp,
+      mrpDiff: diff,
+      updateMrp: row.updateMrp !== undefined ? row.updateMrp : true,
+      matchStatus: status,
+      isNewPart: status === 'new'
+    };
+  };
+
   React.useEffect(() => {
     refreshComponentData();
     return db.subscribe(refreshComponentData);
@@ -70,6 +103,12 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
     setToastMessageLocal(msg);
     setTimeout(() => setToastMessageLocal(null), 3000);
   };
+
+  // MRP Toggle & Filter state for scanned review
+  const [globalUpdateMrp, setGlobalUpdateMrp] = useState<boolean>(true);
+  const [rowMrpFilter, setRowMrpFilter] = useState<'all' | 'changed' | 'matched' | 'new'>('all');
+  const [tableSearch, setTableSearch] = useState<string>('');
+  const [updateManualMrp, setUpdateManualMrp] = useState<boolean>(true);
 
   // --- MANUAL FORM STATE ---
   const [dealerName, setDealerName] = useState('');
@@ -118,9 +157,13 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
         invoiceDate,
         manualSubtotal,
         discountPercentage,
-        manualLines,
+        manualLines.map(l => ({
+          ...l,
+          update_mrp: l.update_mrp !== undefined ? l.update_mrp : updateManualMrp
+        })),
         'manual',
-        user
+        user,
+        updateManualMrp
       );
 
       // Clean
@@ -261,21 +304,28 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
             part_name: activePart1 ? activePart1.part_name : 'Hyundai Elite i20 Front Brake Pads',
             hsn: activePart1?.hsn || '87083000',
             quantity: 20,
-            mrp: activePart1?.mrp || 2450
+            mrp: (activePart1?.mrp || 2450) + 300 // Price increased!
+          },
+          {
+            part_no: activePart2 ? activePart2.part_no : 'HY-20150',
+            part_name: activePart2 ? activePart2.part_name : 'Hyundai Grand i10 Oil Filter Cartridge',
+            hsn: activePart2?.hsn || '84212300',
+            quantity: 12,
+            mrp: Math.max(100, (activePart2?.mrp || 450) - 50) // Price decreased!
           },
           {
             part_no: archivedPart.part_no,
             part_name: archivedPart.part_name,
             hsn: archivedPart.hsn || '84213100',
             quantity: 15,
-            mrp: archivedPart.mrp || 1450
+            mrp: archivedPart.mrp || 1450 // Same MRP
           },
           {
             part_no: `HY-NEW-${Math.floor(1000 + Math.random() * 9000)}`,
             part_name: 'Hyundai Alcazar Front Grill Cover',
             hsn: '87088019',
             quantity: 5,
-            mrp: 3500
+            mrp: 3500 // New part
           }
         ] : [
           {
@@ -283,33 +333,32 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
             part_name: activePart1 ? activePart1.part_name : 'Mahindra Scorpio S11 Front Brake Rotor',
             hsn: activePart1?.hsn || '87083000',
             quantity: 15,
-            mrp: activePart1?.mrp || 3400
+            mrp: (activePart1?.mrp || 3400) + 450 // Price increased!
+          },
+          {
+            part_no: activePart2 ? activePart2.part_no : 'MA-20190',
+            part_name: activePart2 ? activePart2.part_name : 'Mahindra Thar Wiper Blade Set',
+            hsn: activePart2?.hsn || '85129000',
+            quantity: 8,
+            mrp: Math.max(100, (activePart2?.mrp || 850) - 80) // Price decreased!
           },
           {
             part_no: archivedPart.part_no,
             part_name: archivedPart.part_name,
             hsn: archivedPart.hsn || '84213100',
             quantity: 12,
-            mrp: archivedPart.mrp || 1450
+            mrp: archivedPart.mrp || 1450 // Same MRP
           },
           {
             part_no: `MA-NEW-${Math.floor(1000 + Math.random() * 9000)}`,
             part_name: 'Mahindra Scorpio Bonnet Support Strut',
             hsn: '87082910',
             quantity: 10,
-            mrp: 980
+            mrp: 980 // New part
           }
         ];
         
-        const mParts: ParsedAIScanRow[] = rawList.map(item => {
-          const status = getPartMatchStatus(item.part_no, db.getInventory(brand, true));
-          return {
-            ...item,
-            matchStatus: status,
-            isNewPart: status === 'new'
-          };
-        });
-
+        const mParts: ParsedAIScanRow[] = rawList.map(item => enrichParsedRow(item, currentAllInv));
         setScanRows(mParts);
       } else {
         setScanDealer('Kunal Motor Distributors (Wholesale)');
@@ -323,21 +372,28 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
             part_name: activePart1 ? activePart1.part_name : 'Hyundai Verna Clutch Disc Plate',
             hsn: activePart1?.hsn || '87089300',
             quantity: 10,
-            mrp: activePart1?.mrp || 5200
+            mrp: (activePart1?.mrp || 5200) + 350 // Price increased!
+          },
+          {
+            part_no: activePart2 ? activePart2.part_no : 'HY-40210',
+            part_name: activePart2 ? activePart2.part_name : 'Hyundai Santro Spark Plug Set',
+            hsn: activePart2?.hsn || '85111000',
+            quantity: 15,
+            mrp: Math.max(100, (activePart2?.mrp || 680) - 60) // Price decreased!
           },
           {
             part_no: archivedPart.part_no,
             part_name: archivedPart.part_name,
             hsn: archivedPart.hsn || '84213100',
             quantity: 8,
-            mrp: archivedPart.mrp || 1450
+            mrp: archivedPart.mrp || 1450 // Same MRP
           },
           {
             part_no: `HY-NEW-${Math.floor(1000 + Math.random() * 9000)}`,
             part_name: 'Hyundai Creta High Flow Air Intake',
             hsn: '84212300',
             quantity: 25,
-            mrp: 1320
+            mrp: 1320 // New part
           }
         ] : [
           {
@@ -345,33 +401,32 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
             part_name: activePart1 ? activePart1.part_name : 'Mahindra Bolero Air Filter Element',
             hsn: activePart1?.hsn || '84213100',
             quantity: 25,
-            mrp: activePart1?.mrp || 620
+            mrp: (activePart1?.mrp || 620) + 80 // Price increased!
+          },
+          {
+            part_no: activePart2 ? activePart2.part_no : 'MA-40110',
+            part_name: activePart2 ? activePart2.part_name : 'Mahindra XUV500 Cabin AC Filter',
+            hsn: activePart2?.hsn || '84213920',
+            quantity: 12,
+            mrp: Math.max(100, (activePart2?.mrp || 950) - 100) // Price decreased!
           },
           {
             part_no: archivedPart.part_no,
             part_name: archivedPart.part_name,
             hsn: archivedPart.hsn || '84213100',
             quantity: 10,
-            mrp: archivedPart.mrp || 1450
+            mrp: archivedPart.mrp || 1450 // Same MRP
           },
           {
             part_no: `MA-NEW-${Math.floor(1000 + Math.random() * 9000)}`,
             part_name: 'Mahindra XUV700 Radiator Mounting Bracket',
             hsn: '87089300',
             quantity: 6,
-            mrp: 2900
+            mrp: 2900 // New part
           }
         ];
 
-        const mParts: ParsedAIScanRow[] = rawList.map(item => {
-          const status = getPartMatchStatus(item.part_no, db.getInventory(brand, true));
-          return {
-            ...item,
-            matchStatus: status,
-            isNewPart: status === 'new'
-          };
-        });
-
+        const mParts: ParsedAIScanRow[] = rawList.map(item => enrichParsedRow(item, currentAllInv));
         setScanRows(mParts);
       }
       
@@ -468,17 +523,13 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
         const pName = String(item.name || "").trim();
         const qty = Number(item.quantity) || 1;
         const priceMrp = Number(item.mrp) || 0;
-        const status = getPartMatchStatus(pNo, allInvCurrent);
-        
-        return {
+        return enrichParsedRow({
           part_no: pNo,
           part_name: pName,
           hsn: String(item.hsn || "87089900"),
           quantity: qty,
-          mrp: priceMrp,
-          matchStatus: status,
-          isNewPart: status === 'new'
-        };
+          mrp: priceMrp
+        }, allInvCurrent);
       });
 
       setScanRows(parsedRows);
@@ -506,19 +557,42 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
 
   const handleAIScanRowChange = (index: number, field: keyof ParsedAIScanRow, val: any) => {
     const currentInv = db.getInventory(brand, true);
-    setScanRows(scanRows.map((row, i) => {
+    setScanRows(prevRows => prevRows.map((row, i) => {
       if (i === index) {
         const copy = { ...row, [field]: val };
-        // Dynamically check if matches active inventory, archived inventory, or new
         if (field === 'part_no') {
-          const status = getPartMatchStatus(String(val), currentInv);
-          copy.matchStatus = status;
-          copy.isNewPart = status === 'new';
+          const clean = String(val || '').trim().toLowerCase();
+          const found = currentInv.find(inv => inv.part_no.trim().toLowerCase() === clean);
+          copy.matchStatus = !found ? 'new' : (found.is_active === false ? 'archived' : 'matched');
+          copy.isNewPart = copy.matchStatus === 'new';
+          copy.currentInventoryMrp = found ? Number(found.mrp) || 0 : undefined;
+          copy.mrpDiff = copy.currentInventoryMrp !== undefined ? (copy.mrp - copy.currentInventoryMrp) : 0;
+          if (found && !copy.part_name) copy.part_name = found.part_name;
+          if (found?.hsn && !copy.hsn) copy.hsn = found.hsn;
+        } else if (field === 'mrp') {
+          const numVal = Math.max(0, Number(val) || 0);
+          copy.mrp = numVal;
+          copy.mrpDiff = copy.currentInventoryMrp !== undefined ? (numVal - copy.currentInventoryMrp) : 0;
         }
         return copy;
       }
       return row;
     }));
+  };
+
+  const handleToggleRowMrp = (index: number) => {
+    setScanRows(prevRows => prevRows.map((row, i) => {
+      if (i === index) {
+        return { ...row, updateMrp: !row.updateMrp };
+      }
+      return row;
+    }));
+  };
+
+  const handleToggleAllMrp = (val: boolean) => {
+    setGlobalUpdateMrp(val);
+    setScanRows(prevRows => prevRows.map(row => ({ ...row, updateMrp: val })));
+    triggerToast(val ? "Enabled MRP update for all parts." : "Disabled MRP update for all parts (stock MRP kept).");
   };
 
   // Math Calculations for Scanning AI
@@ -535,12 +609,66 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
 
   const is12DiscountMatched = Math.abs(scanDiscount - 12) < 0.01;
 
+  const mrpStats = useMemo(() => {
+    let increased = 0;
+    let decreased = 0;
+    let unchanged = 0;
+    let newParts = 0;
+    let totalUpdateToggled = 0;
+
+    scanRows.forEach(r => {
+      if (r.updateMrp) totalUpdateToggled++;
+      if (r.matchStatus === 'new') {
+        newParts++;
+      } else if (r.mrpDiff > 0) {
+        increased++;
+      } else if (r.mrpDiff < 0) {
+        decreased++;
+      } else {
+        unchanged++;
+      }
+    });
+
+    return {
+      total: scanRows.length,
+      changed: increased + decreased,
+      increased,
+      decreased,
+      unchanged,
+      newParts,
+      totalUpdateToggled
+    };
+  }, [scanRows]);
+
+  const filteredScanRows = useMemo(() => {
+    return scanRows.map((row, originalIndex) => ({ row, originalIndex })).filter(({ row }) => {
+      if (rowMrpFilter === 'changed') {
+        if (row.currentInventoryMrp === undefined || row.mrpDiff === 0) return false;
+      } else if (rowMrpFilter === 'matched') {
+        if (row.currentInventoryMrp === undefined || row.mrpDiff !== 0) return false;
+      } else if (rowMrpFilter === 'new') {
+        if (row.matchStatus !== 'new') return false;
+      }
+
+      if (tableSearch.trim()) {
+        const q = tableSearch.toLowerCase();
+        const pNo = row.part_no.toLowerCase();
+        const pName = row.part_name.toLowerCase();
+        return pNo.includes(q) || pName.includes(q);
+      }
+
+      return true;
+    });
+  }, [scanRows, rowMrpFilter, tableSearch]);
+
   const handleAIScanCompleteSync = async () => {
     if (scanRows.length === 0) return;
     if (!scanDealer || !scanInvoiceNo || !scanInvoiceDate) {
       alert("Header fields are required before syncing.");
       return;
     }
+
+    const mrpUpdatesCount = scanRows.filter(r => r.updateMrp && ((r.currentInventoryMrp !== undefined && r.mrp !== r.currentInventoryMrp) || r.isNewPart)).length;
 
     try {
       await db.createPurchase(
@@ -550,9 +678,18 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
         scanInvoiceDate,
         scanSubtotal,
         scanDiscount,
-        scanRows,
+        scanRows.map(r => ({
+          part_no: r.part_no,
+          part_name: r.part_name,
+          quantity: r.quantity,
+          mrp: r.mrp,
+          hsn: r.hsn,
+          is_new_part: r.isNewPart,
+          update_mrp: r.updateMrp
+        })),
         'image',
-        user
+        user,
+        globalUpdateMrp
       );
 
       // Clean
@@ -560,7 +697,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
       setScannedFilesLoaded(false);
       
       refreshComponentData();
-      triggerToast(`Successfully validated and synced AI scanned invoice ${scanInvoiceNo}!`);
+      triggerToast(`Validated & synced invoice ${scanInvoiceNo}! ${mrpUpdatesCount > 0 ? `Updated ${mrpUpdatesCount} inventory MRPs.` : 'Stock added to inventory.'}`);
       setActiveTab('history');
     } catch (err: any) {
       alert(err.message);
@@ -896,181 +1033,480 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                 </div>
               </div>
 
-              {/* Scanned spare parts table list */}
-              <div className="bg-amber-50/70 border border-amber-200/80 rounded-xl p-3 text-xs text-amber-900 flex items-start gap-2.5">
-                <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                <div className="space-y-0.5">
-                  <p className="font-bold">MRP Policy Protected</p>
-                  <p className="text-[11px] text-amber-800 leading-relaxed">
-                    Invoice MRP is used solely to compute purchase invoice totals, dealer discounts, and bill item records. 
-                    <strong> Inventory retail MRP is never modified from purchases</strong> and can strictly only be updated via the <strong>Bulk Update &gt; MRP Update</strong> tool.
-                  </p>
+              {/* Invoice MRP Intelligence & Admin Update Controls Banner */}
+              <div className="bg-gradient-to-r from-indigo-50 via-sky-50 to-emerald-50 border border-indigo-200/80 rounded-2xl p-4 shadow-xs space-y-3">
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                  <div className="flex items-start gap-2.5">
+                    <div className="p-2 bg-indigo-600 text-white rounded-xl shadow-xs shrink-0 mt-0.5">
+                      <TrendingUp className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h4 className="text-xs font-black uppercase tracking-wider text-indigo-950">Invoice MRP Intelligence &amp; Catalog Sync</h4>
+                        <span className="text-[10px] font-bold px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full border border-indigo-200">
+                          {isAdmin ? 'Admin Mode: Full Edit &amp; Toggle Enabled' : 'View Only Mode'}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-600 leading-relaxed mt-0.5">
+                        Scanned invoice MRPs are compared against current inventory stock. Differences are highlighted below. 
+                        {isAdmin ? ' As an Admin, you can edit invoice MRPs in the table and toggle whether to update the catalog MRP upon sync.' : ' Catalog updates require Admin permission.'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Master Admin Toggle */}
+                  {isAdmin && (
+                    <div className="flex items-center gap-2.5 bg-white/90 backdrop-blur px-3 py-2 rounded-xl border border-indigo-150 shadow-xs shrink-0">
+                      <div className="text-right">
+                        <span className="block text-[11px] font-black text-slate-800">Auto-Update Catalog MRPs</span>
+                        <span className="block text-[9px] text-slate-500 font-medium">Applies to all matched rows</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleAllMrp(!globalUpdateMrp)}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-black transition-all shadow-xs cursor-pointer ${
+                          globalUpdateMrp 
+                            ? 'bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-700' 
+                            : 'bg-slate-200 hover:bg-slate-300 text-slate-700 border border-slate-300'
+                        }`}
+                        title="Toggle all rows to update or protect catalog MRP"
+                      >
+                        {globalUpdateMrp ? (
+                          <>
+                            <ToggleRight className="w-4 h-4 text-emerald-200" />
+                            <span>ALL ON</span>
+                          </>
+                        ) : (
+                          <>
+                            <ToggleLeft className="w-4 h-4 text-slate-400" />
+                            <span>ALL OFF</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* MRP Variance Stats Strip */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-2 pt-2 border-t border-indigo-100/80 text-[11px]">
+                  <div className="bg-white/80 p-2 rounded-xl border border-slate-200/80 flex flex-col">
+                    <span className="text-[10px] text-slate-400 uppercase font-bold">Total Scanned</span>
+                    <span className="text-sm font-black text-slate-900 font-mono">{mrpStats.total} <span className="text-[10px] text-slate-450 font-normal">parts</span></span>
+                  </div>
+                  <div className="bg-emerald-50/80 p-2 rounded-xl border border-emerald-200/80 flex flex-col">
+                    <span className="text-[10px] text-emerald-700 uppercase font-bold flex items-center gap-1">
+                      <TrendingUp className="w-3 h-3 text-emerald-600" /> Price Increased
+                    </span>
+                    <span className="text-sm font-black text-emerald-800 font-mono">{mrpStats.increased} <span className="text-[10px] font-normal">items</span></span>
+                  </div>
+                  <div className="bg-rose-50/80 p-2 rounded-xl border border-rose-200/80 flex flex-col">
+                    <span className="text-[10px] text-rose-700 uppercase font-bold flex items-center gap-1">
+                      <TrendingDown className="w-3 h-3 text-rose-600" /> Price Decreased
+                    </span>
+                    <span className="text-sm font-black text-rose-800 font-mono">{mrpStats.decreased} <span className="text-[10px] font-normal">items</span></span>
+                  </div>
+                  <div className="bg-slate-50/90 p-2 rounded-xl border border-slate-200/80 flex flex-col">
+                    <span className="text-[10px] text-slate-500 uppercase font-bold flex items-center gap-1">
+                      <Check className="w-3 h-3 text-slate-400" /> Same Price
+                    </span>
+                    <span className="text-sm font-black text-slate-700 font-mono">{mrpStats.unchanged} <span className="text-[10px] font-normal">items</span></span>
+                  </div>
+                  <div className="bg-blue-50/80 p-2 rounded-xl border border-blue-200/80 flex flex-col">
+                    <span className="text-[10px] text-blue-700 uppercase font-bold flex items-center gap-1">
+                      <PlusCircle className="w-3 h-3 text-blue-600" /> New Parts
+                    </span>
+                    <span className="text-sm font-black text-blue-800 font-mono">{mrpStats.newParts} <span className="text-[10px] font-normal">items</span></span>
+                  </div>
+                  <div className="bg-indigo-50/80 p-2 rounded-xl border border-indigo-200/80 flex flex-col">
+                    <span className="text-[10px] text-indigo-700 uppercase font-bold flex items-center gap-1">
+                      <Sliders className="w-3 h-3 text-indigo-600" /> Will Update MRP
+                    </span>
+                    <span className="text-sm font-black text-indigo-900 font-mono">{mrpStats.totalUpdateToggled} / {scanRows.length}</span>
+                  </div>
                 </div>
               </div>
 
-              {/* Scan Match Recognition Status Bar */}
+              {/* Filter Toolbar & Search */}
               <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-slate-700">Recognition Status:</span>
-                  <span className="text-xs text-slate-500 font-medium">({scanRows.length} total invoice parts)</span>
+                <div className="flex flex-wrap items-center gap-1.5 text-xs">
+                  <span className="text-slate-450 font-bold uppercase text-[10px] mr-1">Filter:</span>
+                  <button
+                    type="button"
+                    onClick={() => setRowMrpFilter('all')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      rowMrpFilter === 'all'
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'bg-white text-slate-650 hover:bg-slate-100 border border-slate-200'
+                    }`}
+                  >
+                    All Parts ({scanRows.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRowMrpFilter('changed')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1 ${
+                      rowMrpFilter === 'changed'
+                        ? 'bg-amber-600 text-white shadow-xs'
+                        : 'bg-white text-slate-650 hover:bg-slate-100 border border-slate-200'
+                    }`}
+                  >
+                    <TrendingUp className="w-3 h-3" />
+                    <span>Price Changed ({mrpStats.changed})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRowMrpFilter('matched')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1 ${
+                      rowMrpFilter === 'matched'
+                        ? 'bg-slate-700 text-white shadow-xs'
+                        : 'bg-white text-slate-650 hover:bg-slate-100 border border-slate-200'
+                    }`}
+                  >
+                    <Check className="w-3 h-3" />
+                    <span>Same Price ({mrpStats.unchanged})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRowMrpFilter('new')}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1 ${
+                      rowMrpFilter === 'new'
+                        ? 'bg-blue-600 text-white shadow-xs'
+                        : 'bg-white text-slate-650 hover:bg-slate-100 border border-slate-200'
+                    }`}
+                  >
+                    <PlusCircle className="w-3 h-3" />
+                    <span>New ({mrpStats.newParts})</span>
+                  </button>
                 </div>
-                <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold bg-emerald-100 text-emerald-850 border border-emerald-300 shadow-xs">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                    <span>{scanRows.filter(r => r.matchStatus === 'matched').length} Matched</span>
-                    <span className="text-[10px] font-normal text-emerald-700">(Active Part)</span>
-                  </span>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold bg-purple-100 text-purple-850 border border-purple-300 shadow-xs">
-                    <Archive className="w-3.5 h-3.5 text-purple-600 shrink-0" />
-                    <span>{scanRows.filter(r => r.matchStatus === 'archived').length} Archived</span>
-                    <span className="text-[10px] font-normal text-purple-700">(In Spares)</span>
-                  </span>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-bold bg-blue-100 text-blue-850 border border-blue-300 shadow-xs">
-                    <PlusCircle className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                    <span>{scanRows.filter(r => r.matchStatus === 'new').length} New</span>
-                    <span className="text-[10px] font-normal text-blue-700">(New Part)</span>
-                  </span>
+
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search part no / name..."
+                    value={tableSearch}
+                    onChange={(e) => setTableSearch(e.target.value)}
+                    className="pl-8 pr-2.5 py-1 text-xs border border-slate-200 rounded-lg w-48 focus:outline-none focus:border-indigo-500 bg-white"
+                  />
+                  {tableSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setTableSearch('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs"
+                    >
+                      ×
+                    </button>
+                  )}
                 </div>
               </div>
 
-              <div className="overflow-x-auto pt-2">
+              {/* Review Table */}
+              <div className="overflow-x-auto pt-1 rounded-xl border border-slate-200 shadow-2xs bg-white">
                 <table className="min-w-full divide-y divide-slate-100 text-left text-xs font-semibold">
-                  <thead className="bg-slate-50 text-slate-550 uppercase text-[9px]">
+                  <thead className="bg-slate-50 text-slate-550 uppercase text-[9px] tracking-wider">
                     <tr>
-                      <th className="p-3">Matched Status</th>
+                      <th className="p-3">Status</th>
                       <th className="p-3">Part No</th>
                       <th className="p-3">Part Name</th>
                       <th className="p-3">HSN Code</th>
-                      <th className="p-3 text-center">Qty to Add</th>
+                      <th className="p-3 text-center">Qty</th>
+                      <th className="p-3 text-right">
+                        <div>System MRP</div>
+                        <div className="text-[8px] font-normal text-slate-400 capitalize">In Database</div>
+                      </th>
+                      <th className="p-3 text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <span>Invoice MRP</span>
+                          <span className="text-[8px] px-1 py-0.2 bg-indigo-100 text-indigo-700 rounded font-normal">Editable</span>
+                        </div>
+                        <div className="text-[8px] font-normal text-slate-400 capitalize">Scanned / Bill</div>
+                      </th>
+                      <th className="p-3 text-center">MRP Difference</th>
                       <th className="p-3 text-center">
-                        <div>Invoice MRP (INR)</div>
-                        <div className="text-[8px] font-normal text-slate-400 capitalize">Bill Total Only</div>
+                        <div>Update MRP?</div>
+                        <div className="text-[8px] font-normal text-slate-400 capitalize">Admin Toggle</div>
                       </th>
                       <th className="p-3 text-right">Row Total</th>
                       <th className="p-3 text-center">Remove</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-slate-705">
-                    {scanRows.map((row, idx) => {
-                      const totalRow = row.quantity * row.mrp;
-                      return (
-                        <tr key={idx} className="hover:bg-slate-50/50">
-                          <td className="p-3">
-                            {row.matchStatus === 'matched' && (
-                              <span 
-                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 shadow-xs"
-                                title="Matched with an active inventory part"
+                    {filteredScanRows.length === 0 ? (
+                      <tr>
+                        <td colSpan={11} className="p-8 text-center text-slate-400">
+                          No items match the selected filter or search term.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredScanRows.map(({ row, originalIndex }) => {
+                        const totalRow = row.quantity * row.mrp;
+                        const hasCurrentMrp = row.currentInventoryMrp !== undefined;
+                        const diff = row.mrpDiff;
+                        const pct = hasCurrentMrp && (row.currentInventoryMrp || 0) > 0 
+                          ? ((Math.abs(diff) / (row.currentInventoryMrp || 1)) * 100).toFixed(1) 
+                          : '0';
+
+                        return (
+                          <tr 
+                            key={originalIndex} 
+                            className={`hover:bg-slate-50/70 transition-colors ${
+                              diff > 0 
+                                ? 'bg-emerald-50/20' 
+                                : diff < 0 
+                                ? 'bg-rose-50/20' 
+                                : ''
+                            }`}
+                          >
+                            {/* Match Status */}
+                            <td className="p-3">
+                              {row.matchStatus === 'matched' && (
+                                <span 
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 shadow-xs"
+                                  title="Matched with an active inventory part"
+                                >
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                                  <span>Matched</span>
+                                </span>
+                              )}
+                              {row.matchStatus === 'archived' && (
+                                <span 
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-purple-100 text-purple-800 border border-purple-300 shadow-xs"
+                                  title="Part is in archived parts. Syncing will unarchive it with incoming stock."
+                                >
+                                  <Archive className="w-3 h-3 text-purple-600 shrink-0" />
+                                  <span>Archived</span>
+                                </span>
+                              )}
+                              {row.matchStatus === 'new' && (
+                                <span 
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-300 shadow-xs"
+                                  title="Part not found in inventory. Syncing will register it as a new active part."
+                                >
+                                  <PlusCircle className="w-3 h-3 text-blue-600 shrink-0" />
+                                  <span>New</span>
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Part No */}
+                            <td className="p-3 font-mono">
+                              <input
+                                type="text"
+                                className="w-24 p-1 border border-slate-200 rounded text-xs uppercase text-slate-900 font-bold focus:border-indigo-500 focus:outline-none"
+                                value={row.part_no}
+                                onChange={(e) => handleAIScanRowChange(originalIndex, 'part_no', e.target.value)}
+                              />
+                            </td>
+
+                            {/* Part Name */}
+                            <td className="p-3">
+                              <input
+                                type="text"
+                                className="w-44 p-1 border border-slate-200 rounded text-xs focus:border-indigo-500 focus:outline-none"
+                                value={row.part_name}
+                                onChange={(e) => handleAIScanRowChange(originalIndex, 'part_name', e.target.value)}
+                              />
+                            </td>
+
+                            {/* HSN */}
+                            <td className="p-3 font-mono">
+                              <input
+                                type="text"
+                                className="w-20 p-1 border border-slate-200 rounded text-xs text-slate-500 focus:border-indigo-500 focus:outline-none"
+                                value={row.hsn}
+                                onChange={(e) => handleAIScanRowChange(originalIndex, 'hsn', e.target.value)}
+                              />
+                            </td>
+
+                            {/* Qty */}
+                            <td className="p-3 text-center">
+                              <input
+                                type="number"
+                                min="1"
+                                className="w-14 p-1 border border-slate-200 rounded text-center text-xs focus:border-indigo-500 focus:outline-none font-mono"
+                                value={row.quantity}
+                                onChange={(e) => handleAIScanRowChange(originalIndex, 'quantity', Number(e.target.value))}
+                              />
+                            </td>
+
+                            {/* Current System MRP in Database */}
+                            <td className="p-3 text-right font-mono">
+                              {hasCurrentMrp ? (
+                                <div className="space-y-0.5">
+                                  <span className="font-bold text-slate-700">₹{(row.currentInventoryMrp || 0).toFixed(2)}</span>
+                                  <span className="block text-[9px] text-slate-400 font-normal">in catalog</span>
+                                </div>
+                              ) : (
+                                <span className="text-slate-400 italic text-[11px]">— Not in Stock —</span>
+                              )}
+                            </td>
+
+                            {/* Scanned/Edited Invoice MRP (Editable input) */}
+                            <td className="p-3 text-right">
+                              <div className="inline-flex items-center gap-1 border border-indigo-200 rounded-lg p-0.5 bg-indigo-50/40 focus-within:border-indigo-500 focus-within:bg-white transition-all">
+                                <span className="text-[10px] text-indigo-500 font-mono font-bold pl-1">₹</span>
+                                <input
+                                  type="number"
+                                  min="0"
+                                  step="0.01"
+                                  className="w-20 p-1 bg-transparent text-right text-xs font-mono font-black text-slate-900 focus:outline-none"
+                                  value={row.mrp}
+                                  onChange={(e) => handleAIScanRowChange(originalIndex, 'mrp', Number(e.target.value))}
+                                  title="Editable Invoice MRP: Modifying this will recalculate MRP variance and bill totals immediately"
+                                />
+                              </div>
+                            </td>
+
+                            {/* Highlighted Difference Badge */}
+                            <td className="p-3 text-center">
+                              {row.matchStatus === 'new' ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-black bg-blue-100 text-blue-800 border border-blue-200 shadow-2xs">
+                                  <PlusCircle className="w-3 h-3 text-blue-600 shrink-0" />
+                                  <span>New Part (₹{row.mrp.toFixed(2)})</span>
+                                </span>
+                              ) : diff > 0 ? (
+                                <span 
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-black bg-emerald-100 text-emerald-850 border border-emerald-300 shadow-2xs"
+                                  title={`Price Increased: Invoice is ₹${diff.toFixed(2)} (+${pct}%) higher than inventory MRP`}
+                                >
+                                  <TrendingUp className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                  <span>+₹{diff.toFixed(2)}</span>
+                                  <span className="text-[9px] font-medium opacity-75">(+{pct}%)</span>
+                                </span>
+                              ) : diff < 0 ? (
+                                <span 
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[10px] font-black bg-rose-100 text-rose-850 border border-rose-300 shadow-2xs"
+                                  title={`Price Decreased: Invoice is ₹${Math.abs(diff).toFixed(2)} (-${pct}%) lower than inventory MRP`}
+                                >
+                                  <TrendingDown className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                                  <span>-₹{Math.abs(diff).toFixed(2)}</span>
+                                  <span className="text-[9px] font-medium opacity-75">(-{pct}%)</span>
+                                </span>
+                              ) : (
+                                <span 
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-bold bg-slate-100 text-slate-650 border border-slate-200"
+                                  title="Invoice MRP matches current inventory MRP exactly"
+                                >
+                                  <Check className="w-3 h-3 text-slate-400 shrink-0" />
+                                  <span>Same Price</span>
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Admin Toggle: Update MRP? */}
+                            <td className="p-3 text-center">
+                              {isAdmin ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleRowMrp(originalIndex)}
+                                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-black transition-all shadow-2xs cursor-pointer ${
+                                    row.updateMrp
+                                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-700'
+                                      : 'bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300'
+                                  }`}
+                                  title={row.updateMrp 
+                                    ? `Click to toggle OFF: Will keep old MRP (₹${row.currentInventoryMrp?.toFixed(2) || '0.00'}) in catalog` 
+                                    : `Click to toggle ON: Will update catalog MRP to invoice MRP (₹${row.mrp.toFixed(2)}) on sync`
+                                  }
+                                >
+                                  {row.updateMrp ? (
+                                    <>
+                                      <ToggleRight className="w-4 h-4 text-emerald-200" />
+                                      <span>UPDATE</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <ToggleLeft className="w-4 h-4 text-slate-400" />
+                                      <span>KEEP OLD</span>
+                                    </>
+                                  )}
+                                </button>
+                              ) : (
+                                <span 
+                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold ${
+                                    row.updateMrp ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'
+                                  }`}
+                                  title="Only Admin can modify MRP sync policy"
+                                >
+                                  {row.updateMrp ? 'Will Update' : 'Protected'}
+                                </span>
+                              )}
+                            </td>
+
+                            {/* Row Total */}
+                            <td className="p-3 text-right font-mono font-bold text-slate-800">
+                              ₹{totalRow.toFixed(2)}
+                            </td>
+
+                            {/* Remove Row */}
+                            <td className="p-3 text-center">
+                              <button
+                                type="button"
+                                onClick={() => setScanRows(scanRows.filter((_, i) => i !== originalIndex))}
+                                className="text-red-500 hover:text-red-700 hover:bg-red-50 p-1.5 rounded-lg transition-colors cursor-pointer"
+                                title="Remove row from this invoice"
                               >
-                                <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
-                                <span>Matched</span>
-                              </span>
-                            )}
-                            {row.matchStatus === 'archived' && (
-                              <span 
-                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-purple-100 text-purple-800 border border-purple-300 shadow-xs"
-                                title="Part is in archived parts. Syncing will automatically unarchive it with incoming stock."
-                              >
-                                <Archive className="w-3 h-3 text-purple-600 shrink-0" />
-                                <span>Archived</span>
-                              </span>
-                            )}
-                            {row.matchStatus === 'new' && (
-                              <span 
-                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-300 shadow-xs"
-                                title="Part not found in inventory. Syncing will register it as a new active part."
-                              >
-                                <PlusCircle className="w-3 h-3 text-blue-600 shrink-0" />
-                                <span>New</span>
-                              </span>
-                            )}
-                          </td>
-                          <td className="p-3 font-mono">
-                            <input
-                              type="text"
-                              className="w-24 p-1 border border-slate-200 rounded text-xs uppercase text-slate-900 font-bold"
-                              value={row.part_no}
-                              onChange={(e) => handleAIScanRowChange(idx, 'part_no', e.target.value)}
-                            />
-                          </td>
-                          <td className="p-3">
-                            <input
-                              type="text"
-                              className="w-48 p-1 border border-slate-200 rounded text-xs"
-                              value={row.part_name}
-                              onChange={(e) => handleAIScanRowChange(idx, 'part_name', e.target.value)}
-                            />
-                          </td>
-                          <td className="p-3 font-mono">
-                            <input
-                              type="text"
-                              className="w-20 p-1 border border-slate-200 rounded text-xs text-slate-500"
-                              value={row.hsn}
-                              onChange={(e) => handleAIScanRowChange(idx, 'hsn', e.target.value)}
-                            />
-                          </td>
-                          <td className="p-3 text-center">
-                            <input
-                              type="number"
-                              className="w-14 p-1 border border-slate-200 rounded text-center text-xs"
-                              value={row.quantity}
-                              onChange={(e) => handleAIScanRowChange(idx, 'quantity', Number(e.target.value))}
-                            />
-                          </td>
-                          <td className="p-3 text-center">
-                            <input
-                              type="number"
-                              className="w-16 p-1 border border-slate-200 rounded text-center text-xs"
-                              value={row.mrp}
-                              onChange={(e) => handleAIScanRowChange(idx, 'mrp', Number(e.target.value))}
-                            />
-                          </td>
-                          <td className="p-3 text-right">₹{totalRow.toFixed(2)}</td>
-                          <td className="p-3 text-center">
-                            <button
-                              type="button"
-                              onClick={() => setScanRows(scanRows.filter((_, i) => i !== idx))}
-                              className="text-red-500 hover:text-red-700 hover:bg-red-50 p-1 rounded"
-                            >
-                              <X className="w-4 h-4" />
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
+                                <X className="w-4 h-4" />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
                   </tbody>
                 </table>
               </div>
 
               {/* Calculations summaries drawer */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-slate-200">
-                <div className="p-4 bg-slate-50 rounded-2xl flex flex-col justify-center space-y-1 text-slate-500 text-xs">
+                <div className="p-4 bg-slate-50 rounded-2xl flex flex-col justify-center space-y-1.5 text-slate-600 text-xs">
                   <p className="flex justify-between">
-                    <span>Total before Discount:</span>
-                    <span className="font-mono font-bold text-slate-800">₹{totalBeforeDiscount.toFixed(2)}</span>
+                    <span>Total before Discount (Sum of Invoice MRPs):</span>
+                    <span className="font-mono font-bold text-slate-900">₹{totalBeforeDiscount.toFixed(2)}</span>
                   </p>
                   <p className="flex justify-between">
-                    <span>Invoice Discount Amount ({scanDiscount}%):</span>
+                    <span>Invoice Discount ({scanDiscount}%):</span>
                     <span className="font-mono text-amber-700 font-bold">-₹{(scanSubtotal * (scanDiscount / 100)).toFixed(2)}</span>
                   </p>
                   <p className="flex justify-between border-t border-slate-200 pt-1 text-indigo-700 font-bold text-sm">
                     <span>Adjusted Pay Total:</span>
                     <span className="font-mono">₹{actualScanFinalAmount.toFixed(2)}</span>
                   </p>
+                  <p className="text-[10px] text-slate-450 pt-0.5">
+                    12% standard dealer benchmark: <b className="text-slate-700 font-mono">₹{totalAfter12Discount.toFixed(2)}</b>
+                  </p>
                 </div>
 
-                <div className="bg-indigo-50 border border-indigo-150 p-4 rounded-2xl space-y-3 flex flex-col justify-between">
-                  <div className="flex items-start gap-2 text-xs text-indigo-900 font-medium leading-tight">
-                    <BadgeInfo className="w-4.5 h-4.5 text-indigo-650 shrink-0 mt-0.5" />
-                    <span>
-                      Verifying at standard dealer value: After 12% discount value is <b className="font-black text-indigo-950">₹{totalAfter12Discount.toFixed(2)}</b>.
-                    </span>
+                <div className="bg-gradient-to-br from-indigo-50 via-white to-sky-50 border border-indigo-200 p-4 rounded-2xl space-y-3 flex flex-col justify-between shadow-xs">
+                  <div className="space-y-1 text-xs">
+                    <div className="flex items-center justify-between text-indigo-950 font-black">
+                      <span className="flex items-center gap-1.5">
+                        <Sparkles className="w-4 h-4 text-indigo-600" />
+                        <span>Ready to Sync Stock &amp; Update MRPs</span>
+                      </span>
+                      <span className="text-[11px] font-mono font-bold bg-indigo-100 text-indigo-800 px-2 py-0.5 rounded-md">
+                        +{scanRows.reduce((acc, r) => acc + r.quantity, 0)} units
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 leading-tight">
+                      {mrpStats.totalUpdateToggled > 0 ? (
+                        <>
+                          <b className="text-emerald-700 font-black">{mrpStats.totalUpdateToggled} part(s)</b> will have their retail catalog MRP updated to the invoice MRP and logged into MRP History.
+                        </>
+                      ) : (
+                        <>Catalog MRPs are protected — no inventory retail prices will be modified.</>
+                      )}
+                    </p>
                   </div>
 
                   <button
                     onClick={handleAIScanCompleteSync}
-                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl text-xs font-black shadow transition cursor-pointer text-center"
+                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-3 rounded-xl text-xs font-black shadow-md hover:shadow-lg transition-all cursor-pointer text-center flex items-center justify-center gap-2"
                   >
-                    Confirm &amp; Sync Stock Quantity (MRP Protected &amp; Untouched)
+                    <CheckCircle2 className="w-4 h-4 text-emerald-300" />
+                    <span>
+                      Confirm &amp; Sync Invoice ({scanRows.length} Parts{mrpStats.totalUpdateToggled > 0 ? ` • ${mrpStats.totalUpdateToggled} MRPs Updated` : ''})
+                    </span>
                   </button>
                 </div>
               </div>
@@ -1134,11 +1570,23 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
 
           {/* lines edit */}
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h4 className="text-xs uppercase font-extrabold tracking-widest text-slate-400">Line Items</h4>
-              <span className="text-[10px] text-amber-800 bg-amber-50 px-2 py-0.5 rounded-lg border border-amber-200">
-                Invoice MRP is used for purchase totals only • Inventory MRP is protected
-              </span>
+              {isAdmin ? (
+                <label className="inline-flex items-center gap-2 text-xs font-bold text-slate-700 cursor-pointer bg-slate-50 border border-slate-200 px-3 py-1.5 rounded-xl hover:bg-slate-100 transition-colors">
+                  <input
+                    type="checkbox"
+                    className="rounded text-indigo-600 focus:ring-indigo-500 h-4 w-4"
+                    checked={updateManualMrp}
+                    onChange={(e) => setUpdateManualMrp(e.target.checked)}
+                  />
+                  <span>Auto-Update Catalog MRP to invoice MRP on save</span>
+                </label>
+              ) : (
+                <span className="text-[10px] text-amber-800 bg-amber-50 px-2 py-0.5 rounded-lg border border-amber-200">
+                  Invoice MRP is used for purchase totals only • Inventory MRP protected
+                </span>
+              )}
             </div>
             
             <div className="space-y-3.5 text-xs font-semibold">
@@ -1235,9 +1683,9 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
             <span className="font-bold text-slate-600">Calculated Subtotal: ₹{manualSubtotal.toFixed(2)}</span>
             <button
               type="submit"
-              className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl font-bold shadowcursor-pointer"
+              className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl font-bold shadow transition cursor-pointer"
             >
-              Save &amp; Sync Sync Purchase
+              Save &amp; Sync Purchase {updateManualMrp ? '(With MRP Update)' : ''}
             </button>
           </div>
 
