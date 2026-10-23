@@ -277,6 +277,136 @@ Return the data strictly as a JSON object matching the requested schema.`;
   }
 });
 
+// AI Handwritten Sales Slip OCR endpoint using Gemini 3.8 Flash
+app.post("/api/gemini/scan-sales-slip", async (req, res) => {
+  try {
+    const { fileBase64, mimeType, brand, customerName } = req.body;
+    if (!fileBase64 || !mimeType) {
+      res.status(400).json({ error: "Missing fileBase64 or mimeType payload." });
+      return;
+    }
+
+    const bodyLengthBytes = Buffer.byteLength(JSON.stringify(req.body), "utf8");
+    console.log(`[SALES SLIP SCAN] Inbound HTTP request body size: ${(bodyLengthBytes / (1024 * 1024)).toFixed(2)} MB`);
+
+    const ai = getGeminiClient();
+
+    const prompt = `You are an expert OCR and automobile spare parts recognition assistant.
+The user has uploaded a photo of a handwritten parts register / notebook slip / order book page from an auto spare parts shop (${brand || 'Hyundai / Mahindra'}).
+
+Carefully examine every handwritten line on the page. In these automotive handwritten registers:
+1. Column 1 (Leftmost):
+   - Part Numbers (OEM alphanumeric SKU codes, e.g., "29110-C7000", "86542-BU000", "86545-BU000", "58350-H6A00", "81190-C7000", "86682-A0500", "39180-08000", "25288-2A830", "87731-BU000", "58101-006A10", "58101-H6A00", "28113-B4400", "28113-B4000", "86569-C7000", "74120-M53M00", "41100-26050", "41300-26040", "43994-4N100", "81130-B0910", "56900-A0000NNB", "84720-A0950XSS", "84710-T7910NNB", "86561-C7500", "41510-C4800", "41421-02000", "41100-02857", "41300-02857", "92101-K3500", "25310-C7300").
+   - Or part descriptions written in English or Hindi (e.g. "Head light tube", "बच्चा", "LOOK").
+   - Note on handwritten characters: Be careful to distinguish 'O' vs '0', 'B' vs '8', 'S' vs '5', 'I' vs '1', 'Z' vs '2'. Clean up to standard automobile uppercase format with hyphens where applicable.
+2. Column 2 (Middle):
+   - Quantity sold or requested (e.g., "1", "21", or checkmark meaning 1).
+   - If written as "2 x 2655" or "2*2655": The quantity is 2, and the rate/price is 2655.
+   - If written as "5 x 1253": Quantity is 5, price is 1253.
+   - If written as "5 x 206": Quantity is 5, price is 206.
+   - If written as "5 x 231": Quantity is 5, price is 231.
+   - Default quantity to 1 if only a checkmark or tick is present.
+3. Column 3 / Column 4 (Right):
+   - Price / Amount noted (e.g., 1028, 100, 860, 460, 750, 5400, 797, 750, 160, 130, 190, 1530, 870, 3500, 3300, 7562, 11587, 657, 569, 583, 1521, 1132, 25285).
+   - Date or Hindi notes (e.g. "17-10", "19-10", "20-10", "पैसा बाकी").
+4. Customer or heading (if written at top):
+   - Extract if present, otherwise null.
+
+Extract every identifiable row on the page. Ensure clean numerical quantities and prices.
+Return strictly valid JSON adhering to the schema.`;
+
+    const parts = [
+      {
+        inlineData: {
+          mimeType: mimeType,
+          data: fileBase64
+        }
+      },
+      { text: prompt }
+    ];
+
+    const schemaConfig = {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          customerName: { type: Type.STRING, description: "Customer name or vehicle no if written on slip" },
+          date: { type: Type.STRING, description: "Date written on slip if found" },
+          items: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                partNumber: { type: Type.STRING, description: "Automobile part number SKU, e.g. 29110-C7000" },
+                partName: { type: Type.STRING, description: "Description or name if written" },
+                quantity: { type: Type.NUMBER, description: "Quantity sold (integer >= 1)" },
+                price: { type: Type.NUMBER, description: "Unit price or total amount written for item, if any" },
+                notes: { type: Type.STRING, description: "Any annotations like date, tick status, or hindi text" }
+              },
+              required: ["partNumber", "quantity"]
+            }
+          },
+          rawSummary: { type: Type.STRING, description: "Brief summary of recognized items" }
+        },
+        required: ["items"]
+      }
+    };
+
+    let responseData;
+    let modelUsed = "gemini-3.8-flash";
+    const startTime = Date.now();
+
+    try {
+      console.log(`[SALES SLIP SCAN] Calling gemini-3.8-flash...`);
+      const response = await ai.models.generateContent({
+        model: "gemini-3.8-flash",
+        contents: { parts },
+        config: schemaConfig
+      });
+
+      const responseTime = ((Date.now() - startTime) / 1000).toFixed(2);
+      console.log(`[SALES SLIP SCAN] gemini-3.8-flash responded in ${responseTime}s`);
+
+      if (!response.text) {
+        throw new Error("No text output received from gemini-3.8-flash.");
+      }
+      responseData = parseCleanJson(response.text);
+    } catch (primaryErr: any) {
+      console.warn(`[SALES SLIP SCAN WARNING] gemini-3.8-flash failed:`, primaryErr.message || primaryErr);
+      
+      console.log(`[SALES SLIP SCAN] Falling back gracefully to gemini-3.1-flash-lite...`);
+      const fallbackStartTime = Date.now();
+      const responseFallback = await ai.models.generateContent({
+        model: "gemini-3.1-flash-lite",
+        contents: { parts },
+        config: schemaConfig
+      });
+
+      const fallbackResponseTime = ((Date.now() - fallbackStartTime) / 1000).toFixed(2);
+      console.log(`[SALES SLIP SCAN] gemini-3.1-flash-lite responded in ${fallbackResponseTime}s`);
+
+      if (!responseFallback.text) {
+        throw new Error("No text output received from fallback model gemini-3.1-flash-lite.");
+      }
+      responseData = parseCleanJson(responseFallback.text);
+      modelUsed = "gemini-3.1-flash-lite";
+    }
+
+    res.json({
+      success: true,
+      modelUsed,
+      data: responseData
+    });
+
+  } catch (err: any) {
+    console.error("[SALES SLIP SCAN ERROR]", err);
+    res.status(500).json({
+      success: false,
+      error: err.message || "Unknown error during AI handwritten slip scan."
+    });
+  }
+});
+
 async function bootServer() {
   // Vite dev server middleware integration
   if (process.env.NODE_ENV !== "production") {
