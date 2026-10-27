@@ -1260,7 +1260,7 @@ export const db = {
           console.log(`[Query Diagnostic] Running purchases select for schema: ${b}`);
           const { data: bPurchases, error: errPurchases } = await supabase.schema(b).from('purchases')
             .select('id, dealer_name, invoice_no, invoice_date, subtotal, dealer_discount_percentage, discount_amount, total_after_discount, scan_source, created_by, created_at')
-            .order('created_at', { ascending: false })
+            .order('invoice_date', { ascending: false })
             .limit(200);
           if (errPurchases) {
             const errMessage = errPurchases.message || errPurchases.details || errPurchases.hint || 'Permission denied for table purchases';
@@ -3280,10 +3280,18 @@ export const db = {
     return returnRec;
   },
 
-  // Purchases
+  // Purchases - automatically sorted by bill date (invoice_date) descending
   getPurchases: (brand: Brand): Purchase[] => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
-    return cache[b].purchases;
+    const list = [...(cache[b].purchases || [])];
+    return list.sort((a, b) => {
+      const timeA = new Date(a.invoice_date).getTime() || 0;
+      const timeB = new Date(b.invoice_date).getTime() || 0;
+      if (timeB !== timeA) return timeB - timeA;
+      const createdA = new Date(a.created_at || 0).getTime() || 0;
+      const createdB = new Date(b.created_at || 0).getTime() || 0;
+      return createdB - createdA;
+    });
   },
 
   savePurchases: (brand: Brand, purchases: Purchase[]) => {

@@ -7,7 +7,7 @@ import {
   Trash2, Plus, X, Eye, FileSpreadsheet, ShieldAlert, BadgeInfo, Zap,
   CheckCircle2, Archive, PlusCircle, ArrowUpRight, ArrowDownRight, 
   TrendingUp, TrendingDown, ToggleLeft, ToggleRight, Check, AlertCircle,
-  Sliders, RefreshCw, ArrowRight
+  Sliders, RefreshCw, ArrowRight, ArrowUpDown, ArrowUp, ArrowDown, Filter, CalendarDays
 } from 'lucide-react';
 
 interface PurchaseModuleProps {
@@ -709,17 +709,133 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   const [viewingPurchase, setViewingPurchase] = useState<Purchase | null>(null);
   const [historyPage, setHistoryPage] = useState(1);
   const historyPerPage = 15;
+  const [historySearchQuery, setHistorySearchQuery] = useState('');
+  const [historyDateSortOrder, setHistoryDateSortOrder] = useState<'desc' | 'asc'>('desc'); // 'desc' = newest bill date first (automatic)
+  const [historyDateFilter, setHistoryDateFilter] = useState<'all' | 'today' | 'this_month' | 'last_month'>('all');
 
-  const totalHistoryPages = Math.ceil(purchasesList.length / historyPerPage) || 1;
+  // Robust date parser for all date string formats (ISO, YYYY-MM-DD, DD/MM/YYYY, etc.)
+  const parseInvoiceDate = (dateStr?: string): number => {
+    if (!dateStr) return 0;
+    const parsed = Date.parse(dateStr);
+    if (!isNaN(parsed)) return parsed;
+    const parts = dateStr.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+    if (parts) {
+      const day = parseInt(parts[1], 10);
+      const month = parseInt(parts[2], 10) - 1;
+      const year = parseInt(parts[3], 10);
+      const d = new Date(year, month, day);
+      if (!isNaN(d.getTime())) return d.getTime();
+    }
+    return 0;
+  };
+
+  // Helper to format bill date cleanly with relative day tag
+  const formatBillDate = (dateStr: string) => {
+    try {
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) return { formatted: dateStr, isToday: false, isYesterday: false };
+      const formatted = d.toLocaleDateString('en-IN', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric'
+      });
+      const now = new Date();
+      const isToday = d.toDateString() === now.toDateString();
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const isYesterday = d.toDateString() === yesterday.toDateString();
+      return { formatted, isToday, isYesterday };
+    } catch {
+      return { formatted: dateStr, isToday: false, isYesterday: false };
+    }
+  };
+
+  // Automatically arrange procurement bills by their date with optional search & quick filters
+  const sortedAndFilteredPurchases = useMemo(() => {
+    let result = [...purchasesList];
+
+    // Search query filter (Invoice No, Dealer Name, or Source)
+    if (historySearchQuery.trim()) {
+      const q = historySearchQuery.trim().toLowerCase();
+      result = result.filter(p => 
+        (p.invoice_no && p.invoice_no.toLowerCase().includes(q)) ||
+        (p.dealer_name && p.dealer_name.toLowerCase().includes(q)) ||
+        (p.scan_source && p.scan_source.toLowerCase().includes(q))
+      );
+    }
+
+    // Quick Date range filter
+    if (historyDateFilter === 'today') {
+      const todayStr = new Date().toISOString().split('T')[0];
+      result = result.filter(p => {
+        try {
+          return new Date(p.invoice_date).toISOString().split('T')[0] === todayStr;
+        } catch {
+          return false;
+        }
+      });
+    } else if (historyDateFilter === 'this_month') {
+      const now = new Date();
+      const yr = now.getFullYear();
+      const mo = now.getMonth();
+      result = result.filter(p => {
+        try {
+          const d = new Date(p.invoice_date);
+          return d.getFullYear() === yr && d.getMonth() === mo;
+        } catch {
+          return false;
+        }
+      });
+    } else if (historyDateFilter === 'last_month') {
+      const now = new Date();
+      const target = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const yr = target.getFullYear();
+      const mo = target.getMonth();
+      result = result.filter(p => {
+        try {
+          const d = new Date(p.invoice_date);
+          return d.getFullYear() === yr && d.getMonth() === mo;
+        } catch {
+          return false;
+        }
+      });
+    }
+
+    // AUTOMATIC DATE ARRANGEMENT:
+    // Arranged according to bill date (invoice_date) descending (newest first) by default
+    result.sort((a, b) => {
+      const timeA = parseInvoiceDate(a.invoice_date);
+      const timeB = parseInvoiceDate(b.invoice_date);
+      if (timeB !== timeA) {
+        return historyDateSortOrder === 'desc' ? timeB - timeA : timeA - timeB;
+      }
+      // Secondary tie-breaker by created_at
+      const createdA = parseInvoiceDate(a.created_at);
+      const createdB = parseInvoiceDate(b.created_at);
+      return historyDateSortOrder === 'desc' ? createdB - createdA : createdA - createdB;
+    });
+
+    return result;
+  }, [purchasesList, historySearchQuery, historyDateFilter, historyDateSortOrder]);
+
+  const totalHistoryPages = Math.ceil(sortedAndFilteredPurchases.length / historyPerPage) || 1;
 
   const paginatedPurchasesList = useMemo(() => {
     const startIndex = (historyPage - 1) * historyPerPage;
-    return purchasesList.slice(startIndex, startIndex + historyPerPage);
-  }, [purchasesList, historyPage, historyPerPage]);
+    return sortedAndFilteredPurchases.slice(startIndex, startIndex + historyPerPage);
+  }, [sortedAndFilteredPurchases, historyPage, historyPerPage]);
+
+  const historySummary = useMemo(() => {
+    const totalAmount = sortedAndFilteredPurchases.reduce((acc, p) => acc + (p.total_after_discount || 0), 0);
+    return {
+      count: sortedAndFilteredPurchases.length,
+      totalAmount
+    };
+  }, [sortedAndFilteredPurchases]);
 
   useEffect(() => {
     setHistoryPage(1);
-  }, [brand]);
+  }, [brand, historySearchQuery, historyDateFilter, historyDateSortOrder]);
 
   const purchaseItemsAssociated = useMemo(() => {
     if (!viewingPurchase) return [];
@@ -1696,55 +1812,248 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
           {/* History table list */}
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden lg:col-span-2">
-            <div className="p-4 bg-slate-50 border-b border-slate-200 font-bold text-xs">
-              Registered procurement Invoices List
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden lg:col-span-2 flex flex-col">
+            {/* Header & Controls Bar */}
+            <div className="p-4 bg-slate-50/80 border-b border-slate-200 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-bold text-sm text-slate-900">Purchase Bills History</h3>
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                      <CalendarDays className="w-3 h-3 text-indigo-500" />
+                      <span>Auto-Arranged by Date</span>
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    Bills automatically sorted chronologically by bill date ({historyDateSortOrder === 'desc' ? 'newest first' : 'oldest first'})
+                  </p>
+                </div>
+
+                {/* Sort Order Toggle */}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setHistoryDateSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 shadow-2xs transition-all cursor-pointer"
+                    title={`Click to reverse order: currently ${historyDateSortOrder === 'desc' ? 'Newest Bill Date First' : 'Oldest Bill Date First'}`}
+                  >
+                    {historyDateSortOrder === 'desc' ? (
+                      <>
+                        <ArrowDown className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>Date: Newest First</span>
+                      </>
+                    ) : (
+                      <>
+                        <ArrowUp className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>Date: Oldest First</span>
+                      </>
+                    )}
+                  </button>
+
+                  <span className="text-[11px] font-mono font-bold px-2.5 py-1 rounded-xl bg-slate-100 text-slate-700 border border-slate-200">
+                    {historySummary.count} {historySummary.count === 1 ? 'bill' : 'bills'} • ₹{historySummary.totalAmount.toLocaleString('en-IN')}
+                  </span>
+                </div>
+              </div>
+
+              {/* Search & Date Filter Filters */}
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <div className="relative flex-1 min-w-[200px]">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={historySearchQuery}
+                    onChange={(e) => setHistorySearchQuery(e.target.value)}
+                    placeholder="Search by Invoice No, Dealer..."
+                    className="w-full pl-8 pr-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition"
+                  />
+                  {historySearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setHistorySearchQuery('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Quick Date Filters */}
+                <div className="inline-flex rounded-xl bg-slate-200/60 p-0.5 text-[11px] font-bold">
+                  <button
+                    type="button"
+                    onClick={() => setHistoryDateFilter('all')}
+                    className={`px-2.5 py-1 rounded-lg transition ${
+                      historyDateFilter === 'all'
+                        ? 'bg-white text-slate-900 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    All Bills
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryDateFilter('this_month')}
+                    className={`px-2.5 py-1 rounded-lg transition ${
+                      historyDateFilter === 'this_month'
+                        ? 'bg-white text-slate-900 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    This Month
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryDateFilter('last_month')}
+                    className={`px-2.5 py-1 rounded-lg transition ${
+                      historyDateFilter === 'last_month'
+                        ? 'bg-white text-slate-900 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Last Month
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryDateFilter('today')}
+                    className={`px-2.5 py-1 rounded-lg transition ${
+                      historyDateFilter === 'today'
+                        ? 'bg-white text-slate-900 shadow-2xs'
+                        : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    Today
+                  </button>
+                </div>
+              </div>
             </div>
 
-            <div className="overflow-x-auto text-xs font-semibold text-slate-600">
+            {/* Table view */}
+            <div className="overflow-x-auto text-xs font-semibold text-slate-600 flex-1">
               <table className="min-w-full divide-y divide-slate-100 text-left">
-                <thead className="bg-slate-100/50 text-slate-500 uppercase text-[9px] tracking-wider">
+                <thead className="bg-slate-100/60 text-slate-500 uppercase text-[9px] tracking-wider sticky top-0 z-10 backdrop-blur-xs">
                   <tr>
                     <th className="p-3">Invoice No</th>
                     <th className="p-3">Dealer</th>
-                    <th className="p-3">Date</th>
+                    <th 
+                      className="p-3 cursor-pointer select-none group"
+                      onClick={() => setHistoryDateSortOrder(prev => prev === 'desc' ? 'asc' : 'desc')}
+                      title="Click to toggle Bill Date order (Newest first / Oldest first)"
+                    >
+                      <div className="flex items-center gap-1 text-indigo-700 font-bold group-hover:text-indigo-900">
+                        <span>Bill Date</span>
+                        {historyDateSortOrder === 'desc' ? (
+                          <ArrowDown className="w-3.5 h-3.5 text-indigo-600" />
+                        ) : (
+                          <ArrowUp className="w-3.5 h-3.5 text-indigo-600" />
+                        )}
+                      </div>
+                    </th>
                     <th className="p-3">Source</th>
-                    <th className="p-3 text-right">Sum amount</th>
-                    <th className="p-3 text-right">Utility</th>
+                    <th className="p-3 text-right">Sum Amount</th>
+                    <th className="p-3 text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-slate-705">
-                  {paginatedPurchasesList.map((p) => (
-                    <tr key={p.id} className="hover:bg-slate-50/50">
-                      <td className="p-3 font-mono font-bold text-slate-900">{p.invoice_no}</td>
-                      <td className="p-3 font-semibold text-slate-800">{p.dealer_name}</td>
-                      <td className="p-3 text-slate-500">{new Date(p.invoice_date).toLocaleDateString()}</td>
-                      <td className="p-3 uppercase text-[9px] mt-1">
-                        <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">
-                          {p.scan_source}
-                        </span>
-                      </td>
-                      <td className="p-3 text-right font-bold text-slate-900">₹{p.total_after_discount.toLocaleString('en-IN')}</td>
-                      <td className="p-3 text-right flex justify-end gap-1">
-                        <button
-                          onClick={() => setViewingPurchase(p)}
-                          className="p-1 text-indigo-650 hover:bg-indigo-50 rounded"
-                        >
-                          <Eye className="w-4 h-4" />
-                        </button>
-                        <button
-                          onClick={() => handleDeleteSyncedInvoice(p.id)}
-                          className="p-1 text-red-500 hover:bg-red-50 rounded"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+                  {paginatedPurchasesList.map((p) => {
+                    const dateInfo = formatBillDate(p.invoice_date);
+                    const isSelected = viewingPurchase?.id === p.id;
+                    return (
+                      <tr 
+                        key={p.id} 
+                        className={`transition-colors ${
+                          isSelected ? 'bg-indigo-50/70 border-l-4 border-l-indigo-600' : 'hover:bg-slate-50/60'
+                        }`}
+                      >
+                        <td className="p-3 font-mono font-bold text-slate-900">
+                          <div className="flex items-center gap-1.5">
+                            <FileText className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span>{p.invoice_no}</span>
+                          </div>
+                        </td>
+                        <td className="p-3 font-semibold text-slate-800">
+                          <p className="truncate max-w-[180px]" title={p.dealer_name}>
+                            {p.dealer_name}
+                          </p>
+                        </td>
+                        <td className="p-3 whitespace-nowrap">
+                          <div className="flex items-center gap-1.5">
+                            <Calendar className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                            <span className="font-semibold text-slate-800">{dateInfo.formatted}</span>
+                            {dateInfo.isToday && (
+                              <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 font-bold">
+                                Today
+                              </span>
+                            )}
+                            {dateInfo.isYesterday && (
+                              <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 font-bold">
+                                Yesterday
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="p-3 uppercase text-[9px]">
+                          <span className={`inline-flex items-center px-1.5 py-0.5 rounded font-bold ${
+                            p.scan_source === 'image' 
+                              ? 'bg-purple-100 text-purple-700 border border-purple-200' 
+                              : p.scan_source === 'pdf' 
+                                ? 'bg-sky-100 text-sky-700 border border-sky-200'
+                                : 'bg-slate-100 text-slate-600 border border-slate-200'
+                          }`}>
+                            {p.scan_source || 'manual'}
+                          </span>
+                        </td>
+                        <td className="p-3 text-right font-mono font-bold text-slate-900 whitespace-nowrap">
+                          ₹{p.total_after_discount.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </td>
+                        <td className="p-3 text-right">
+                          <div className="flex justify-end items-center gap-1">
+                            <button
+                              onClick={() => setViewingPurchase(p)}
+                              className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                                isSelected 
+                                  ? 'bg-indigo-600 text-white shadow-2xs' 
+                                  : 'text-indigo-650 hover:bg-indigo-50'
+                              }`}
+                              title="View Invoice Breakdown & Items"
+                            >
+                              <Eye className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteSyncedInvoice(p.id)}
+                              className="p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors cursor-pointer"
+                              title="Delete Invoice & Subtract Quantities from Stock"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                   {paginatedPurchasesList.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="p-8 text-center text-slate-400 font-normal">
-                        No purchases recorded in {brand} schema yet.
+                      <td colSpan={6} className="p-10 text-center">
+                        <div className="flex flex-col items-center justify-center space-y-2 text-slate-400 font-normal">
+                          <FileText className="w-8 h-8 text-slate-300" />
+                          <p className="text-xs font-semibold text-slate-600">
+                            {historySearchQuery || historyDateFilter !== 'all' 
+                              ? 'No purchase bills match your current search or date filter.' 
+                              : `No purchases recorded in ${brand} yet.`}
+                          </p>
+                          {(historySearchQuery || historyDateFilter !== 'all') && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setHistorySearchQuery('');
+                                setHistoryDateFilter('all');
+                              }}
+                              className="text-xs text-indigo-600 hover:text-indigo-700 font-bold underline cursor-pointer"
+                            >
+                              Reset filters to view all bills
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   )}
@@ -1756,7 +2065,7 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
             {totalHistoryPages > 1 && (
               <div className="bg-slate-50 border-t border-slate-100 px-4 py-3 flex items-center justify-between">
                 <span className="text-slate-500 text-[11px] font-semibold">
-                  Page <strong className="text-slate-800">{historyPage}</strong> of <strong className="text-slate-800">{totalHistoryPages}</strong> ({purchasesList.length} total purchases)
+                  Page <strong className="text-slate-800">{historyPage}</strong> of <strong className="text-slate-800">{totalHistoryPages}</strong> ({sortedAndFilteredPurchases.length} bills)
                 </span>
                 <div className="inline-flex gap-1.5 text-[11px] font-bold">
                   <button
