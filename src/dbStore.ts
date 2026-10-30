@@ -99,6 +99,9 @@ const loadedBrands = new Set<'hyundai' | 'mahindra'>();
 let activeBrandChannel: any = null;
 let activeBrandName: 'hyundai' | 'mahindra' | null = null;
 
+// Concurrency lock for in-flight purchase syncs to prevent double-click / multiple stock addition
+const inFlightPurchases = new Set<string>();
+
 // Caching meta-states to prevent excessive network bandwidth consumption
 let lastPublicFetchTime = 0;
 const lastBrandFetchTime: Record<string, number> = { hyundai: 0, mahindra: 0 };
@@ -3330,74 +3333,317 @@ export const db = {
     updateInventoryMrp: boolean = true
   ): Promise<Purchase> => {
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
+    const cleanInvoice = (invoiceNo || '').trim();
+    const cleanDealer = (dealerName || '').trim();
+    const syncKey = `${b}:${cleanDealer.toLowerCase()}:${cleanInvoice.toLowerCase()}`;
+
+    // Concurrency Lock: Prevent multiple simultaneous sync calls from double-adding stock
+    if (inFlightPurchases.has(syncKey)) {
+      throw new Error(`Invoice No "${cleanInvoice}" for dealer "${cleanDealer}" is already actively saving. Duplicate sync attempt blocked to protect inventory stock.`);
+    }
+
+    inFlightPurchases.add(syncKey);
+
+    try {
+      const listPurchases = cache[b].purchases;
+      const purchaseItemsList = cache[b].purchase_items;
+      const inventory = cache[b].inventory;
+      
+      if (listPurchases.some(p => p.invoice_no.trim().toLowerCase() === cleanInvoice.toLowerCase() && p.dealer_name.trim().toLowerCase() === cleanDealer.toLowerCase())) {
+        throw new Error(`Invoice No "${cleanInvoice}" already exists for dealer "${cleanDealer}". To adjust stock quantities or fix this bill, please use the "Fix / Edit Bill" option in Purchase History.`);
+      }
+
+      const discountAmount = subtotal * (discountPercentage / 100);
+      const totalAfterDiscount = subtotal - discountAmount;
+      
+      const purchaseId = uuid();
+      const pItemsToSave: PurchaseItem[] = [];
+      const mrpLogsToInsert: MRPHistory[] = [];
+      
+      for (const pItem of items) {
+        const invIdx = inventory.findIndex(i => i.part_no.toLowerCase() === pItem.part_no.toLowerCase());
+        const hasMatched = invIdx > -1;
+        const shouldUpdateThisMrp = pItem.update_mrp !== undefined ? pItem.update_mrp : updateInventoryMrp;
+        const newMrp = Number(pItem.mrp) || 0;
+        
+        if (hasMatched) {
+          const invPart = inventory[invIdx];
+          invPart.quantity += pItem.quantity;
+          const oldMrp = invPart.mrp;
+
+          // If enabled and MRP is positive and differs, update inventory MRP according to invoice
+          if (shouldUpdateThisMrp && newMrp > 0 && oldMrp !== newMrp) {
+            invPart.mrp = newMrp;
+            const mrpLog: MRPHistory = {
+              id: uuid(),
+              part_no: invPart.part_no,
+              old_mrp: oldMrp,
+              new_mrp: newMrp,
+              changed_by: `${user.name} (Purchase ${cleanInvoice})`,
+              changed_at: new Date().toISOString()
+            };
+            cache[b].mrp_history.unshift(mrpLog);
+            mrpLogsToInsert.push(mrpLog);
+          }
+
+          if (!invPart.is_active) {
+            invPart.is_active = true;
+            invPart.archived_at = null;
+          }
+          invPart.updated_at = new Date().toISOString();
+          
+          if (isSupabaseConfigured && supabase) {
+            const { error: invErr } = await supabase.schema(b).from('inventory').update({
+              quantity: invPart.quantity,
+              mrp: invPart.mrp,
+              is_active: invPart.is_active,
+              archived_at: invPart.archived_at,
+              updated_at: invPart.updated_at
+            }).eq('id', invPart.id);
+            if (invErr) {
+              throw new Error(`Failed to update stock quantity & MRP for part ${invPart.part_no}: ${invErr.message}`);
+            }
+          }
+        } else {
+          const initialPartMrp = newMrp > 0 ? newMrp : 0;
+          const newInv: InventoryItem = {
+            id: uuid(),
+            part_no: pItem.part_no,
+            part_name: pItem.part_name || 'New Spares Part',
+            quantity: pItem.quantity,
+            hsn: pItem.hsn || '',
+            mrp: initialPartMrp,
+            brand,
+            is_active: true,
+            archived_at: null,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          };
+          inventory.push(newInv);
+          if (initialPartMrp > 0) {
+            const mrpLog: MRPHistory = {
+              id: uuid(),
+              part_no: newInv.part_no,
+              old_mrp: 0,
+              new_mrp: initialPartMrp,
+              changed_by: `${user.name} (New Part Purchase ${cleanInvoice})`,
+              changed_at: new Date().toISOString()
+            };
+            cache[b].mrp_history.unshift(mrpLog);
+            mrpLogsToInsert.push(mrpLog);
+          }
+          if (isSupabaseConfigured && supabase) {
+            const { error: invErr } = await supabase.schema(b).from('inventory').insert(newInv);
+            if (invErr) {
+               throw new Error(`Failed to add new part ${pItem.part_no} to DB: ${invErr.message}`);
+            }
+          }
+          db.logTransaction(user.id, user.name, 'Create Inventory', 'Inventory', `Auto-added new part ${pItem.part_no} (MRP ₹${initialPartMrp}) from Purchase ${cleanInvoice}`, null, newInv);
+        }
+        
+        const purchaseItemRec: PurchaseItem = {
+          id: uuid(),
+          purchase_id: purchaseId,
+          part_no: pItem.part_no,
+          part_name: pItem.part_name,
+          hsn: pItem.hsn,
+          quantity: pItem.quantity,
+          mrp: pItem.mrp,
+          is_new_part: !hasMatched,
+          matched_inventory: hasMatched,
+          created_at: new Date().toISOString()
+        };
+        
+        pItemsToSave.push(purchaseItemRec);
+      }
+
+      // Save any newly created MRP history records
+      if (mrpLogsToInsert.length > 0) {
+        if (isSupabaseConfigured && supabase) {
+          supabase.schema(b).from('mrp_history').insert(mrpLogsToInsert).then(({ error }) => {
+            if (error) console.warn("Supabase mrp_history purchase update notice:", error.message);
+          });
+        } else {
+          localStorage.setItem(`sparezy_schema_${b}_mrp_history`, JSON.stringify(cache[b].mrp_history));
+        }
+        idbStore.set('cache_partitions', `${b}_mrp`, cache[b].mrp_history);
+      }
+      
+      const purchase: Purchase = {
+        id: purchaseId,
+        dealer_name: cleanDealer,
+        invoice_no: cleanInvoice,
+        invoice_date: new Date(invoiceDate).toISOString(),
+        subtotal,
+        dealer_discount_percentage: discountPercentage,
+        discount_amount: discountAmount,
+        total_after_discount: totalAfterDiscount,
+        scan_source: scanSource,
+        created_by: user.name,
+        created_at: new Date().toISOString()
+      };
+      
+      listPurchases.unshift(purchase);
+      purchaseItemsList.push(...pItemsToSave);
+      
+      if (isSupabaseConfigured && supabase) {
+        const { error: pErr } = await supabase.schema(b).from('purchases').insert(purchase);
+        if (pErr) {
+          // Rollback purchases cache
+          listPurchases.shift();
+          throw new Error(`Failed to save purchase details: ${pErr.message}`);
+        }
+        const { error: itemsErr } = await supabase.schema(b).from('purchase_items').insert(pItemsToSave);
+        if (itemsErr) {
+          throw new Error(`Purchase main record saved, but line items failed: ${itemsErr.message}`);
+        }
+      } else {
+        localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
+        localStorage.setItem(`sparezy_schema_${b}_purchases`, JSON.stringify(listPurchases));
+        localStorage.setItem(`sparezy_schema_${b}_purchase_items`, JSON.stringify(purchaseItemsList));
+        localStorage.setItem(`sparezy_schema_${b}_mrp_history`, JSON.stringify(cache[b].mrp_history));
+      }
+      idbStore.set('cache_partitions', `${b}_inventory`, inventory);
+      idbStore.set('cache_partitions', `${b}_purchases`, listPurchases);
+      idbStore.set('cache_partitions', `${b}_purchase_items`, purchaseItemsList);
+      
+      const mrpChangeSummary = mrpLogsToInsert.length > 0 ? ` (${mrpLogsToInsert.length} inventory MRPs updated)` : '';
+      db.logTransaction(user.id, user.name, 'Create Purchase', 'Purchases', `Added brand purchase invoice ${cleanInvoice} for dealer ${cleanDealer}${mrpChangeSummary}`, null, purchase);
+      db.notify();
+      return purchase;
+    } finally {
+      inFlightPurchases.delete(syncKey);
+    }
+  },
+
+  updatePurchase: async (
+    brand: Brand,
+    purchaseId: string,
+    updatedData: {
+      dealer_name: string;
+      invoice_no: string;
+      invoice_date: string;
+      dealer_discount_percentage: number;
+      subtotal: number;
+      total_after_discount: number;
+      items: {
+        id?: string;
+        part_no: string;
+        part_name: string;
+        hsn?: string;
+        quantity: number;
+        mrp: number;
+        update_mrp?: boolean;
+      }[];
+    },
+    user: User
+  ): Promise<Purchase> => {
+    const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     const listPurchases = cache[b].purchases;
     const purchaseItemsList = cache[b].purchase_items;
     const inventory = cache[b].inventory;
-    
-    if (listPurchases.some(p => p.invoice_no === invoiceNo && p.dealer_name === dealerName)) {
-      throw new Error(`Invoice No ${invoiceNo} already exists for dealer ${dealerName}.`);
+
+    const existingIdx = listPurchases.findIndex(p => p.id === purchaseId);
+    if (existingIdx === -1) {
+      throw new Error(`Purchase invoice with ID ${purchaseId} not found.`);
     }
 
-    const discountAmount = subtotal * (discountPercentage / 100);
-    const totalAfterDiscount = subtotal - discountAmount;
-    
-    const purchaseId = uuid();
-    const pItemsToSave: PurchaseItem[] = [];
-    const mrpLogsToInsert: MRPHistory[] = [];
-    
-    for (const pItem of items) {
-      const invIdx = inventory.findIndex(i => i.part_no.toLowerCase() === pItem.part_no.toLowerCase());
-      const hasMatched = invIdx > -1;
-      const shouldUpdateThisMrp = pItem.update_mrp !== undefined ? pItem.update_mrp : updateInventoryMrp;
-      const newMrp = Number(pItem.mrp) || 0;
-      
-      if (hasMatched) {
-        const invPart = inventory[invIdx];
-        invPart.quantity += pItem.quantity;
-        const oldMrp = invPart.mrp;
+    const oldPurchase = listPurchases[existingIdx];
+    const cleanInvoice = updatedData.invoice_no.trim();
+    const cleanDealer = updatedData.dealer_name.trim();
 
-        // If enabled and MRP is positive and differs, update inventory MRP according to invoice
-        if (shouldUpdateThisMrp && newMrp > 0 && oldMrp !== newMrp) {
-          invPart.mrp = newMrp;
+    // Verify invoice number uniqueness against other invoices
+    const duplicate = listPurchases.find(p => 
+      p.id !== purchaseId &&
+      p.invoice_no.trim().toLowerCase() === cleanInvoice.toLowerCase() &&
+      p.dealer_name.trim().toLowerCase() === cleanDealer.toLowerCase()
+    );
+    if (duplicate) {
+      throw new Error(`Another purchase invoice with number "${cleanInvoice}" already exists for dealer "${cleanDealer}".`);
+    }
+
+    const oldItems = purchaseItemsList.filter(pi => pi.purchase_id === purchaseId);
+
+    // Compute stock difference per part: delta = newQuantity - oldQuantity
+    // If delta > 0: add to inventory stock
+    // If delta < 0: deduct from inventory stock
+    const partDeltas = new Map<string, { part_no: string; part_name: string; oldQty: number; newQty: number; mrp: number; update_mrp?: boolean }>();
+
+    for (const oi of oldItems) {
+      const key = oi.part_no.trim().toLowerCase();
+      partDeltas.set(key, {
+        part_no: oi.part_no,
+        part_name: oi.part_name,
+        oldQty: (partDeltas.get(key)?.oldQty || 0) + Number(oi.quantity || 0),
+        newQty: 0,
+        mrp: Number(oi.mrp || 0)
+      });
+    }
+
+    for (const ni of updatedData.items) {
+      const key = ni.part_no.trim().toLowerCase();
+      const existing = partDeltas.get(key);
+      if (existing) {
+        existing.newQty += Number(ni.quantity || 0);
+        existing.mrp = Number(ni.mrp || 0);
+        existing.update_mrp = ni.update_mrp;
+      } else {
+        partDeltas.set(key, {
+          part_no: ni.part_no,
+          part_name: ni.part_name || 'Spares Part',
+          oldQty: 0,
+          newQty: Number(ni.quantity || 0),
+          mrp: Number(ni.mrp || 0),
+          update_mrp: ni.update_mrp
+        });
+      }
+    }
+
+    const mrpLogsToInsert: MRPHistory[] = [];
+
+    // Apply stock delta to inventory items
+    for (const [key, info] of partDeltas.entries()) {
+      const deltaQty = info.newQty - info.oldQty;
+      const invIdx = inventory.findIndex(i => i.part_no.trim().toLowerCase() === key);
+
+      if (invIdx > -1) {
+        const invPart = inventory[invIdx];
+        if (deltaQty !== 0) {
+          invPart.quantity = Math.max(0, invPart.quantity + deltaQty);
+          invPart.updated_at = new Date().toISOString();
+        }
+
+        if (info.update_mrp && info.mrp > 0 && invPart.mrp !== info.mrp) {
+          const oldMrp = invPart.mrp;
+          invPart.mrp = info.mrp;
           const mrpLog: MRPHistory = {
             id: uuid(),
             part_no: invPart.part_no,
             old_mrp: oldMrp,
-            new_mrp: newMrp,
-            changed_by: `${user.name} (Purchase ${invoiceNo})`,
+            new_mrp: info.mrp,
+            changed_by: `${user.name} (Fixed Purchase ${cleanInvoice})`,
             changed_at: new Date().toISOString()
           };
           cache[b].mrp_history.unshift(mrpLog);
           mrpLogsToInsert.push(mrpLog);
         }
 
-        if (!invPart.is_active) {
-          invPart.is_active = true;
-          invPart.archived_at = null;
-        }
-        invPart.updated_at = new Date().toISOString();
-        
         if (isSupabaseConfigured && supabase) {
-          const { error: invErr } = await supabase.schema(b).from('inventory').update({
+          await supabase.schema(b).from('inventory').update({
             quantity: invPart.quantity,
             mrp: invPart.mrp,
-            is_active: invPart.is_active,
-            archived_at: invPart.archived_at,
             updated_at: invPart.updated_at
           }).eq('id', invPart.id);
-          if (invErr) {
-            throw new Error(`Failed to update stock quantity & MRP for part ${invPart.part_no}: ${invErr.message}`);
-          }
         }
-      } else {
-        const initialPartMrp = newMrp > 0 ? newMrp : 0;
+      } else if (info.newQty > 0) {
+        // Brand new part added during bill fix
         const newInv: InventoryItem = {
           id: uuid(),
-          part_no: pItem.part_no,
-          part_name: pItem.part_name || 'New Spares Part',
-          quantity: pItem.quantity,
-          hsn: pItem.hsn || '',
-          mrp: initialPartMrp,
+          part_no: info.part_no,
+          part_name: info.part_name,
+          quantity: info.newQty,
+          hsn: '',
+          mrp: info.mrp || 0,
           brand,
           is_active: true,
           archived_at: null,
@@ -3405,97 +3651,97 @@ export const db = {
           updated_at: new Date().toISOString()
         };
         inventory.push(newInv);
-        if (initialPartMrp > 0) {
-          const mrpLog: MRPHistory = {
-            id: uuid(),
-            part_no: newInv.part_no,
-            old_mrp: 0,
-            new_mrp: initialPartMrp,
-            changed_by: `${user.name} (New Part Purchase ${invoiceNo})`,
-            changed_at: new Date().toISOString()
-          };
-          cache[b].mrp_history.unshift(mrpLog);
-          mrpLogsToInsert.push(mrpLog);
-        }
         if (isSupabaseConfigured && supabase) {
-          const { error: invErr } = await supabase.schema(b).from('inventory').insert(newInv);
-          if (invErr) {
-             throw new Error(`Failed to add new part ${pItem.part_no} to DB: ${invErr.message}`);
-          }
+          await supabase.schema(b).from('inventory').insert(newInv);
         }
-        db.logTransaction(user.id, user.name, 'Create Inventory', 'Inventory', `Auto-added new part ${pItem.part_no} (MRP ₹${initialPartMrp}) from Purchase ${invoiceNo}`, null, newInv);
       }
-      
-      const purchaseItemRec: PurchaseItem = {
-        id: uuid(),
-        purchase_id: purchaseId,
-        part_no: pItem.part_no,
-        part_name: pItem.part_name,
-        hsn: pItem.hsn,
-        quantity: pItem.quantity,
-        mrp: pItem.mrp,
-        is_new_part: !hasMatched,
-        matched_inventory: hasMatched,
-        created_at: new Date().toISOString()
-      };
-      
-      pItemsToSave.push(purchaseItemRec);
     }
 
-    // Save any newly created MRP history records
+    // Build replacement line items
+    const newPurchaseItems: PurchaseItem[] = updatedData.items.map(it => ({
+      id: it.id || uuid(),
+      purchase_id: purchaseId,
+      part_no: it.part_no,
+      part_name: it.part_name,
+      hsn: it.hsn || '',
+      quantity: Number(it.quantity) || 0,
+      mrp: Number(it.mrp) || 0,
+      is_new_part: false,
+      matched_inventory: true,
+      created_at: new Date().toISOString()
+    }));
+
+    // Update in-memory purchase items
+    const remainingItems = purchaseItemsList.filter(pi => pi.purchase_id !== purchaseId);
+    remainingItems.push(...newPurchaseItems);
+    cache[b].purchase_items = remainingItems;
+
+    // Update Supabase purchase_items
+    if (isSupabaseConfigured && supabase) {
+      await supabase.schema(b).from('purchase_items').delete().eq('purchase_id', purchaseId);
+      if (newPurchaseItems.length > 0) {
+        await supabase.schema(b).from('purchase_items').insert(newPurchaseItems);
+      }
+    } else {
+      localStorage.setItem(`sparezy_schema_${b}_purchase_items`, JSON.stringify(remainingItems));
+    }
+
+    // Update purchase record
+    const discountAmount = updatedData.subtotal * (updatedData.dealer_discount_percentage / 100);
+    const updatedPurchase: Purchase = {
+      ...oldPurchase,
+      dealer_name: cleanDealer,
+      invoice_no: cleanInvoice,
+      invoice_date: new Date(updatedData.invoice_date).toISOString(),
+      subtotal: updatedData.subtotal,
+      dealer_discount_percentage: updatedData.dealer_discount_percentage,
+      discount_amount: discountAmount,
+      total_after_discount: updatedData.total_after_discount,
+      items: newPurchaseItems
+    };
+
+    listPurchases[existingIdx] = updatedPurchase;
+
+    if (isSupabaseConfigured && supabase) {
+      await supabase.schema(b).from('purchases').update({
+        dealer_name: updatedPurchase.dealer_name,
+        invoice_no: updatedPurchase.invoice_no,
+        invoice_date: updatedPurchase.invoice_date,
+        subtotal: updatedPurchase.subtotal,
+        dealer_discount_percentage: updatedPurchase.dealer_discount_percentage,
+        discount_amount: updatedPurchase.discount_amount,
+        total_after_discount: updatedPurchase.total_after_discount
+      }).eq('id', purchaseId);
+    } else {
+      localStorage.setItem(`sparezy_schema_${b}_purchases`, JSON.stringify(listPurchases));
+      localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
+    }
+
+    idbStore.set('cache_partitions', `${b}_purchases`, listPurchases);
+    idbStore.set('cache_partitions', `${b}_purchase_items`, remainingItems);
+    idbStore.set('cache_partitions', `${b}_inventory`, inventory);
+
     if (mrpLogsToInsert.length > 0) {
       if (isSupabaseConfigured && supabase) {
-        supabase.schema(b).from('mrp_history').insert(mrpLogsToInsert).then(({ error }) => {
-          if (error) console.warn("Supabase mrp_history purchase update notice:", error.message);
-        });
+        supabase.schema(b).from('mrp_history').insert(mrpLogsToInsert).then();
       } else {
         localStorage.setItem(`sparezy_schema_${b}_mrp_history`, JSON.stringify(cache[b].mrp_history));
       }
       idbStore.set('cache_partitions', `${b}_mrp`, cache[b].mrp_history);
     }
-    
-    const purchase: Purchase = {
-      id: purchaseId,
-      dealer_name: dealerName,
-      invoice_no: invoiceNo,
-      invoice_date: new Date(invoiceDate).toISOString(),
-      subtotal,
-      dealer_discount_percentage: discountPercentage,
-      discount_amount: discountAmount,
-      total_after_discount: totalAfterDiscount,
-      scan_source: scanSource,
-      created_by: user.name,
-      created_at: new Date().toISOString()
-    };
-    
-    listPurchases.unshift(purchase);
-    purchaseItemsList.push(...pItemsToSave);
-    
-    if (isSupabaseConfigured && supabase) {
-      const { error: pErr } = await supabase.schema(b).from('purchases').insert(purchase);
-      if (pErr) {
-        // Rollback purchases cache
-        listPurchases.shift();
-        throw new Error(`Failed to save purchase details: ${pErr.message}`);
-      }
-      const { error: itemsErr } = await supabase.schema(b).from('purchase_items').insert(pItemsToSave);
-      if (itemsErr) {
-        throw new Error(`Purchase main record saved, but line items failed: ${itemsErr.message}`);
-      }
-    } else {
-      localStorage.setItem(`sparezy_schema_${b}_inventory`, JSON.stringify(inventory));
-      localStorage.setItem(`sparezy_schema_${b}_purchases`, JSON.stringify(listPurchases));
-      localStorage.setItem(`sparezy_schema_${b}_purchase_items`, JSON.stringify(purchaseItemsList));
-      localStorage.setItem(`sparezy_schema_${b}_mrp_history`, JSON.stringify(cache[b].mrp_history));
-    }
-    idbStore.set('cache_partitions', `${b}_inventory`, inventory);
-    idbStore.set('cache_partitions', `${b}_purchases`, listPurchases);
-    idbStore.set('cache_partitions', `${b}_purchase_items`, purchaseItemsList);
-    
-    const mrpChangeSummary = mrpLogsToInsert.length > 0 ? ` (${mrpLogsToInsert.length} inventory MRPs updated)` : '';
-    db.logTransaction(user.id, user.name, 'Create Purchase', 'Purchases', `Added brand purchase invoice ${invoiceNo} for dealer ${dealerName}${mrpChangeSummary}`, null, purchase);
+
+    const modifiedCount = Array.from(partDeltas.values()).filter(d => d.newQty !== d.oldQty).length;
+    db.logTransaction(
+      user.id,
+      user.name,
+      'Fix Purchase Bill',
+      'Purchases',
+      `Fixed & corrected purchase bill ${cleanInvoice} (Adjusted stock for ${modifiedCount} parts)`,
+      oldPurchase,
+      updatedPurchase
+    );
     db.notify();
-    return purchase;
+    return updatedPurchase;
   },
 
   deletePurchase: (brand: Brand, purchaseId: string, user: User) => {

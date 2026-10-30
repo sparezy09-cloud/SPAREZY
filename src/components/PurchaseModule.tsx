@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Brand, User, ScanSource, Purchase, PurchaseItem, InventoryItem, isOwnerOrAdmin } from '../types';
 import { db } from '../dbStore';
 import { optimizeFileForEgress } from '../lib/imageOptimizer';
@@ -7,7 +7,8 @@ import {
   Trash2, Plus, X, Eye, FileSpreadsheet, ShieldAlert, BadgeInfo, Zap,
   CheckCircle2, Archive, PlusCircle, ArrowUpRight, ArrowDownRight, 
   TrendingUp, TrendingDown, ToggleLeft, ToggleRight, Check, AlertCircle,
-  Sliders, RefreshCw, ArrowRight, ArrowUpDown, ArrowUp, ArrowDown, Filter, CalendarDays
+  Sliders, RefreshCw, ArrowRight, ArrowUpDown, ArrowUp, ArrowDown, Filter, CalendarDays,
+  Wrench, AlertTriangle, Edit3
 } from 'lucide-react';
 
 interface PurchaseModuleProps {
@@ -110,6 +111,12 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   const [tableSearch, setTableSearch] = useState<string>('');
   const [updateManualMrp, setUpdateManualMrp] = useState<boolean>(true);
 
+  // Single-click sync guard states for AI Scan & Manual entries
+  const [isSyncingInvoice, setIsSyncingInvoice] = useState(false);
+  const isSyncingRef = useRef(false);
+  const [isSavingManual, setIsSavingManual] = useState(false);
+  const isSavingManualRef = useRef(false);
+
   // --- MANUAL FORM STATE ---
   const [dealerName, setDealerName] = useState('');
   const [invoiceNo, setInvoiceNo] = useState('');
@@ -144,10 +151,14 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
 
   const handleSaveManualPurchase = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSavingManualRef.current || isSavingManual) return;
     if (!dealerName || !invoiceNo || !invoiceDate) {
       alert("Dealer details and Invoice details are mandatory");
       return;
     }
+
+    isSavingManualRef.current = true;
+    setIsSavingManual(true);
 
     try {
       await db.createPurchase(
@@ -177,8 +188,36 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
       triggerToast(`Saved purchase invoice ${invoiceNo} and synced to stock successfully!`);
     } catch (err: any) {
       alert(err.message);
+    } finally {
+      setIsSavingManual(false);
+      isSavingManualRef.current = false;
     }
   };
+
+  // --- FIX / EDIT PREVIOUS BILL STATE ---
+  interface FixBillLineItem {
+    id?: string;
+    part_no: string;
+    part_name: string;
+    hsn: string;
+    originalQty: number;
+    quantity: number;
+    originalMrp: number;
+    mrp: number;
+    currentStock: number;
+    update_mrp?: boolean;
+  }
+
+  const [fixingPurchase, setFixingPurchase] = useState<Purchase | null>(null);
+  const [fixDealerName, setFixDealerName] = useState('');
+  const [fixInvoiceNo, setFixInvoiceNo] = useState('');
+  const [fixInvoiceDate, setFixInvoiceDate] = useState('');
+  const [fixDiscountPercentage, setFixDiscountPercentage] = useState<number>(0);
+  const [fixLines, setFixLines] = useState<FixBillLineItem[]>([]);
+  const [isSavingFix, setIsSavingFix] = useState(false);
+  const isSavingFixRef = useRef(false);
+  const [fixPartSearch, setFixPartSearch] = useState('');
+  const [fixAddQty, setFixAddQty] = useState<number>(1);
 
 
   // --- AI SCANNER STATE ---
@@ -662,11 +701,16 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
   }, [scanRows, rowMrpFilter, tableSearch]);
 
   const handleAIScanCompleteSync = async () => {
+    // Single-click guarantee: drop any secondary clicks immediately
+    if (isSyncingRef.current || isSyncingInvoice) return;
     if (scanRows.length === 0) return;
     if (!scanDealer || !scanInvoiceNo || !scanInvoiceDate) {
       alert("Header fields are required before syncing.");
       return;
     }
+
+    isSyncingRef.current = true;
+    setIsSyncingInvoice(true);
 
     const mrpUpdatesCount = scanRows.filter(r => r.updateMrp && ((r.currentInventoryMrp !== undefined && r.mrp !== r.currentInventoryMrp) || r.isNewPart)).length;
 
@@ -701,6 +745,9 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
       setActiveTab('history');
     } catch (err: any) {
       alert(err.message);
+    } finally {
+      setIsSyncingInvoice(false);
+      isSyncingRef.current = false;
     }
   };
 
@@ -858,6 +905,203 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
       alert(err.message);
     }
   };
+
+  // --- FIX / EDIT PREVIOUS BILL LOGIC ---
+  const handleOpenFixBillModal = (p: Purchase) => {
+    const allPurchaseItems = db.getPurchaseItems(brand);
+    const items = allPurchaseItems.filter(pi => pi.purchase_id === p.id);
+    const inv = db.getInventory(brand, true);
+
+    const lines: FixBillLineItem[] = items.map(it => {
+      const matchedInv = inv.find(i => i.part_no.trim().toLowerCase() === it.part_no.trim().toLowerCase());
+      return {
+        id: it.id,
+        part_no: it.part_no,
+        part_name: it.part_name,
+        hsn: it.hsn || '',
+        originalQty: it.quantity,
+        quantity: it.quantity,
+        originalMrp: it.mrp,
+        mrp: it.mrp,
+        currentStock: matchedInv ? matchedInv.quantity : 0,
+        update_mrp: false
+      };
+    });
+
+    setFixingPurchase(p);
+    setFixDealerName(p.dealer_name);
+    setFixInvoiceNo(p.invoice_no);
+    try {
+      const d = new Date(p.invoice_date);
+      setFixInvoiceDate(d.toISOString().split('T')[0]);
+    } catch {
+      setFixInvoiceDate(p.invoice_date);
+    }
+    setFixDiscountPercentage(p.dealer_discount_percentage || 0);
+    setFixLines(lines);
+    setFixPartSearch('');
+    setFixAddQty(1);
+  };
+
+  const handleUpdateFixLine = (idx: number, field: 'quantity' | 'mrp' | 'update_mrp', val: any) => {
+    setFixLines(prev => prev.map((l, i) => {
+      if (i === idx) {
+        return { ...l, [field]: val };
+      }
+      return l;
+    }));
+  };
+
+  const handleRemoveFixLine = (idx: number) => {
+    setFixLines(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const handleAddPartToFixBill = (invPart: InventoryItem) => {
+    const qty = Math.max(1, fixAddQty || 1);
+    const existingIdx = fixLines.findIndex(l => l.part_no.trim().toLowerCase() === invPart.part_no.trim().toLowerCase());
+    if (existingIdx > -1) {
+      setFixLines(prev => prev.map((l, i) => i === existingIdx ? { ...l, quantity: l.quantity + qty } : l));
+      triggerToast(`Increased quantity for ${invPart.part_no} in bill`);
+    } else {
+      setFixLines(prev => [
+        ...prev,
+        {
+          part_no: invPart.part_no,
+          part_name: invPart.part_name,
+          hsn: invPart.hsn || '',
+          originalQty: 0,
+          quantity: qty,
+          originalMrp: invPart.mrp || 0,
+          mrp: invPart.mrp || 0,
+          currentStock: invPart.quantity,
+          update_mrp: false
+        }
+      ]);
+      triggerToast(`Added ${invPart.part_no} to bill`);
+    }
+    setFixPartSearch('');
+    setFixAddQty(1);
+  };
+
+  const fixSubtotal = useMemo(() => {
+    return fixLines.reduce((acc, l) => acc + (Number(l.quantity || 0) * Number(l.mrp || 0)), 0);
+  }, [fixLines]);
+
+  const fixTotalAfterDiscount = useMemo(() => {
+    const disc = fixSubtotal * (Number(fixDiscountPercentage || 0) / 100);
+    return Math.max(0, fixSubtotal - disc);
+  }, [fixSubtotal, fixDiscountPercentage]);
+
+  const fixTotalStockDelta = useMemo(() => {
+    return fixLines.reduce((acc, l) => acc + (Number(l.quantity || 0) - Number(l.originalQty || 0)), 0);
+  }, [fixLines]);
+
+  const handleSaveFixedBill = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!fixingPurchase) return;
+    if (isSavingFixRef.current || isSavingFix) return;
+
+    if (!fixDealerName.trim() || !fixInvoiceNo.trim() || !fixInvoiceDate.trim()) {
+      alert("Dealer details, Invoice number, and Invoice date are mandatory.");
+      return;
+    }
+
+    if (fixLines.length === 0) {
+      alert("The invoice must have at least one line item. If you want to completely remove this invoice, use the Delete Invoice button.");
+      return;
+    }
+
+    isSavingFixRef.current = true;
+    setIsSavingFix(true);
+
+    try {
+      const updated = await db.updatePurchase(
+        brand,
+        fixingPurchase.id,
+        {
+          dealer_name: fixDealerName,
+          invoice_no: fixInvoiceNo,
+          invoice_date: fixInvoiceDate,
+          dealer_discount_percentage: Number(fixDiscountPercentage || 0),
+          subtotal: fixSubtotal,
+          total_after_discount: fixTotalAfterDiscount,
+          items: fixLines.map(l => ({
+            id: l.id,
+            part_no: l.part_no,
+            part_name: l.part_name,
+            hsn: l.hsn,
+            quantity: Math.max(1, Number(l.quantity) || 1),
+            mrp: Number(l.mrp) || 0,
+            update_mrp: l.update_mrp
+          }))
+        },
+        user
+      );
+
+      refreshComponentData();
+      if (viewingPurchase && viewingPurchase.id === fixingPurchase.id) {
+        setViewingPurchase(updated);
+      }
+      setFixingPurchase(null);
+      triggerToast(`Successfully fixed purchase invoice #${fixInvoiceNo}! Stock quantities adjusted.`);
+    } catch (err: any) {
+      alert(err.message || "Failed to update purchase bill.");
+    } finally {
+      setIsSavingFix(false);
+      isSavingFixRef.current = false;
+    }
+  };
+
+  // Detect accidental duplicate purchases (e.g. from rapid multiple clicks before)
+  const duplicateInvoiceGroups = useMemo(() => {
+    const map = new Map<string, Purchase[]>();
+    for (const p of purchasesList) {
+      const key = `${p.invoice_no.trim().toLowerCase()}|${p.dealer_name.trim().toLowerCase()}`;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(p);
+    }
+    const dupes: { invoiceNo: string; dealerName: string; purchases: Purchase[] }[] = [];
+    for (const [_, list] of map.entries()) {
+      if (list.length > 1) {
+        dupes.push({
+          invoiceNo: list[0].invoice_no,
+          dealerName: list[0].dealer_name,
+          purchases: list
+        });
+      }
+    }
+    return dupes;
+  }, [purchasesList]);
+
+  const handleQuickDeduplicate = async (primaryPurchase: Purchase, duplicatePurchase: Purchase) => {
+    const confirmed = window.confirm(
+      `⚠️ Remove Duplicate Bill & Rollback Multiplied Stock?\n\n` +
+      `Invoice #${primaryPurchase.invoice_no} (${primaryPurchase.dealer_name}) is registered multiple times.\n\n` +
+      `Deleting this duplicate entry will automatically deduct its parts stock quantities so inventory returns to the correct count.\n\n` +
+      `Proceed with deduplicating?`
+    );
+    if (!confirmed) return;
+
+    try {
+      db.deletePurchase(brand, duplicatePurchase.id, user);
+      refreshComponentData();
+      if (viewingPurchase?.id === duplicatePurchase.id) {
+        setViewingPurchase(primaryPurchase);
+      }
+      triggerToast(`Deduplicated invoice #${primaryPurchase.invoice_no}! Removed duplicate and restored stock.`);
+    } catch (err: any) {
+      alert(err.message);
+    }
+  };
+
+  // Inventory parts filtered for adding in fix bill modal
+  const filteredInventoryForFix = useMemo(() => {
+    if (!fixPartSearch.trim()) return [];
+    const q = fixPartSearch.trim().toLowerCase();
+    return allInventoryList
+      .filter(i => i.is_active && (i.part_no.toLowerCase().includes(q) || i.part_name.toLowerCase().includes(q)))
+      .slice(0, 8);
+  }, [allInventoryList, fixPartSearch]);
 
   return (
     <div className="space-y-6">
@@ -1616,13 +1860,29 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                   </div>
 
                   <button
+                    type="button"
                     onClick={handleAIScanCompleteSync}
-                    className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-3 rounded-xl text-xs font-black shadow-md hover:shadow-lg transition-all cursor-pointer text-center flex items-center justify-center gap-2"
+                    disabled={isSyncingInvoice || scanRows.length === 0}
+                    className={`w-full py-3 rounded-xl text-xs font-black shadow-md transition-all text-center flex items-center justify-center gap-2 ${
+                      isSyncingInvoice
+                        ? 'bg-indigo-400 text-white cursor-not-allowed opacity-90 shadow-none'
+                        : 'bg-indigo-600 hover:bg-indigo-700 text-white hover:shadow-lg cursor-pointer'
+                    }`}
+                    title={isSyncingInvoice ? 'Syncing invoice and updating stock... Please wait' : 'Confirm & Sync Invoice'}
                   >
-                    <CheckCircle2 className="w-4 h-4 text-emerald-300" />
-                    <span>
-                      Confirm &amp; Sync Invoice ({scanRows.length} Parts{mrpStats.totalUpdateToggled > 0 ? ` • ${mrpStats.totalUpdateToggled} MRPs Updated` : ''})
-                    </span>
+                    {isSyncingInvoice ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 text-white animate-spin shrink-0" />
+                        <span>Syncing &amp; Adding Stock (One-Time Process)... Please wait</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="w-4 h-4 text-emerald-300 shrink-0" />
+                        <span>
+                          Confirm &amp; Sync Invoice ({scanRows.length} Parts{mrpStats.totalUpdateToggled > 0 ? ` • ${mrpStats.totalUpdateToggled} MRPs Updated` : ''})
+                        </span>
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
@@ -1799,9 +2059,21 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
             <span className="font-bold text-slate-600">Calculated Subtotal: ₹{manualSubtotal.toFixed(2)}</span>
             <button
               type="submit"
-              className="bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl font-bold shadow transition cursor-pointer"
+              disabled={isSavingManual}
+              className={`px-5 py-2.5 rounded-xl font-bold shadow transition flex items-center gap-2 ${
+                isSavingManual
+                  ? 'bg-indigo-400 text-white cursor-not-allowed opacity-90'
+                  : 'bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer'
+              }`}
             >
-              Save &amp; Sync Purchase {updateManualMrp ? '(With MRP Update)' : ''}
+              {isSavingManual ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                  <span>Saving &amp; Adding Stock...</span>
+                </>
+              ) : (
+                <span>Save &amp; Sync Purchase {updateManualMrp ? '(With MRP Update)' : ''}</span>
+              )}
             </button>
           </div>
 
@@ -1926,6 +2198,50 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                   </button>
                 </div>
               </div>
+
+              {/* Duplicate Purchase Bills Alert Banner */}
+              {duplicateInvoiceGroups.length > 0 && (
+                <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl space-y-2 mt-2">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    <div className="flex-1 text-xs">
+                      <p className="font-bold text-amber-900">
+                        Duplicate Bills Detected ({duplicateInvoiceGroups.length})
+                      </p>
+                      <p className="text-amber-700 text-[11px] leading-tight mt-0.5">
+                        These invoices appear more than once (often from clicking confirm multiple times). Stock was added multiple times. Click "Deduplicate" to remove the extra copy and restore stock, or "Fix Bill" to manually adjust quantities.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {duplicateInvoiceGroups.map((group, gIdx) => (
+                      <div key={gIdx} className="inline-flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-amber-200 text-xs shadow-2xs">
+                        <span className="font-mono font-bold text-slate-800">{group.invoiceNo}</span>
+                        <span className="text-slate-500 font-normal">({group.dealerName})</span>
+                        <span className="px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
+                          {group.purchases.length} copies
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleQuickDeduplicate(group.purchases[0], group.purchases[1])}
+                          className="ml-1 px-2 py-0.5 bg-amber-600 hover:bg-amber-700 text-white rounded text-[10px] font-bold cursor-pointer transition shadow-2xs"
+                          title="Keep one bill and safely remove duplicate copy while deducting the extra parts stock"
+                        >
+                          Deduplicate
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleOpenFixBillModal(group.purchases[0])}
+                          className="px-2 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded text-[10px] font-bold cursor-pointer transition"
+                          title="Open fix modal to adjust quantities"
+                        >
+                          Fix Bill
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Table view */}
@@ -2018,6 +2334,13 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                               title="View Invoice Breakdown & Items"
                             >
                               <Eye className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => handleOpenFixBillModal(p)}
+                              className="p-1.5 text-amber-600 hover:bg-amber-50 rounded-lg transition-colors cursor-pointer"
+                              title="Fix / Edit This Previous Bill & Adjust Stock"
+                            >
+                              <Wrench className="w-4 h-4" />
                             </button>
                             <button
                               onClick={() => handleDeleteSyncedInvoice(p.id)}
@@ -2145,14 +2468,26 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
                   </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => handleDeleteSyncedInvoice(viewingPurchase.id)}
-                  className="w-full bg-red-100 hover:bg-rose-600 hover:text-white text-red-700 py-2 rounded-xl text-xs font-bold font-semibold flex items-center justify-center gap-1 transition cursor-pointer"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                  Delete Invoice &amp; Restore Stock
-                </button>
+                <div className="space-y-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => handleOpenFixBillModal(viewingPurchase)}
+                    className="w-full bg-amber-50 hover:bg-amber-100 text-amber-850 border border-amber-300 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 shadow-2xs transition cursor-pointer"
+                    title="Fix invoice number, dealer, date, or adjust part quantities/stock"
+                  >
+                    <Wrench className="w-3.5 h-3.5 text-amber-600" />
+                    Fix / Edit Bill &amp; Correct Stock
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteSyncedInvoice(viewingPurchase.id)}
+                    className="w-full bg-red-100 hover:bg-rose-600 hover:text-white text-red-700 py-2 rounded-xl text-xs font-bold font-semibold flex items-center justify-center gap-1 transition cursor-pointer"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete Invoice &amp; Restore Stock
+                  </button>
+                </div>
 
               </div>
             ) : (
@@ -2162,6 +2497,365 @@ export default function PurchaseModule({ brand, user }: PurchaseModuleProps) {
             )}
           </div>
 
+        </div>
+      )}
+
+      {/* Fix / Edit Previous Purchase Bill Modal */}
+      {fixingPurchase && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-5 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden my-auto animate-in fade-in duration-150">
+            {/* Modal Header */}
+            <div className="px-5 py-4 bg-gradient-to-r from-amber-500 to-amber-600 text-white flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-white/20 rounded-xl backdrop-blur-xs">
+                  <Wrench className="w-5 h-5 text-white" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm sm:text-base leading-tight">
+                    Fix / Edit Previous Purchase Bill
+                  </h3>
+                  <p className="text-amber-100 text-[11px] mt-0.5">
+                    Invoice #{fixingPurchase.invoice_no} • {fixingPurchase.dealer_name}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setFixingPurchase(null)}
+                className="p-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white transition cursor-pointer"
+                title="Cancel & Close"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <form onSubmit={handleSaveFixedBill} className="flex-1 overflow-y-auto p-5 space-y-5 text-xs font-semibold text-slate-700">
+              {/* Informative Guidance Banner */}
+              <div className="p-3.5 bg-amber-50/80 border border-amber-200 rounded-xl text-amber-900 space-y-1">
+                <div className="flex items-center gap-1.5 font-bold text-xs text-amber-950">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>How Stock Correction Works:</span>
+                </div>
+                <p className="text-[11px] text-amber-800 leading-relaxed font-normal">
+                  If this invoice was synced multiple times by clicking confirm repeatedly, or had incorrect counts, modify the parts quantity below to the true bill quantity. Inventory stock will automatically adjust by the difference (delta). For example, if a part was double-added (20 instead of 10), changing it to 10 will immediately deduct 10 units from stock.
+                </p>
+              </div>
+
+              {/* Invoice Metadata Inputs */}
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
+                <div>
+                  <label className="block text-slate-500 text-[11px] mb-1">Dealer Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={fixDealerName}
+                    onChange={(e) => setFixDealerName(e.target.value)}
+                    className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-500 text-[11px] mb-1">Invoice Number</label>
+                  <input
+                    type="text"
+                    required
+                    value={fixInvoiceNo}
+                    onChange={(e) => setFixInvoiceNo(e.target.value)}
+                    className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-mono font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-500 text-[11px] mb-1">Invoice Date</label>
+                  <input
+                    type="date"
+                    required
+                    value={fixInvoiceDate}
+                    onChange={(e) => setFixInvoiceDate(e.target.value)}
+                    className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-500 text-[11px] mb-1">Dealer Discount %</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    value={fixDiscountPercentage}
+                    onChange={(e) => setFixDiscountPercentage(parseFloat(e.target.value) || 0)}
+                    className="w-full p-2 bg-white border border-slate-200 rounded-lg text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                  />
+                </div>
+              </div>
+
+              {/* Items List Table */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h4 className="font-bold text-slate-800 text-xs uppercase tracking-wider flex items-center gap-1.5">
+                    <span>Invoice Parts List ({fixLines.length} items)</span>
+                  </h4>
+                  <span className="text-[11px] text-slate-500">
+                    Net Stock Impact:{' '}
+                    <strong className={`font-mono font-bold ${
+                      fixTotalStockDelta < 0 ? 'text-rose-600' : fixTotalStockDelta > 0 ? 'text-emerald-600' : 'text-slate-700'
+                    }`}>
+                      {fixTotalStockDelta > 0 ? `+${fixTotalStockDelta}` : fixTotalStockDelta} units
+                    </strong>
+                  </span>
+                </div>
+
+                <div className="border border-slate-200 rounded-xl overflow-x-auto max-h-[38vh]">
+                  <table className="min-w-full divide-y divide-slate-200 text-left">
+                    <thead className="bg-slate-100/80 text-[10px] uppercase font-bold text-slate-500 sticky top-0 z-10 backdrop-blur-xs">
+                      <tr>
+                        <th className="p-2.5">Part Details</th>
+                        <th className="p-2.5 text-center">Original Bill Qty</th>
+                        <th className="p-2.5 text-center">Corrected Bill Qty</th>
+                        <th className="p-2.5 text-center">Stock Impact</th>
+                        <th className="p-2.5 text-right">Invoice MRP (₹)</th>
+                        <th className="p-2.5 text-center">Update Catalog MRP?</th>
+                        <th className="p-2.5 text-right">Line Total</th>
+                        <th className="p-2.5 text-center">Remove</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-xs">
+                      {fixLines.map((line, idx) => {
+                        const delta = (Number(line.quantity) || 0) - (Number(line.originalQty) || 0);
+                        const futureStock = Math.max(0, line.currentStock + delta);
+                        const lineTotal = (Number(line.quantity) || 0) * (Number(line.mrp) || 0);
+
+                        return (
+                          <tr key={idx} className="hover:bg-slate-50/50">
+                            <td className="p-2.5 max-w-[200px]">
+                              <p className="font-mono font-bold text-slate-900">{line.part_no}</p>
+                              <p className="text-[10px] text-slate-400 truncate" title={line.part_name}>
+                                {line.part_name}
+                              </p>
+                            </td>
+
+                            <td className="p-2.5 text-center font-mono font-bold text-slate-500">
+                              {line.originalQty} pcs
+                            </td>
+
+                            {/* Quantity Controls */}
+                            <td className="p-2.5 text-center">
+                              <div className="inline-flex items-center border border-slate-300 rounded-lg overflow-hidden bg-white shadow-2xs">
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateFixLine(idx, 'quantity', Math.max(1, line.quantity - 1))}
+                                  className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold cursor-pointer"
+                                  title="Decrease quantity"
+                                >
+                                  -
+                                </button>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={line.quantity}
+                                  onChange={(e) => handleUpdateFixLine(idx, 'quantity', Math.max(1, parseInt(e.target.value, 10) || 1))}
+                                  className="w-14 text-center font-mono font-bold text-slate-900 text-xs py-1 focus:outline-none"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleUpdateFixLine(idx, 'quantity', line.quantity + 1)}
+                                  className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold cursor-pointer"
+                                  title="Increase quantity"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            </td>
+
+                            {/* Stock Impact Badge */}
+                            <td className="p-2.5 text-center">
+                              {delta < 0 ? (
+                                <span className="inline-flex flex-col items-center">
+                                  <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded text-[10px] font-black bg-rose-100 text-rose-800 border border-rose-200">
+                                    <TrendingDown className="w-3 h-3 text-rose-600" />
+                                    <span>{delta} pcs</span>
+                                  </span>
+                                  <span className="text-[9px] text-slate-400 mt-0.5">
+                                    Stock: {line.currentStock} → {futureStock}
+                                  </span>
+                                </span>
+                              ) : delta > 0 ? (
+                                <span className="inline-flex flex-col items-center">
+                                  <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded text-[10px] font-black bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                    <TrendingUp className="w-3 h-3 text-emerald-600" />
+                                    <span>+{delta} pcs</span>
+                                  </span>
+                                  <span className="text-[9px] text-slate-400 mt-0.5">
+                                    Stock: {line.currentStock} → {futureStock}
+                                  </span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex flex-col items-center">
+                                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600">
+                                    <Check className="w-3 h-3 text-slate-400" />
+                                    <span>No Change</span>
+                                  </span>
+                                  <span className="text-[9px] text-slate-400 mt-0.5">
+                                    Stock: {line.currentStock}
+                                  </span>
+                                </span>
+                              )}
+                            </td>
+
+                            {/* MRP input */}
+                            <td className="p-2.5 text-right">
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                value={line.mrp}
+                                onChange={(e) => handleUpdateFixLine(idx, 'mrp', parseFloat(e.target.value) || 0)}
+                                className="w-20 p-1 text-right font-mono font-bold bg-white border border-slate-200 rounded text-xs focus:outline-none focus:border-amber-500"
+                              />
+                            </td>
+
+                            {/* Update Catalog MRP Toggle */}
+                            <td className="p-2.5 text-center">
+                              <button
+                                type="button"
+                                onClick={() => handleUpdateFixLine(idx, 'update_mrp', !line.update_mrp)}
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold transition cursor-pointer ${
+                                  line.update_mrp
+                                    ? 'bg-emerald-600 text-white'
+                                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                                }`}
+                              >
+                                {line.update_mrp ? 'YES' : 'NO'}
+                              </button>
+                            </td>
+
+                            {/* Line Total */}
+                            <td className="p-2.5 text-right font-mono font-bold text-slate-800">
+                              ₹{lineTotal.toFixed(2)}
+                            </td>
+
+                            {/* Remove Line */}
+                            <td className="p-2.5 text-center">
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveFixLine(idx)}
+                                className="p-1 text-rose-500 hover:bg-rose-50 rounded transition cursor-pointer"
+                                title="Remove this line from bill (will deduct entire original quantity from inventory)"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Add Missing Part Row */}
+              <div className="bg-slate-50 p-3 rounded-xl border border-dashed border-slate-300 space-y-2">
+                <p className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
+                  <Plus className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>Add Missing Part to this Bill</span>
+                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative flex-1 min-w-[200px]">
+                    <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      value={fixPartSearch}
+                      onChange={(e) => setFixPartSearch(e.target.value)}
+                      placeholder="Search parts by SKU or description to add..."
+                      className="w-full pl-8 pr-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
+                    />
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="text-[11px] text-slate-500">Qty:</span>
+                    <input
+                      type="number"
+                      min="1"
+                      value={fixAddQty}
+                      onChange={(e) => setFixAddQty(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                      className="w-16 p-1.5 bg-white border border-slate-200 rounded-lg text-xs text-center font-bold"
+                    />
+                  </div>
+                </div>
+
+                {filteredInventoryForFix.length > 0 && (
+                  <div className="mt-2 bg-white rounded-lg border border-slate-200 divide-y divide-slate-100 max-h-36 overflow-y-auto">
+                    {filteredInventoryForFix.map((invPart) => (
+                      <div
+                        key={invPart.id}
+                        onClick={() => handleAddPartToFixBill(invPart)}
+                        className="p-2 flex items-center justify-between hover:bg-indigo-50/60 cursor-pointer text-xs"
+                      >
+                        <div>
+                          <p className="font-mono font-bold text-slate-900">{invPart.part_no}</p>
+                          <p className="text-[10px] text-slate-500">{invPart.part_name}</p>
+                        </div>
+                        <div className="text-right">
+                          <p className="font-bold text-slate-800">₹{invPart.mrp}</p>
+                          <p className="text-[10px] text-slate-400">Stock: {invPart.quantity} pcs</p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Financial Math Summary */}
+              <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200 flex flex-wrap items-center justify-between gap-4 text-xs">
+                <div>
+                  <span className="text-slate-500">Original Total: </span>
+                  <span className="font-mono font-bold text-slate-700">₹{fixingPurchase.total_after_discount.toFixed(2)}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500">New Subtotal: </span>
+                  <span className="font-mono font-bold text-slate-800">₹{fixSubtotal.toFixed(2)}</span>
+                </div>
+                <div>
+                  <span className="text-slate-500">Discount ({fixDiscountPercentage}%): </span>
+                  <span className="font-mono font-bold text-amber-700">-₹{(fixSubtotal * (fixDiscountPercentage / 100)).toFixed(2)}</span>
+                </div>
+                <div className="text-indigo-700 font-bold">
+                  <span>New Corrected Total: </span>
+                  <span className="font-mono text-sm">₹{fixTotalAfterDiscount.toFixed(2)}</span>
+                </div>
+              </div>
+
+              {/* Footer Buttons */}
+              <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setFixingPurchase(null)}
+                  className="px-4 py-2 border border-slate-300 rounded-xl text-slate-700 hover:bg-slate-100 font-bold cursor-pointer transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingFix}
+                  className={`px-6 py-2.5 rounded-xl font-bold text-white shadow-md transition flex items-center gap-2 ${
+                    isSavingFix
+                      ? 'bg-amber-400 cursor-not-allowed opacity-90'
+                      : 'bg-amber-600 hover:bg-amber-700 cursor-pointer hover:shadow-lg'
+                  }`}
+                >
+                  {isSavingFix ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                      <span>Updating Bill &amp; Correcting Stock...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-4 h-4 text-white" />
+                      <span>Save Changes &amp; Correct Stock</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
 
