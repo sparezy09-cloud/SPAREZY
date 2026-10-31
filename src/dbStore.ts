@@ -1933,6 +1933,7 @@ export const db = {
       id: uuid(),
       status: 'Pending',
       requested_by: user.name,
+      requested_by_role: user.role,
       manager_id: user.id,
       created_at: now,
       updated_at: now
@@ -2025,6 +2026,71 @@ export const db = {
     );
     db.notify();
     return updatedReqs.length;
+  },
+
+  deleteOrderRequest: async (
+    id: string,
+    user: User
+  ): Promise<boolean> => {
+    const idx = cache.order_requests.findIndex(r => r.id === id);
+    if (idx === -1) return false;
+    const deleted = cache.order_requests[idx];
+    cache.order_requests.splice(idx, 1);
+
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase.from('order_requests').delete().eq('id', id);
+      if (error) console.error("❌ Error deleting order request from Supabase:", error);
+    } else {
+      localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(cache.order_requests));
+    }
+
+    db.logTransaction(
+      user.id,
+      user.name,
+      'Delete Order Request',
+      'Orders',
+      `Deleted order request for ${deleted.quantity}x ${deleted.part_no} (${deleted.part_name}) [${deleted.brand}]`,
+      deleted,
+      null
+    );
+    db.notify();
+    return true;
+  },
+
+  deleteBatchOrderRequests: async (
+    ids: string[],
+    user: User
+  ): Promise<number> => {
+    if (!ids || ids.length === 0) return 0;
+    const idSet = new Set(ids);
+    const deletedReqs: OrderRequest[] = [];
+
+    cache.order_requests = cache.order_requests.filter(r => {
+      if (idSet.has(r.id)) {
+        deletedReqs.push(r);
+        return false;
+      }
+      return true;
+    });
+
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase.from('order_requests').delete().in('id', ids);
+      if (error) console.error("❌ Error batch deleting order requests from Supabase:", error);
+    } else {
+      localStorage.setItem(KEY_ORDER_REQUESTS, JSON.stringify(cache.order_requests));
+    }
+
+    db.logTransaction(
+      user.id,
+      user.name,
+      'Batch Delete Order Requests',
+      'Orders',
+      `Deleted ${deletedReqs.length} order requests in bulk`,
+      deletedReqs,
+      null
+    );
+    db.notify();
+    return deletedReqs.length;
   },
 
   // Staff Attendance & Monthly Salary System

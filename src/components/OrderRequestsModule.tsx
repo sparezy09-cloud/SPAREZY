@@ -6,7 +6,7 @@ import {
   Clock, AlertTriangle, Truck, Eye, RefreshCw, Filter, 
   ChevronRight, ArrowRight, UserCheck, PackageCheck, Zap, Sparkles, Check,
   FileSpreadsheet, Download, CheckCheck, ChevronDown, CheckSquare, Square,
-  Layers, ArrowDownToLine, FileText, Calendar, CalendarDays, LayoutGrid, Table, X
+  Layers, ArrowDownToLine, FileText, Calendar, CalendarDays, LayoutGrid, Table, X, Trash2
 } from 'lucide-react';
 import { exportOrderRequestsToExcel } from '../lib/exportOrderRequestsExcel';
 
@@ -41,6 +41,11 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
   } | null>(null);
   const exportDropdownRef = useRef<HTMLDivElement>(null);
 
+  // Deletion modals state
+  const [deletingRequest, setDeletingRequest] = useState<OrderRequest | null>(null);
+  const [isDeletingBatch, setIsDeletingBatch] = useState(false);
+  const [isDeletingInProgress, setIsDeletingInProgress] = useState(false);
+
   // Fast Handy Order Request Bar (Search -> Add -> Quantity -> Next)
   const [fastSearch, setFastSearch] = useState('');
   const [selectedPart, setSelectedPart] = useState<InventoryItem | null>(null);
@@ -70,6 +75,41 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
   const [rejectionReason, setRejectionReason] = useState('');
 
   const isOwner = isOwnerOrAdmin(user.role);
+
+  // Allow deleting an order request if user is Owner/Admin, or if request is Pending, or if user created it
+  const canUserDelete = (req: OrderRequest) => {
+    return isOwner || req.status === 'Pending' || req.manager_id === user.id || req.requested_by === user.name;
+  };
+
+  const handleConfirmDeleteSingle = async () => {
+    if (!deletingRequest) return;
+    setIsDeletingInProgress(true);
+    try {
+      await db.deleteOrderRequest(deletingRequest.id, user);
+      triggerToast(`✓ Deleted order request for ${deletingRequest.part_no}`);
+      setSelectedIds(prev => prev.filter(id => id !== deletingRequest.id));
+      setDeletingRequest(null);
+    } catch (err: any) {
+      alert(err.message || "Failed to delete order request");
+    } finally {
+      setIsDeletingInProgress(false);
+    }
+  };
+
+  const handleConfirmDeleteBatch = async () => {
+    if (selectedIds.length === 0) return;
+    setIsDeletingInProgress(true);
+    try {
+      const count = await db.deleteBatchOrderRequests(selectedIds, user);
+      triggerToast(`✓ Successfully deleted ${count} selected order requests`);
+      setSelectedIds([]);
+      setIsDeletingBatch(false);
+    } catch (err: any) {
+      alert(err.message || "Failed to delete selected order requests");
+    } finally {
+      setIsDeletingInProgress(false);
+    }
+  };
 
   const refreshData = () => {
     setRequests(db.getOrderRequests(brand));
@@ -744,6 +784,14 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
           setShowExportMenu(false);
           return;
         }
+        if (deletingRequest) {
+          setDeletingRequest(null);
+          return;
+        }
+        if (isDeletingBatch) {
+          setIsDeletingBatch(false);
+          return;
+        }
         if (isAcceptAllModalOpen) {
           setIsAcceptAllModalOpen(false);
           return;
@@ -774,6 +822,8 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
     selectedIds,
     filteredRequests,
     showExportMenu,
+    deletingRequest,
+    isDeletingBatch,
     isAcceptAllModalOpen,
     isNewModalOpen,
     rejectingRequest,
@@ -1886,6 +1936,17 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                         )}
                       </div>
                     )}
+
+                    {canUserDelete(req) && (
+                      <button
+                        type="button"
+                        onClick={() => setDeletingRequest(req)}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                        title="Delete this order request"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
               );
@@ -2014,79 +2075,92 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                     </td>
 
                     <td className="p-3.5 text-right pr-4 align-top">
-                      {isOwner ? (
-                        <div className="flex items-center justify-end gap-1.5 flex-wrap">
-                          {req.status === 'Pending' && (
-                            <>
+                      <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                        {isOwner ? (
+                          <div className="flex items-center justify-end gap-1.5 flex-wrap">
+                            {req.status === 'Pending' && (
+                              <>
+                                <button
+                                  onClick={() => handleStatusChange(req.id, 'Accepted')}
+                                  className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                                  title="Accept request"
+                                >
+                                  <CheckCircle2 className="w-3 h-3" /> Accept
+                                </button>
+                                <button
+                                  onClick={() => setRejectingRequest(req)}
+                                  className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                                  title="Reject request"
+                                >
+                                  <XCircle className="w-3 h-3" /> Reject
+                                </button>
+                              </>
+                            )}
+                            {req.status === 'Accepted' && (
+                              <div className="flex items-center gap-1">
+                                <button
+                                  onClick={() => handleExportAccepted([req])}
+                                  className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                                  title="Export this accepted part to Excel"
+                                >
+                                  <FileSpreadsheet className="w-3 h-3" /> Excel
+                                </button>
+                                <button
+                                  onClick={() => handleStatusChange(req.id, 'Ordered with Dealer')}
+                                  className="px-2.5 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                                >
+                                  <Truck className="w-3 h-3" /> Order Placed
+                                </button>
+                              </div>
+                            )}
+                            {req.status === 'Ordered with Dealer' && (
                               <button
-                                onClick={() => handleStatusChange(req.id, 'Accepted')}
+                                onClick={() => handleStatusChange(req.id, 'Received')}
                                 className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
-                                title="Accept request"
                               >
-                                <CheckCircle2 className="w-3 h-3" /> Accept
+                                <PackageCheck className="w-3 h-3" /> Mark Received
                               </button>
-                              <button
-                                onClick={() => setRejectingRequest(req)}
-                                className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
-                                title="Reject request"
-                              >
-                                <XCircle className="w-3 h-3" /> Reject
-                              </button>
-                            </>
-                          )}
-                          {req.status === 'Accepted' && (
-                            <div className="flex items-center gap-1">
-                              <button
-                                onClick={() => handleExportAccepted([req])}
-                                className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
-                                title="Export this accepted part to Excel"
-                              >
-                                <FileSpreadsheet className="w-3 h-3" /> Excel
-                              </button>
-                              <button
-                                onClick={() => handleStatusChange(req.id, 'Ordered with Dealer')}
-                                className="px-2.5 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
-                              >
-                                <Truck className="w-3 h-3" /> Order Placed
-                              </button>
-                            </div>
-                          )}
-                          {req.status === 'Ordered with Dealer' && (
-                            <button
-                              onClick={() => handleStatusChange(req.id, 'Received')}
-                              className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
-                            >
-                              <PackageCheck className="w-3 h-3" /> Mark Received
-                            </button>
-                          )}
-                          {(req.status === 'Received' || req.status === 'Rejected') && (
-                            <span className="text-[10px] text-slate-400 italic">Archived</span>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="text-right">
-                          {req.status === 'Pending' ? (
-                            <span className="text-[10px] text-amber-600 font-semibold flex items-center justify-end gap-1">
-                              <Clock className="w-3 h-3" /> Awaiting Owner
-                            </span>
-                          ) : req.status === 'Accepted' || req.status === 'Ordered with Dealer' ? (
-                            <div className="flex items-center justify-end gap-1.5">
-                              <span className="text-[10px] text-emerald-600 font-semibold flex items-center gap-1">
-                                <CheckCircle2 className="w-3 h-3" /> Approved by Owner
+                            )}
+                            {(req.status === 'Received' || req.status === 'Rejected') && (
+                              <span className="text-[10px] text-slate-400 italic">Archived</span>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-right flex items-center justify-end gap-1.5">
+                            {req.status === 'Pending' ? (
+                              <span className="text-[10px] text-amber-600 font-semibold flex items-center justify-end gap-1">
+                                <Clock className="w-3 h-3" /> Awaiting Owner
                               </span>
-                              <button
-                                onClick={() => handleExportAccepted([req])}
-                                className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
-                                title="Export to Excel"
-                              >
-                                <FileSpreadsheet className="w-3 h-3" />
-                              </button>
-                            </div>
-                          ) : (
-                            <span className="text-[10px] text-slate-400">{req.status}</span>
-                          )}
-                        </div>
-                      )}
+                            ) : req.status === 'Accepted' || req.status === 'Ordered with Dealer' ? (
+                              <div className="flex items-center justify-end gap-1.5">
+                                <span className="text-[10px] text-emerald-600 font-semibold flex items-center gap-1">
+                                  <CheckCircle2 className="w-3 h-3" /> Approved by Owner
+                                </span>
+                                <button
+                                  onClick={() => handleExportAccepted([req])}
+                                  className="px-2 py-0.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+                                  title="Export to Excel"
+                                >
+                                  <FileSpreadsheet className="w-3 h-3" />
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="text-[10px] text-slate-400">{req.status}</span>
+                            )}
+                          </div>
+                        )}
+
+                        {canUserDelete(req) && (
+                          <button
+                            type="button"
+                            onClick={() => setDeletingRequest(req)}
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition cursor-pointer"
+                            title="Delete this order request"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -2146,6 +2220,16 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
               <kbd className="hidden sm:inline-block text-[9px] font-mono px-1 py-0.5 rounded bg-indigo-700/80 text-indigo-100 border border-indigo-500/50">
                 Ctrl+E
               </kbd>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsDeletingBatch(true)}
+              disabled={isDeletingInProgress}
+              className="px-3.5 py-1.5 bg-rose-600/90 hover:bg-rose-600 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer shadow-sm disabled:opacity-50"
+              title="Delete all selected order requests"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-rose-200" />
+              <span>Delete Selected ({selectedIds.length})</span>
             </button>
             <button
               type="button"
@@ -2508,6 +2592,127 @@ export default function OrderRequestsModule({ brand, user }: OrderRequestsModule
                 <kbd className="hidden sm:inline-block text-[9px] font-mono px-1.5 py-0.5 rounded bg-emerald-700/80 text-emerald-100 border border-emerald-500/50">
                   Ctrl+Enter
                 </kbd>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Single Order Request Confirmation Modal */}
+      {deletingRequest && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-3 bg-rose-100 text-rose-600 rounded-2xl shrink-0">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-slate-900">
+                  Delete Order Request
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Are you sure you want to delete this order request?
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-medium">Part Number:</span>
+                <span className="font-mono font-bold text-slate-900">{deletingRequest.part_no}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-medium">Part Name:</span>
+                <span className="font-semibold text-slate-800 text-right truncate max-w-[200px]">{deletingRequest.part_name}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-medium">Quantity:</span>
+                <span className="font-mono font-bold text-indigo-700">{deletingRequest.quantity} units</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-medium">Status:</span>
+                <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${statusColors[deletingRequest.status]}`}>
+                  {deletingRequest.status}
+                </span>
+              </div>
+              {deletingRequest.customer_name && (
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-400 font-medium">Customer:</span>
+                  <span className="font-medium text-slate-700">{deletingRequest.customer_name}</span>
+                </div>
+              )}
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400 font-medium">Requested By:</span>
+                <span className="font-medium text-slate-700">{deletingRequest.requested_by}</span>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-rose-600 font-medium">
+              This will permanently remove this part from the order requests list.
+            </p>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDeletingRequest(null)}
+                disabled={isDeletingInProgress}
+                className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteSingle}
+                disabled={isDeletingInProgress}
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeletingInProgress ? 'Deleting...' : 'Delete Request'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Batch Order Requests Confirmation Modal */}
+      {isDeletingBatch && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-3 bg-rose-100 text-rose-600 rounded-2xl shrink-0">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-black text-slate-900">
+                  Delete {selectedIds.length} Order Requests?
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Are you sure you want to permanently delete all {selectedIds.length} selected order requests?
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 bg-rose-50 border border-rose-200/70 p-3 rounded-xl">
+              This action cannot be undone. All {selectedIds.length} parts will be removed from the {brand} order pipeline.
+            </p>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setIsDeletingBatch(false)}
+                disabled={isDeletingInProgress}
+                className="px-4 py-2 border border-slate-200 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-50 transition cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteBatch}
+                disabled={isDeletingInProgress}
+                className="px-5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition cursor-pointer flex items-center gap-1.5 shadow-sm disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeletingInProgress ? 'Deleting...' : `Delete ${selectedIds.length} Requests`}</span>
               </button>
             </div>
           </div>
