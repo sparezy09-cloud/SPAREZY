@@ -31,9 +31,11 @@ interface ReturnTarget {
 export default function ReturnModule({ brand, user }: ReturnModuleProps) {
   const [search, setSearch] = useState('');
   const [selectedCustomer, setSelectedCustomer] = useState('All');
+  const [statusFilter, setStatusFilter] = useState<'All' | 'Returnable' | 'Returned'>('All');
   const [returnQty, setReturnQty] = useState<Record<string, number>>({});
   const [toastMessageLocal, setToastMessageLocal] = useState<string | null>(null);
   const [collapsedBills, setCollapsedBills] = useState<Record<string, boolean>>({});
+  const [isLoadingAllSales, setIsLoadingAllSales] = useState(false);
   
   // Modal for confirming return without window.confirm/alert
   const [confirmModalData, setConfirmModalData] = useState<ReturnTarget | null>(null);
@@ -53,6 +55,14 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
   useEffect(() => {
     refreshComponentData();
     setSelectedCustomer('All');
+    if (db.isSupabaseConfigured()) {
+      setIsLoadingAllSales(true);
+      db.loadAllHistory(brand).catch(err => {
+        console.warn("Notice loading all sale history for returns:", err);
+      }).finally(() => {
+        setIsLoadingAllSales(false);
+      });
+    }
     return db.subscribe(refreshComponentData);
   }, [brand]);
 
@@ -100,7 +110,7 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
     }
   };
 
-  // Compile unique customer names for tab filtering
+  // Compile unique customer names for tab filtering across ALL sale bills
   const customerTabs = useMemo(() => {
     const namesSet = new Set<string>();
     salesList.forEach(sale => {
@@ -111,7 +121,38 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
     return ['All', ...Array.from(namesSet).sort()];
   }, [salesList]);
 
-  // Group parts by date of bill, then by bill no.
+  // Overall counts for stats across all sale bills
+  const overallStats = useMemo(() => {
+    const totalBills = salesList.length;
+    const itemsBySaleId: Record<string, SaleItem[]> = {};
+    saleItemsList.forEach(item => {
+      if (!itemsBySaleId[item.sale_id]) itemsBySaleId[item.sale_id] = [];
+      itemsBySaleId[item.sale_id].push(item);
+    });
+
+    let returnableBillsCount = 0;
+    let returnedBillsCount = 0;
+
+    salesList.forEach(sale => {
+      const items = (itemsBySaleId[sale.id] && itemsBySaleId[sale.id].length > 0)
+        ? itemsBySaleId[sale.id]
+        : (sale.items && sale.items.length > 0 ? sale.items : []);
+      
+      const hasReturnable = items.some(it => (Number(it.quantity) || 0) > (Number(it.returned_quantity) || 0));
+      const hasReturned = (sale.has_return || items.some(it => (Number(it.returned_quantity) || 0) > 0));
+
+      if (hasReturnable) returnableBillsCount++;
+      if (hasReturned) returnedBillsCount++;
+    });
+
+    return {
+      totalBills,
+      returnableBillsCount,
+      returnedBillsCount
+    };
+  }, [salesList, saleItemsList]);
+
+  // Group all sale bills by date of bill, then by bill no.
   const groupedByDateAndBill = useMemo(() => {
     const query = search.trim().toLowerCase();
 
@@ -124,70 +165,105 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
       itemsBySaleId[item.sale_id].push(item);
     });
 
+    type PreparedItem = {
+      item: SaleItem;
+      totalQty: number;
+      returnedQty: number;
+      maxReturnable: number;
+      unitPrice: number;
+      isFullyReturned: boolean;
+    };
+
     // Structure: dateKey -> array of bills
     type BillGroup = {
       sale: Sale;
       billNo: string;
-      items: Array<{
-        item: SaleItem;
-        maxReturnable: number;
-        unitPrice: number;
-      }>;
+      items: PreparedItem[];
       totalReturnableCount: number;
+      totalReturnedCount: number;
+      totalItemsCount: number;
+      isFullyReturned: boolean;
+      hasReturnable: boolean;
+      hasReturns: boolean;
     };
 
     const dateMap: Record<string, BillGroup[]> = {};
 
     salesList.forEach(sale => {
       // Filter by customer tab
-      if (selectedCustomer !== 'All' && sale.customer_name.toLowerCase() !== selectedCustomer.toLowerCase()) {
+      if (selectedCustomer !== 'All' && (!sale.customer_name || sale.customer_name.toLowerCase() !== selectedCustomer.toLowerCase())) {
         return;
       }
 
-      const allItemsForSale = itemsBySaleId[sale.id] || [];
+      // Check both saleItemsList and embedded sale.items
+      const allItemsForSale = (itemsBySaleId[sale.id] && itemsBySaleId[sale.id].length > 0)
+        ? itemsBySaleId[sale.id]
+        : (sale.items && sale.items.length > 0 ? sale.items : []);
+
       const billNo = sale.invoice_no || sale.id;
 
-      // Filter items based on search query
-      const matchingItems = allItemsForSale.filter(item => {
-        const maxReturnable = item.quantity - item.returned_quantity;
-        if (maxReturnable <= 0) return false;
-
-        if (!query) return true;
-
-        const matchesItem = 
-          item.part_no.toLowerCase().includes(query) ||
-          item.part_name.toLowerCase().includes(query);
+      // Filter by search query across billNo, customer, date, part_no, and part_name
+      if (query) {
         const matchesBill = 
           billNo.toLowerCase().includes(query) ||
-          sale.customer_name.toLowerCase().includes(query) ||
-          sale.sale_date.toLowerCase().includes(query);
+          (sale.customer_name && sale.customer_name.toLowerCase().includes(query)) ||
+          (sale.sale_date && sale.sale_date.toLowerCase().includes(query));
+        const matchesAnyPart = allItemsForSale.some(it => 
+          it.part_no.toLowerCase().includes(query) ||
+          it.part_name.toLowerCase().includes(query)
+        );
+        if (!matchesBill && !matchesAnyPart) {
+          return;
+        }
+      }
 
-        return matchesItem || matchesBill;
+      const preparedItems: PreparedItem[] = allItemsForSale.map(item => {
+        const totalQty = Number(item.quantity) || 0;
+        const returnedQty = Number(item.returned_quantity) || 0;
+        const maxReturnable = Math.max(0, totalQty - returnedQty);
+        const unitPrice = item.is_net_price && item.net_price !== undefined
+          ? item.net_price
+          : item.mrp * (1 - ((item.discount_percentage || 0) / 100));
+
+        return {
+          item,
+          totalQty,
+          returnedQty,
+          maxReturnable,
+          unitPrice,
+          isFullyReturned: totalQty > 0 && maxReturnable === 0
+        };
       });
 
-      if (matchingItems.length === 0) return;
+      const totalReturnableCount = preparedItems.reduce((acc, curr) => acc + curr.maxReturnable, 0);
+      const totalReturnedCount = preparedItems.reduce((acc, curr) => acc + curr.returnedQty, 0);
+      const hasReturnable = totalReturnableCount > 0;
+      const hasReturns = totalReturnedCount > 0 || !!sale.has_return;
+      const isFullyReturned = preparedItems.length > 0 && totalReturnableCount === 0;
+
+      // Filter by status tab if user selects Returnable or Returned
+      if (statusFilter === 'Returnable' && !hasReturnable) {
+        return;
+      }
+      if (statusFilter === 'Returned' && !hasReturns) {
+        return;
+      }
 
       const dateKey = getDateKey(sale.sale_date || sale.created_at);
       if (!dateMap[dateKey]) {
         dateMap[dateKey] = [];
       }
 
-      const preparedItems = matchingItems.map(item => {
-        const unitPrice = item.mrp * (1 - (item.discount_percentage / 100));
-        return {
-          item,
-          maxReturnable: item.quantity - item.returned_quantity,
-          unitPrice
-        };
-      });
-
-      const totalReturnableCount = preparedItems.reduce((acc, curr) => acc + curr.maxReturnable, 0);
-
       dateMap[dateKey].push({
         sale,
         billNo,
         items: preparedItems,
-        totalReturnableCount
+        totalReturnableCount,
+        totalReturnedCount,
+        totalItemsCount: preparedItems.length,
+        isFullyReturned,
+        hasReturnable,
+        hasReturns
       });
     });
 
@@ -204,6 +280,7 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
 
       const totalPartsInDate = bills.reduce((acc, b) => acc + b.items.length, 0);
       const totalUnitsInDate = bills.reduce((acc, b) => acc + b.totalReturnableCount, 0);
+      const totalReturnedInDate = bills.reduce((acc, b) => acc + b.totalReturnedCount, 0);
 
       return {
         dateKey,
@@ -211,18 +288,19 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
         bills,
         totalBillsCount: bills.length,
         totalPartsCount: totalPartsInDate,
-        totalUnitsCount: totalUnitsInDate
+        totalUnitsCount: totalUnitsInDate,
+        totalReturnedCount: totalReturnedInDate
       };
     });
-  }, [salesList, saleItemsList, search, selectedCustomer]);
+  }, [salesList, saleItemsList, search, selectedCustomer, statusFilter]);
 
-  // Overall counts for stats
+  // Overall counts for stats of the displayed list
   const totalReturnableBills = useMemo(() => {
     return groupedByDateAndBill.reduce((sum, d) => sum + d.totalBillsCount, 0);
   }, [groupedByDateAndBill]);
 
   const totalReturnableParts = useMemo(() => {
-    return groupedByDateAndBill.reduce((sum, d) => sum + d.totalPartsCount, 0);
+    return groupedByDateAndBill.reduce((sum, d) => sum + d.totalUnitsCount, 0);
   }, [groupedByDateAndBill]);
 
   // Toggle single bill expand/collapse
@@ -387,12 +465,69 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
               )}
             </div>
 
+            {/* Status Filter Tabs (All Sale Bills / Returnable Only / With Returns) */}
+            <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-1.5 p-1 bg-slate-100 rounded-xl">
+                <button
+                  onClick={() => setStatusFilter('All')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                    statusFilter === 'All'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <FileText className="w-3.5 h-3.5 text-indigo-600" />
+                  <span>All Sale Bills</span>
+                  <span className={`px-1.5 py-0.2 rounded-full text-[10px] ${statusFilter === 'All' ? 'bg-indigo-50 text-indigo-700 font-black' : 'bg-slate-200/70 text-slate-600 font-bold'}`}>
+                    {overallStats.totalBills}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setStatusFilter('Returnable')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                    statusFilter === 'Returnable'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <Package className="w-3.5 h-3.5 text-orange-600" />
+                  <span>Returnable Bills</span>
+                  <span className={`px-1.5 py-0.2 rounded-full text-[10px] ${statusFilter === 'Returnable' ? 'bg-orange-50 text-orange-700 font-black' : 'bg-slate-200/70 text-slate-600 font-bold'}`}>
+                    {overallStats.returnableBillsCount}
+                  </span>
+                </button>
+
+                <button
+                  onClick={() => setStatusFilter('Returned')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                    statusFilter === 'Returned'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-emerald-600" />
+                  <span>Bills with Returns</span>
+                  <span className={`px-1.5 py-0.2 rounded-full text-[10px] ${statusFilter === 'Returned' ? 'bg-emerald-50 text-emerald-700 font-black' : 'bg-slate-200/70 text-slate-600 font-bold'}`}>
+                    {overallStats.returnedBillsCount}
+                  </span>
+                </button>
+              </div>
+
+              {isLoadingAllSales && (
+                <div className="flex items-center gap-1.5 text-[11px] text-indigo-600 font-medium bg-indigo-50 px-2.5 py-1 rounded-lg">
+                  <span className="w-2 h-2 rounded-full bg-indigo-600 animate-pulse"></span>
+                  <span>Syncing sales from database...</span>
+                </div>
+              )}
+            </div>
+
             {/* Customer Filter Tabs */}
             <div className="space-y-1.5 pt-1">
               <div className="flex items-center justify-between text-[10px] text-slate-400 font-bold uppercase tracking-wider">
                 <span>Filter by Customer:</span>
                 <span className="text-slate-500 font-normal">
-                  Found: <strong>{totalReturnableBills}</strong> bills • <strong>{totalReturnableParts}</strong> returnable part items
+                  Showing: <strong>{totalReturnableBills}</strong> {totalReturnableBills === 1 ? 'bill' : 'bills'} • <strong>{totalReturnableParts}</strong> returnable units
                 </span>
               </div>
               <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none snap-x">
@@ -434,9 +569,15 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
                     <span className="bg-white border border-slate-200 text-slate-700 px-2 py-0.5 rounded-lg font-bold">
                       {dateGroup.totalBillsCount} {dateGroup.totalBillsCount === 1 ? 'Bill' : 'Bills'}
                     </span>
-                    <span className="bg-indigo-50 border border-indigo-200 text-indigo-700 px-2 py-0.5 rounded-lg font-semibold">
-                      {dateGroup.totalPartsCount} {dateGroup.totalPartsCount === 1 ? 'part item' : 'part items'}
-                    </span>
+                    {dateGroup.totalUnitsCount > 0 ? (
+                      <span className="bg-indigo-50 border border-indigo-200 text-indigo-700 px-2 py-0.5 rounded-lg font-semibold">
+                        {dateGroup.totalUnitsCount} returnable {dateGroup.totalUnitsCount === 1 ? 'pc' : 'pcs'}
+                      </span>
+                    ) : (
+                      <span className="bg-emerald-50 border border-emerald-200 text-emerald-700 px-2 py-0.5 rounded-lg font-semibold">
+                        All parts returned ({dateGroup.totalReturnedCount} pcs)
+                      </span>
+                    )}
                   </div>
                 </div>
 
@@ -494,9 +635,27 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
                           </div>
 
                           <div className="flex items-center gap-2 shrink-0">
-                            <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-orange-50 text-orange-700 border border-orange-200">
-                              {billGroup.items.length} {billGroup.items.length === 1 ? 'part' : 'parts'} returnable
-                            </span>
+                            {billGroup.isFullyReturned ? (
+                              <span className="text-[10px] font-bold px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-1">
+                                <CheckCircle className="w-3 h-3 text-emerald-600" />
+                                Fully Returned ({billGroup.totalReturnedCount} pcs)
+                              </span>
+                            ) : billGroup.hasReturnable ? (
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-orange-50 text-orange-700 border border-orange-200">
+                                  {billGroup.totalReturnableCount} pcs returnable
+                                </span>
+                                {billGroup.totalReturnedCount > 0 && (
+                                  <span className="text-[10px] font-bold px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                    {billGroup.totalReturnedCount} returned
+                                  </span>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-[10px] font-medium px-2 py-1 rounded-lg bg-slate-100 text-slate-600 border border-slate-200">
+                                Bill Recorded (₹{sale.total_amount.toFixed(2)})
+                              </span>
+                            )}
                             <div className="w-7 h-7 rounded-lg bg-white border border-slate-200 text-slate-500 flex items-center justify-center">
                               {isCollapsed ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
                             </div>
@@ -505,81 +664,106 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
 
                         {/* Parts List under this Bill */}
                         {!isCollapsed && (
-                          <div className="divide-y divide-slate-100">
-                            {billGroup.items.map(({ item, maxReturnable, unitPrice }) => {
-                              const lineReturnQty = returnQty[item.id] !== undefined ? returnQty[item.id] : 1;
-                              const lineRefundPreview = (unitPrice * (lineReturnQty || 1)).toFixed(2);
+                          <div>
+                            {billGroup.items.length === 0 ? (
+                              <div className="p-4 bg-slate-50/50 text-center text-xs text-slate-500 italic">
+                                Bill total: ₹{sale.total_amount.toFixed(2)} • No individual item lines recorded on this invoice.
+                              </div>
+                            ) : (
+                              <div className="divide-y divide-slate-100">
+                                {billGroup.items.map(({ item, totalQty, returnedQty, maxReturnable, unitPrice, isFullyReturned }) => {
+                                  const lineReturnQty = returnQty[item.id] !== undefined ? returnQty[item.id] : 1;
+                                  const lineRefundPreview = (unitPrice * (lineReturnQty || 1)).toFixed(2);
 
-                              return (
-                                <div 
-                                  key={item.id} 
-                                  className="p-3.5 sm:p-4 hover:bg-slate-50/50 transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs"
-                                >
-                                  {/* Part Info */}
-                                  <div className="min-w-0 space-y-1">
-                                    <div className="flex items-center gap-2">
-                                      <span className="font-mono font-bold text-slate-900 bg-slate-100 px-2 py-0.5 rounded text-xs">
-                                        {item.part_no}
-                                      </span>
-                                      <span className="font-semibold text-slate-800 truncate">
-                                        {item.part_name}
-                                      </span>
-                                    </div>
-                                    <div className="flex items-center gap-3 text-[11px] text-slate-500 flex-wrap">
-                                      <span>Sold: <strong className="text-slate-700">{item.quantity} pcs</strong></span>
-                                      <span>&bull;</span>
-                                      <span>MRP: <strong>₹{item.mrp}</strong> {item.discount_percentage > 0 && `(-${item.discount_percentage}%)`}</span>
-                                      <span>&bull;</span>
-                                      <span>Unit Price: <strong>₹{unitPrice.toFixed(2)}</strong></span>
-                                      {item.returned_quantity > 0 && (
-                                        <>
-                                          <span>&bull;</span>
-                                          <span className="text-amber-700 font-bold bg-amber-50 px-1.5 py-0.2 rounded border border-amber-200">
-                                            {item.returned_quantity} already returned
+                                  return (
+                                    <div 
+                                      key={item.id} 
+                                      className={`p-3.5 sm:p-4 transition flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
+                                        isFullyReturned ? 'bg-slate-50/40 opacity-80' : 'hover:bg-slate-50/50'
+                                      }`}
+                                    >
+                                      {/* Part Info */}
+                                      <div className="min-w-0 space-y-1">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <span className="font-mono font-bold text-slate-900 bg-slate-100 px-2 py-0.5 rounded text-xs">
+                                            {item.part_no}
                                           </span>
-                                        </>
+                                          <span className="font-semibold text-slate-800 truncate">
+                                            {item.part_name}
+                                          </span>
+                                          {isFullyReturned && (
+                                            <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                                              <CheckCircle className="w-3 h-3 text-emerald-600" />
+                                              All Returned
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div className="flex items-center gap-3 text-[11px] text-slate-500 flex-wrap">
+                                          <span>Sold: <strong className="text-slate-700">{totalQty} pcs</strong></span>
+                                          <span>&bull;</span>
+                                          <span>MRP: <strong>₹{item.mrp}</strong> {item.discount_percentage > 0 && `(-${item.discount_percentage}%)`}</span>
+                                          <span>&bull;</span>
+                                          <span>Unit Price: <strong>₹{unitPrice.toFixed(2)}</strong></span>
+                                          {returnedQty > 0 && (
+                                            <>
+                                              <span>&bull;</span>
+                                              <span className="text-emerald-700 font-bold bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                                                {returnedQty} returned
+                                              </span>
+                                            </>
+                                          )}
+                                        </div>
+                                      </div>
+
+                                      {/* Return Inputs & Action */}
+                                      {maxReturnable > 0 ? (
+                                        <div className="flex items-center gap-3 shrink-0 self-end sm:self-center">
+                                          <div className="text-right">
+                                            <div className="text-[10px] text-slate-400 font-medium">Return Qty</div>
+                                            <div className="flex items-center gap-1.5 mt-0.5">
+                                              <input
+                                                type="number"
+                                                min={1}
+                                                max={maxReturnable}
+                                                className="w-16 px-2 py-1 border border-slate-200 rounded-lg text-center font-bold text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                                value={lineReturnQty}
+                                                onChange={(e) => {
+                                                  const val = parseInt(e.target.value, 10);
+                                                  setReturnQty(prev => ({
+                                                    ...prev,
+                                                    [item.id]: isNaN(val) ? 1 : Math.min(maxReturnable, Math.max(1, val))
+                                                  }));
+                                                }}
+                                              />
+                                              <span className="text-[10px] text-slate-400 font-semibold">
+                                                / {maxReturnable}
+                                              </span>
+                                            </div>
+                                          </div>
+
+                                          {/* Action Button */}
+                                          <button
+                                            onClick={() => handleInitiateReturn(sale, item)}
+                                            className="flex items-center gap-1.5 bg-orange-600 hover:bg-orange-700 text-white font-bold px-3 py-2 rounded-xl text-xs transition shadow-xs cursor-pointer active:scale-95 shrink-0"
+                                            title={`Return part and refund ₹${lineRefundPreview}`}
+                                          >
+                                            <RotateCcw className="w-3.5 h-3.5" />
+                                            <span>Return Part</span>
+                                          </button>
+                                        </div>
+                                      ) : (
+                                        <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                                          <span className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold">
+                                            <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                                            All {totalQty} pcs Returned
+                                          </span>
+                                        </div>
                                       )}
                                     </div>
-                                  </div>
-
-                                  {/* Return Inputs & Action */}
-                                  <div className="flex items-center gap-3 shrink-0 self-end sm:self-center">
-                                    <div className="text-right">
-                                      <div className="text-[10px] text-slate-400 font-medium">Return Qty</div>
-                                      <div className="flex items-center gap-1.5 mt-0.5">
-                                        <input
-                                          type="number"
-                                          min={1}
-                                          max={maxReturnable}
-                                          className="w-16 px-2 py-1 border border-slate-200 rounded-lg text-center font-bold text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                                          value={lineReturnQty}
-                                          onChange={(e) => {
-                                            const val = parseInt(e.target.value, 10);
-                                            setReturnQty(prev => ({
-                                              ...prev,
-                                              [item.id]: isNaN(val) ? 1 : Math.min(maxReturnable, Math.max(1, val))
-                                            }));
-                                          }}
-                                        />
-                                        <span className="text-[10px] text-slate-400 font-semibold">
-                                          / {maxReturnable}
-                                        </span>
-                                      </div>
-                                    </div>
-
-                                    {/* Action Button */}
-                                    <button
-                                      onClick={() => handleInitiateReturn(sale, item)}
-                                      className="flex items-center gap-1.5 bg-orange-600 hover:bg-orange-700 text-white font-bold px-3 py-2 rounded-xl text-xs transition shadow-xs cursor-pointer active:scale-95 shrink-0"
-                                      title={`Return part and refund ₹${lineRefundPreview}`}
-                                    >
-                                      <RotateCcw className="w-3.5 h-3.5" />
-                                      <span>Return Part</span>
-                                    </button>
-                                  </div>
-                                </div>
-                              );
-                            })}
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -597,22 +781,23 @@ export default function ReturnModule({ brand, user }: ReturnModuleProps) {
                   <Package className="w-6 h-6" />
                 </div>
                 <div>
-                  <h4 className="text-sm font-bold text-slate-800">No returnable parts found</h4>
+                  <h4 className="text-sm font-bold text-slate-800">No sale bills found</h4>
                   <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
-                    {search || selectedCustomer !== 'All' 
-                      ? 'No bills or parts matched your active search query or customer filter.' 
-                      : 'All items on recorded invoices have already been returned or no sales recorded yet.'}
+                    {search || selectedCustomer !== 'All' || statusFilter !== 'All'
+                      ? 'No bills matched your active search query, customer filter, or status filter.' 
+                      : 'No sale bills recorded yet for this brand.'}
                   </p>
                 </div>
-                {(search || selectedCustomer !== 'All') && (
+                {(search || selectedCustomer !== 'All' || statusFilter !== 'All') && (
                   <button
                     onClick={() => {
                       setSearch('');
                       setSelectedCustomer('All');
+                      setStatusFilter('All');
                     }}
                     className="px-3.5 py-1.5 bg-indigo-50 text-indigo-650 hover:bg-indigo-100 rounded-xl text-xs font-bold transition cursor-pointer"
                   >
-                    Clear Filters
+                    Clear All Filters
                   </button>
                 )}
               </div>

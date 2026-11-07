@@ -1181,7 +1181,7 @@ export const db = {
           // 2. SALES ACCESS CHECK (Egress bounded query to active working window)
           console.log(`[Query Diagnostic] Running sales select for schema: ${b}`);
           const { data: bSales, error: errSales } = await supabase.schema(b).from('sales')
-            .select('id, customer_id, customer_name, customer_category, sale_date, subtotal, discount_percentage, discount_amount, total_amount, payment_status, paid_amount, pending_amount, created_by, created_at')
+            .select('id, invoice_no, customer_id, customer_name, customer_category, sale_date, subtotal, discount_percentage, discount_amount, total_amount, payment_type, payment_status, paid_amount, pending_amount, has_return, returned_items_count, created_by, created_at')
             .order('created_at', { ascending: false })
             .limit(250);
           if (errSales) {
@@ -1206,11 +1206,20 @@ export const db = {
           let errSalesItems: any = null;
           
           if (recentSaleIds.length > 0) {
-            const { data: sItemsData, error: sItemsErr } = await supabase.schema(b).from('sale_items')
-              .select('id, sale_id, part_no, part_name, quantity, mrp, discount_percentage, final_amount, returned_quantity, created_at')
-              .in('sale_id', recentSaleIds.slice(0, 150));
-            bSaleItems = sItemsData || [];
-            errSalesItems = sItemsErr;
+            const chunkSize = 200;
+            for (let i = 0; i < recentSaleIds.length; i += chunkSize) {
+              const chunk = recentSaleIds.slice(i, i + chunkSize);
+              const { data: sItemsData, error: sItemsErr } = await supabase.schema(b).from('sale_items')
+                .select('id, sale_id, part_no, part_name, quantity, mrp, is_net_price, net_price, discount_percentage, final_amount, returned_quantity, created_at')
+                .in('sale_id', chunk);
+              if (sItemsErr) {
+                errSalesItems = sItemsErr;
+                break;
+              }
+              if (sItemsData) {
+                bSaleItems.push(...sItemsData);
+              }
+            }
           }
 
           if (errSalesItems) {
@@ -4620,16 +4629,22 @@ export const db = {
     if (!isSupabaseConfigured || !supabase) return;
     const b = brand.toLowerCase() as 'hyundai' | 'mahindra';
     console.log(`[Egress Optimizer] Loading complete historical archive for ${brand}...`);
-    const [salesRes, purchasesRes, returnsRes] = await Promise.all([
+    const [salesRes, saleItemsRes, purchasesRes, purchaseItemsRes, returnsRes] = await Promise.all([
       supabase.schema(b).from('sales').select('*').order('created_at', { ascending: false }),
+      supabase.schema(b).from('sale_items').select('*'),
       supabase.schema(b).from('purchases').select('*').order('created_at', { ascending: false }),
+      supabase.schema(b).from('purchase_items').select('*'),
       supabase.schema(b).from('returns').select('*').order('return_date', { ascending: false })
     ]);
     if (salesRes.data) cache[b].sales = salesRes.data.map(scrubRow);
+    if (saleItemsRes.data) cache[b].sale_items = saleItemsRes.data.map(scrubRow);
     if (purchasesRes.data) cache[b].purchases = purchasesRes.data.map(scrubRow);
+    if (purchaseItemsRes.data) cache[b].purchase_items = purchaseItemsRes.data.map(scrubRow);
     if (returnsRes.data) cache[b].returns = returnsRes.data.map(scrubRow);
     idbStore.set('cache_partitions', `${b}_sales`, cache[b].sales);
+    idbStore.set('cache_partitions', `${b}_sale_items`, cache[b].sale_items);
     idbStore.set('cache_partitions', `${b}_purchases`, cache[b].purchases);
+    idbStore.set('cache_partitions', `${b}_purchase_items`, cache[b].purchase_items);
     idbStore.set('cache_partitions', `${b}_returns`, cache[b].returns);
     db.notify();
   },
